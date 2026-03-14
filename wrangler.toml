@@ -1,0 +1,23 @@
+account_id = "1ffc231d9346f5e4e4110d4850b28a70"
+name = "elxea-agent"
+main = "src/index.ts"
+compatibility_date = "2025-03-07"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[ai]
+binding = "AI"
+
+[observability]
+enabled = true
+
+# 定期同期（毎日 AM3:00 JST = PM6:00 UTC）
+[triggers]
+crons = ["0 18 * * *"]
+
+# ── Staging 環境 ──
+[env.staging]
+name = "elxea-agent-staging"
+
+[env.staging.ai]
+binding = "AI"
