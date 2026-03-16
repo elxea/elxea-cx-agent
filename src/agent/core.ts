@@ -6,6 +6,13 @@ import {
   logUnansweredQuery,
 } from "../lib/supabase";
 import { lookupMyOrders, getOrderDetail, type OrderDetailResult } from "../lib/shopify";
+import {
+  getCustomerProfile,
+  updateCustomerProfile,
+  addBehaviorEvent,
+  getFirestoreEnv,
+  type BehaviorEvent,
+} from "../lib/firestore";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
@@ -58,6 +65,50 @@ export async function runAgent(
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const supabase = createSupabaseClient(env);
 
+  // Firestore から顧客プロファイルを取得（Firebase 設定がある場合のみ）
+  let customerProfile = null;
+  let firestoreCustomerId: string | null = null;
+  try {
+    const fsEnv = getFirestoreEnv(env);
+    // LINE ユーザー ID から Shopify Customer ID を Supabase 経由で取得
+    const { data: linkage } = await supabase
+      .from("customer_linkages")
+      .select("shopify_customer_id")
+      .eq("line_user_id", lineUserId)
+      .single();
+    if (linkage?.shopify_customer_id) {
+      firestoreCustomerId = String(linkage.shopify_customer_id);
+      customerProfile = await getCustomerProfile(firestoreCustomerId, fsEnv);
+    }
+  } catch {
+    // Firebase 未設定の場合はスキップ（後方互換）
+  }
+
+  // Firestore に LINE メッセージを behavior event として記録（+ シグナル検出）
+  if (firestoreCustomerId) {
+    try {
+      const fsEnv = getFirestoreEnv(env);
+
+      // 基本の line_message イベント
+      const lineEvent: BehaviorEvent = {
+        action: "line_message",
+        channel: "line",
+        metadata: { query: userMessage },
+        personaSignal: null,
+        createdAt: new Date().toISOString(),
+      };
+      addBehaviorEvent(firestoreCustomerId, lineEvent, fsEnv).catch(() => {});
+
+      // 会話シグナル検出 — お茶の種類言及・味の好み・関心トピックを検出
+      const signalEvents = extractLineSignals(userMessage);
+      for (const event of signalEvents) {
+        addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch(() => {});
+      }
+    } catch {
+      // スキップ
+    }
+  }
+
   // ハイブリッド検索（ベクトル + キーワード）
   const knowledgeResults = await searchKnowledgeHybrid(
     supabase,
@@ -87,6 +138,30 @@ export async function runAgent(
     knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n該当する情報が見つかりませんでした。「確認してお返事しますね」と伝え、escalate_to_human ツールを使ってください。`;
   }
 
+  // 顧客プロファイルコンテキスト（Firestore から取得済みの場合）
+  let customerContext = "";
+  if (customerProfile) {
+    const parts: string[] = [];
+    if (customerProfile.displayName) {
+      parts.push(`顧客名: ${customerProfile.displayName}`);
+    }
+    if (customerProfile.membershipTier && customerProfile.membershipTier !== "none") {
+      parts.push(`会員ランク: ${customerProfile.membershipTier}`);
+    }
+    if (customerProfile.persona?.primary) {
+      parts.push(`ペルソナ: ${customerProfile.persona.primary}`);
+    }
+    if (customerProfile.depthLevel) {
+      parts.push(`茶の経験レベル: ${customerProfile.depthLevel}`);
+    }
+    if (customerProfile.tasteProfile?.preferredCategories?.length) {
+      parts.push(`好みのカテゴリ: ${customerProfile.tasteProfile.preferredCategories.join(", ")}`);
+    }
+    if (parts.length > 0) {
+      customerContext = `\n\n## 顧客プロファイル\n${parts.join("\n")}`;
+    }
+  }
+
   // 会話履歴を Claude のメッセージ形式に変換
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((m) => ({
@@ -107,7 +182,7 @@ export async function runAgent(
     const response = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1024,
-      system: SYSTEM_PROMPT + knowledgeContext,
+      system: SYSTEM_PROMPT + customerContext + knowledgeContext,
       tools: AGENT_TOOLS,
       messages,
     });
@@ -309,6 +384,116 @@ async function executeTool(
     console.error(`Tool execution error (${toolUse.name}):`, error);
     return { text: `ツールの実行中にエラーが発生しました。お客様には「確認してお返事します」と伝えてください。` };
   }
+}
+
+// ---------------------------------------------------------------------------
+// LINE 会話シグナル検出
+// ---------------------------------------------------------------------------
+
+/** お茶の種類キーワード（tea_mention） */
+const TEA_MENTION_KEYWORDS = [
+  "ほうじ茶", "hojicha",
+  "緑茶", "sencha", "煎茶",
+  "玉露",
+  "抹茶", "matcha",
+  "烏龍茶", "ウーロン茶", "oolong",
+  "紅茶", "black tea",
+  "白茶", "白茶", "white tea",
+  "プーアル茶", "pu-erh",
+  "ほうじ", "玄米茶", "genmaicha",
+  "かぶせ茶",
+];
+
+/** フレーバー・味覚表現キーワード（flavor_preference） */
+const FLAVOR_KEYWORDS = [
+  "甘い", "甘み", "あまい",
+  "苦い", "苦み", "にがい",
+  "渋い", "渋み",
+  "まろやか",
+  "すっきり",
+  "コク", "深み",
+  "香ばしい", "香り",
+  "フローラル", "floral",
+  "フルーティ", "fruity",
+  "スモーキー", "smoky",
+  "軽い", "さっぱり",
+  "濃い", "こい",
+  "ペアリング", "pairing",
+  "食事に合う",
+];
+
+/** 関心トピックキーワード（topic_interest） */
+const TOPIC_INTEREST_KEYWORDS = [
+  "産地", "農園", "茶畑",
+  "製法", "作り方",
+  "茶師", "生産者", "農家",
+  "新茶", "旬",
+  "おすすめ", "人気",
+  "飲み方", "淹れ方",
+  "リラックス", "くつろぎ",
+  "夜", "朝", "食後",
+  "カフェイン",
+  "栄養", "健康",
+  "ギフト", "プレゼント",
+];
+
+/**
+ * LINE 会話メッセージからお茶関連シグナルを抽出する。
+ *
+ * キーワードマッチングによるルールベース検出。
+ * 1回の会話から複数シグナルが発生する場合もある（例: 茶種 + フレーバー言及）。
+ */
+function extractLineSignals(message: string): BehaviorEvent[] {
+  const normalized = message.toLowerCase();
+  const events: BehaviorEvent[] = [];
+  const now = new Date().toISOString();
+
+  // お茶の種類言及チェック
+  const teaMentions = TEA_MENTION_KEYWORDS.filter((kw) =>
+    normalized.includes(kw.toLowerCase()),
+  );
+  if (teaMentions.length > 0) {
+    events.push({
+      action: "tea_mention",
+      channel: "line",
+      metadata: { query: teaMentions.join(",") },
+      personaSignal: "explorer", // 茶種に興味 → explorer傾向
+      createdAt: now,
+    });
+  }
+
+  // フレーバー・味の好みチェック
+  const flavorHints = FLAVOR_KEYWORDS.filter((kw) =>
+    normalized.includes(kw.toLowerCase()),
+  );
+  if (flavorHints.length > 0) {
+    events.push({
+      action: "flavor_preference",
+      channel: "line",
+      metadata: { query: flavorHints.join(",") },
+      personaSignal: "sensory", // 味覚表現 → sensory傾向
+      createdAt: now,
+    });
+  }
+
+  // 関心トピックチェック
+  const topicHints = TOPIC_INTEREST_KEYWORDS.filter((kw) =>
+    normalized.includes(kw.toLowerCase()),
+  );
+  if (topicHints.length > 0) {
+    // リラックス系は serenity、それ以外は explorer
+    const relaxKeywords = ["リラックス", "くつろぎ", "夜", "食後"];
+    const isSerenity = relaxKeywords.some((kw) => normalized.includes(kw.toLowerCase()));
+    events.push({
+      action: "topic_interest",
+      channel: "line",
+      metadata: { query: topicHints.join(",") },
+      personaSignal: isSerenity ? "serenity" : "explorer",
+      createdAt: now,
+    });
+  }
+
+  return events;
 }
 
 /** カテゴリの日本語ラベル */
