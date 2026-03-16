@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
+import type { SourceType } from "./query-classifier";
 
 export function createSupabaseClient(env: Env): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
@@ -35,7 +36,7 @@ export async function getRecentMessages(
   supabase: SupabaseClient,
   lineUserId: string,
   limit = 20,
-  maxChars = 4000,
+  maxChars = 2500,
 ): Promise<{ role: "user" | "assistant"; content: string }[]> {
   const { data, error } = await supabase
     .from("conversations")
@@ -65,31 +66,40 @@ export async function getRecentMessages(
   return trimmedStart;
 }
 
+/** ナレッジ検索結果の型 */
+export type KnowledgeChunk = {
+  id: string;
+  content: string;
+  source_type: string;
+  source_title: string;
+  similarity: number;
+};
+
 /**
  * ベクトル検索でナレッジを取得。
  *
  * MS3 3.1/3.2: threshold と topK をパラメータ化して
  * チューニング可能にする。
+ *
+ * @param filterSourceType null の場合はフィルタなし（全 source_type を検索）
  */
 export async function searchKnowledge(
   supabase: SupabaseClient,
   embedding: number[],
   topK = 5,
   threshold = 0.5,
-): Promise<
-  {
-    id: string;
-    content: string;
-    source_type: string;
-    source_title: string;
-    similarity: number;
-  }[]
-> {
-  const { data, error } = await supabase.rpc("search_knowledge", {
+  filterSourceType: SourceType = null,
+): Promise<KnowledgeChunk[]> {
+  const params: Record<string, unknown> = {
     query_embedding: embedding,
     match_count: topK,
     match_threshold: threshold,
-  });
+  };
+  if (filterSourceType) {
+    params.filter_source_type = filterSourceType;
+  }
+
+  const { data, error } = await supabase.rpc("search_knowledge", params);
 
   if (error) {
     console.error("Knowledge search failed:", error);
@@ -104,6 +114,8 @@ export async function searchKnowledge(
  *
  * MS3 3.3/3.4: pg_trgm による日本語キーワード検索を
  * ベクトル検索と組み合わせて精度を向上。
+ *
+ * @param filterSourceType null の場合はフィルタなし。classifyQuery() で自動判定した値を渡す。
  */
 export async function searchKnowledgeHybrid(
   supabase: SupabaseClient,
@@ -111,26 +123,24 @@ export async function searchKnowledgeHybrid(
   queryText: string,
   topK = 5,
   threshold = 0.3,
-): Promise<
-  {
-    id: string;
-    content: string;
-    source_type: string;
-    source_title: string;
-    similarity: number;
-  }[]
-> {
-  const { data, error } = await supabase.rpc("search_knowledge_hybrid", {
+  filterSourceType: SourceType = null,
+): Promise<KnowledgeChunk[]> {
+  const params: Record<string, unknown> = {
     query_embedding: embedding,
     query_text: queryText,
     match_count: topK,
     match_threshold: threshold,
-  });
+  };
+  if (filterSourceType) {
+    params.filter_source_type = filterSourceType;
+  }
+
+  const { data, error } = await supabase.rpc("search_knowledge_hybrid", params);
 
   if (error) {
     console.error("Hybrid search failed:", error);
-    // フォールバック: 通常のベクトル検索
-    return searchKnowledge(supabase, embedding, topK, threshold);
+    // フォールバック: 通常のベクトル検索（フィルタも引き継ぐ）
+    return searchKnowledge(supabase, embedding, topK, threshold, filterSourceType);
   }
 
   return data ?? [];

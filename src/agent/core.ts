@@ -5,6 +5,7 @@ import {
   searchKnowledgeHybrid,
   logUnansweredQuery,
 } from "../lib/supabase";
+import { classifyQuery } from "../lib/query-classifier";
 import { lookupMyOrders, getOrderDetail, type OrderDetailResult } from "../lib/shopify";
 import {
   getCustomerProfile,
@@ -14,7 +15,7 @@ import {
   type BehaviorEvent,
 } from "../lib/firestore";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
-import { SYSTEM_PROMPT } from "./system-prompt";
+import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
 
 type Message = {
@@ -109,11 +110,20 @@ export async function runAgent(
     }
   }
 
-  // ハイブリッド検索（ベクトル + キーワード）
+  // クエリカテゴリ判定（メタデータフィルタリング）
+  // 商品・FAQ・コンテンツ等に分類し、検索対象を絞り込む
+  const sourceTypeFilter = classifyQuery(userMessage);
+  console.log(`Query classified as: ${sourceTypeFilter ?? "null (no filter)"}`);
+
+  // ハイブリッド検索（ベクトル + キーワード + メタデータフィルタ）
+  // match_count: 5→3, match_threshold: 0.3→0.4（低品質ヒットのノイズ削減）
   const knowledgeResults = await searchKnowledgeHybrid(
     supabase,
     embedding,
     userMessage,
+    3,
+    0.4,
+    sourceTypeFilter,
   );
 
   // ナレッジ不足検知（MS7 7.6）
@@ -139,6 +149,11 @@ export async function runAgent(
   }
 
   // 顧客プロファイルコンテキスト（Firestore から取得済みの場合）
+  // ペルソナ fragment を動的注入 (MS5 5.3)
+  const personaPrimary = customerProfile?.persona?.primary ?? null;
+  const personaFragment = buildPersonaPromptFragment(personaPrimary);
+
+  // customerContext: 顧客固有データ（personaFragment は第1ブロックでキャッシュするため除外）
   let customerContext = "";
   if (customerProfile) {
     const parts: string[] = [];
@@ -148,17 +163,20 @@ export async function runAgent(
     if (customerProfile.membershipTier && customerProfile.membershipTier !== "none") {
       parts.push(`会員ランク: ${customerProfile.membershipTier}`);
     }
-    if (customerProfile.persona?.primary) {
-      parts.push(`ペルソナ: ${customerProfile.persona.primary}`);
-    }
     if (customerProfile.depthLevel) {
       parts.push(`茶の経験レベル: ${customerProfile.depthLevel}`);
     }
     if (customerProfile.tasteProfile?.preferredCategories?.length) {
       parts.push(`好みのカテゴリ: ${customerProfile.tasteProfile.preferredCategories.join(", ")}`);
     }
+    if (customerProfile.tasteProfile?.flavorPreferences?.length) {
+      parts.push(`好みのフレーバー: ${customerProfile.tasteProfile.flavorPreferences.join(", ")}`);
+    }
+    if (customerProfile.tasteProfile?.scenePref) {
+      parts.push(`好みのシーン: ${customerProfile.tasteProfile.scenePref}`);
+    }
     if (parts.length > 0) {
-      customerContext = `\n\n## 顧客プロファイル\n${parts.join("\n")}`;
+      customerContext = `\n\n## 顧客データ\n${parts.join("\n")}`;
     }
   }
 
@@ -182,10 +200,31 @@ export async function runAgent(
     const response = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1024,
-      system: SYSTEM_PROMPT + customerContext + knowledgeContext,
-      tools: AGENT_TOOLS,
+      system: [
+        {
+          type: "text" as const,
+          text: SYSTEM_PROMPT + personaFragment,
+          cache_control: { type: "ephemeral" as const },
+        },
+        {
+          type: "text" as const,
+          text: customerContext + knowledgeContext,
+        },
+      ],
+      tools: AGENT_TOOLS.map((tool, i) =>
+        i === AGENT_TOOLS.length - 1
+          ? { ...tool, cache_control: { type: "ephemeral" as const } }
+          : tool,
+      ),
       messages,
     });
+    console.log(JSON.stringify({
+      type: "usage",
+      input_tokens: response.usage.input_tokens,
+      output_tokens: response.usage.output_tokens,
+      cache_creation_input_tokens: (response.usage as any).cache_creation_input_tokens || 0,
+      cache_read_input_tokens: (response.usage as any).cache_read_input_tokens || 0,
+    }));
 
     const textBlocks = response.content.filter(
       (b): b is Anthropic.TextBlock => b.type === "text",
