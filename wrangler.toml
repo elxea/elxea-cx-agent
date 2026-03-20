@@ -1,4 +1,4 @@
-account_id = "1ffc231d9346f5e4e4110d4850b28a70"
+account_id = "66e8e422866873db86f63fcf0c09673f"
 name = "elxea-agent"
 main = "src/index.ts"
 compatibility_date = "2025-03-07"

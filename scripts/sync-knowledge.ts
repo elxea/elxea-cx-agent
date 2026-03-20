@@ -400,15 +400,17 @@ function extractTeaMenuText(page: NotionPage): string {
   return parts.join("\n");
 }
 
-/** Content Hub → AI 向けテキスト（Roji 記事のみ） */
-function extractContentHubText(page: NotionPage): string {
+const SYNC_CHANNELS = ["Roji", "LINE CRM"] as const;
+type SyncChannel = (typeof SYNC_CHANNELS)[number];
+
+/** Content Hub → AI 向けテキスト（チャンネル指定） */
+function extractContentHubText(page: NotionPage, targetChannel: SyncChannel): string {
   const p = page.properties;
 
-  // Roji 記事のみ対象
   const channel = extractText(p["Channel"]);
-  if (channel !== "Roji") return "";
+  if (channel !== targetChannel) return "";
 
-  // Published のみ
+  // Published または Ready のみ対象
   const status = extractText(p["Status"]);
   if (status !== "Published" && status !== "Ready") return "";
 
@@ -417,14 +419,16 @@ function extractContentHubText(page: NotionPage): string {
   const title = extractText(p["Title"]);
   if (title) parts.push(`記事タイトル: ${title}`);
 
-  const intro = extractText(p["🌐 Roji: Intro"]);
-  if (intro) parts.push(`イントロ: ${intro}`);
+  if (targetChannel === "Roji") {
+    const intro = extractText(p["🌐 Roji: Intro"]);
+    if (intro) parts.push(`イントロ: ${intro}`);
 
-  const draft = extractText(p["🌐 Roji: Draft"]);
-  if (draft) parts.push(`本文: ${draft}`);
+    const draft = extractText(p["🌐 Roji: Draft"]);
+    if (draft) parts.push(`本文: ${draft}`);
 
-  const metaDesc = extractText(p["🌐 Roji: Meta Description"]);
-  if (metaDesc) parts.push(`概要: ${metaDesc}`);
+    const metaDesc = extractText(p["🌐 Roji: Meta Description"]);
+    if (metaDesc) parts.push(`概要: ${metaDesc}`);
+  }
 
   const brief = extractText(p["Brief"]);
   if (brief) parts.push(`制作指示: ${brief}`);
@@ -612,7 +616,13 @@ const DB_CONFIGS: DBConfig[] = [
     id: CONTENT_HUB_DB,
     sourceType: "article",
     label: "Content Hub（roji 記事）",
-    extractText: extractContentHubText,
+    extractText: (page: NotionPage) => extractContentHubText(page, "Roji"),
+  },
+  {
+    id: CONTENT_HUB_DB,
+    sourceType: "crm",
+    label: "Content Hub（LINE CRM）",
+    extractText: (page: NotionPage) => extractContentHubText(page, "LINE CRM"),
   },
 ];
 

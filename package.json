@@ -9,13 +9,20 @@
     "deploy": "wrangler deploy",
     "deploy:staging": "wrangler deploy --env staging",
     "sync-knowledge": "npx tsx scripts/sync-knowledge.ts",
-    "typecheck": "tsc --noEmit"
+    "setup-rich-menu": "npx tsx scripts/setup-rich-menu.ts",
+    "setup-richmenu": "npx tsx scripts/setup-richmenu.ts",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "npx tsx tests/e2e/run-e2e.ts --all",
+    "test:e2e:scenario": "npx tsx tests/e2e/run-e2e.ts",
+    "test:search-quality": "npx tsx tests/search-quality/run-search-quality.ts",
+    "test:search-quality:discover": "npx tsx tests/search-quality/run-search-quality.ts --discover --verbose"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@line/bot-sdk": "^9.8.0",
     "@supabase/supabase-js": "^2.49.0",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "jose": "^6.2.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250313.0",

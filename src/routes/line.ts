@@ -97,7 +97,19 @@ async function processEvents(
         ).catch(console.error);
       }
     }
-    // フォロー・アンフォローイベントは将来対応（MS6 6.1）
+    // フォローイベント（友だち追加時のウェルカムメッセージ）
+    if (event.type === "follow") {
+      try {
+        await handleFollowEvent(lineUserId, env);
+      } catch (error) {
+        console.error("Error processing follow event:", error);
+      }
+    }
+
+    // アンフォローイベントは現時点ではログのみ
+    if (event.type === "unfollow") {
+      console.log(`User unfollowed: ${lineUserId}`);
+    }
   }
 }
 
@@ -143,6 +155,37 @@ async function handleMessage(
       // 未知のメッセージタイプは無視
       console.log(`Unsupported message type: ${message.type}`);
   }
+}
+
+/**
+ * フォローイベント（友だち追加）のハンドラー。
+ * ウェルカムメッセージ + Quick Reply で初回案内。
+ */
+async function handleFollowEvent(
+  lineUserId: string,
+  env: Env,
+): Promise<void> {
+  const welcomeText =
+    "こんにちは！elxea（エルシア）へようこそ。\n\n" +
+    "鹿児島の生産者から届くお茶やスキンケアについて、何でも気軽に聞いてくださいね。\n\n" +
+    "商品のこと、注文のこと、おすすめが知りたいときなど、お気軽にどうぞ。";
+
+  const quickReplyItems: QuickReplyItem[] = [
+    {
+      type: "action",
+      action: { type: "message", label: "商品を探す", text: "おすすめの商品を教えてください" },
+    },
+    {
+      type: "action",
+      action: { type: "message", label: "注文を確認", text: "注文状況を確認したいです" },
+    },
+    {
+      type: "action",
+      action: { type: "message", label: "お茶について", text: "どんなお茶がありますか？" },
+    },
+  ];
+
+  await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
 }
 
 /** テキストメッセージを処理してエージェントに渡す */

@@ -582,10 +582,13 @@ function extractTeaMenuText(page: NotionPage): string {
   return parts.join("\n");
 }
 
-function extractContentHubText(page: NotionPage): string {
+const SYNC_CHANNELS = ["Roji", "LINE CRM"] as const;
+type SyncChannel = (typeof SYNC_CHANNELS)[number];
+
+function extractContentHubText(page: NotionPage, targetChannel: SyncChannel): string {
   const p = page.properties;
   const channel = extractText(p["Channel"]);
-  if (channel !== "Roji") return "";
+  if (channel !== targetChannel) return "";
   const status = extractText(p["Status"]);
   if (status !== "Published" && status !== "Ready") return "";
 
@@ -596,9 +599,13 @@ function extractContentHubText(page: NotionPage): string {
   };
 
   add("記事タイトル", "Title");
-  add("イントロ", "🌐 Roji: Intro");
-  add("本文", "🌐 Roji: Draft");
-  add("概要", "🌐 Roji: Meta Description");
+
+  if (targetChannel === "Roji") {
+    add("イントロ", "🌐 Roji: Intro");
+    add("本文", "🌐 Roji: Draft");
+    add("概要", "🌐 Roji: Meta Description");
+  }
+
   add("制作指示", "Brief");
   add("公開日", "Published Date");
 
@@ -670,7 +677,14 @@ function getDBConfigs(env: Env): DBConfig[] {
       fallbackId: "16451cee-ec90-4dc0-92d9-85cca2842412",
       sourceType: "article",
       label: "Content Hub（roji 記事）",
-      extractText: extractContentHubText,
+      extractText: (page: NotionPage) => extractContentHubText(page, "Roji"),
+    },
+    {
+      envKey: "NOTION_CONTENT_HUB_DB_ID",
+      fallbackId: "16451cee-ec90-4dc0-92d9-85cca2842412",
+      sourceType: "crm",
+      label: "Content Hub（LINE CRM）",
+      extractText: (page: NotionPage) => extractContentHubText(page, "LINE CRM"),
     },
   ];
 }
