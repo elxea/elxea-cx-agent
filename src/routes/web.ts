@@ -20,6 +20,16 @@ import {
   getClientIp,
 } from "../lib/web-auth";
 
+/** Promise にタイムアウトを設定するユーティリティ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
 
@@ -72,27 +82,38 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
   let result: Awaited<ReturnType<typeof runAgent>>;
   try {
-    // メッセージ保存・履歴取得・Embedding 生成を並列実行
-    const [, history, embedding] = await Promise.all([
-      saveMessage(supabase, {
-        userId: sessionId,
-        channel: "web",
-        role: "user",
-        content: processedMessage,
-      }),
-      getRecentMessages(supabase, sessionId, "web"),
-      createEmbedding(processedMessage, c.env),
-    ]);
-
-    // エージェント実行
-    result = await runAgent(
-      processedMessage,
-      history,
-      embedding,
-      sessionId,
-      "web",
-      c.env,
+    console.log("[web] step=pre-parallel");
+    // メッセージ保存・履歴取得・Embedding 生成を並列実行（各 8 秒タイムアウト）
+    const [, history, embedding] = await withTimeout(
+      Promise.all([
+        saveMessage(supabase, {
+          userId: sessionId,
+          channel: "web",
+          role: "user",
+          content: processedMessage,
+        }),
+        getRecentMessages(supabase, sessionId, "web"),
+        createEmbedding(processedMessage, c.env),
+      ]),
+      8_000,
+      "pre-parallel (saveMessage+history+embedding)",
     );
+
+    console.log("[web] step=runAgent");
+    // エージェント実行（20 秒タイムアウト — Workers の 30 秒制限内に収める）
+    result = await withTimeout(
+      runAgent(
+        processedMessage,
+        history,
+        embedding,
+        sessionId,
+        "web",
+        c.env,
+      ),
+      20_000,
+      "runAgent",
+    );
+    console.log("[web] step=runAgent done");
   } catch (err) {
     console.error("webChatHandler fatal error:", err);
     return c.json(

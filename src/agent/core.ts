@@ -20,6 +20,16 @@ import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
 
+/** Promise にタイムアウトを設定するユーティリティ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 type Message = {
   role: "user" | "assistant";
   content: string;
@@ -82,18 +92,30 @@ export async function runAgent(
   let firestoreCustomerId: string | null = null;
   try {
     const fsEnv = getFirestoreEnv(env);
+    console.log("[agent] step=customer-linkage");
     // ユーザー ID から Shopify Customer ID を Supabase 経由で取得
     // LINE チャネルの場合は line_user_id で検索、Web の場合は将来 shopify_customer_id で検索
     const linkageQuery = channel === "line"
       ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
       : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
-    const { data: linkage } = await linkageQuery;
+    const { data: linkage } = await withTimeout(
+      Promise.resolve(linkageQuery),
+      5_000,
+      "customer_linkages query",
+    );
     if (linkage?.shopify_customer_id) {
       firestoreCustomerId = String(linkage.shopify_customer_id);
-      customerProfile = await getCustomerProfile(firestoreCustomerId, fsEnv);
+      console.log("[agent] step=firestore-profile");
+      customerProfile = await withTimeout(
+        getCustomerProfile(firestoreCustomerId, fsEnv),
+        5_000,
+        "getCustomerProfile",
+      );
     }
-  } catch {
-    // Firebase 未設定の場合はスキップ（後方互換）
+    console.log("[agent] step=customer-linkage done");
+  } catch (err) {
+    // Firebase 未設定 or タイムアウトの場合はスキップ（後方互換）
+    console.warn("[agent] customer profile skipped:", err instanceof Error ? err.message : err);
   }
 
   // Firestore に LINE メッセージを behavior event として記録（+ シグナル検出）
@@ -128,14 +150,20 @@ export async function runAgent(
 
   // ハイブリッド検索（ベクトル + キーワード + メタデータフィルタ）
   // match_count: 5→3, match_threshold: 0.3→0.4（低品質ヒットのノイズ削減）
-  const knowledgeResults = await searchKnowledgeHybrid(
-    supabase,
-    embedding,
-    userMessage,
-    3,
-    0.4,
-    sourceTypeFilter,
+  console.log("[agent] step=hybrid-search");
+  const knowledgeResults = await withTimeout(
+    searchKnowledgeHybrid(
+      supabase,
+      embedding,
+      userMessage,
+      3,
+      0.4,
+      sourceTypeFilter,
+    ),
+    8_000,
+    "searchKnowledgeHybrid",
   );
+  console.log("[agent] step=hybrid-search done, results=" + knowledgeResults.length);
 
   // ナレッジ不足検知（MS7 7.6）
   const maxSimilarity =
@@ -209,27 +237,33 @@ export async function runAgent(
 
   // マルチターンのツールループ
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      system: [
-        {
-          type: "text" as const,
-          text: SYSTEM_PROMPT + personaFragment,
-          cache_control: { type: "ephemeral" as const },
-        },
-        {
-          type: "text" as const,
-          text: customerContext + knowledgeContext,
-        },
-      ],
-      tools: AGENT_TOOLS.map((tool, i) =>
-        i === AGENT_TOOLS.length - 1
-          ? { ...tool, cache_control: { type: "ephemeral" as const } }
-          : tool,
-      ),
-      messages,
-    });
+    console.log(`[agent] step=anthropic turn=${turn}`);
+    const response = await withTimeout(
+      client.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1024,
+        system: [
+          {
+            type: "text" as const,
+            text: SYSTEM_PROMPT + personaFragment,
+            cache_control: { type: "ephemeral" as const },
+          },
+          {
+            type: "text" as const,
+            text: customerContext + knowledgeContext,
+          },
+        ],
+        tools: AGENT_TOOLS.map((tool, i) =>
+          i === AGENT_TOOLS.length - 1
+            ? { ...tool, cache_control: { type: "ephemeral" as const } }
+            : tool,
+        ),
+        messages,
+      }),
+      15_000,
+      `anthropic.messages.create turn=${turn}`,
+    );
+    console.log(`[agent] step=anthropic turn=${turn} done`);
     console.log(JSON.stringify({
       type: "usage",
       input_tokens: response.usage.input_tokens,
