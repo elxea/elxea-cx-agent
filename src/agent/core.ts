@@ -4,6 +4,7 @@ import {
   createSupabaseClient,
   searchKnowledgeHybrid,
   logUnansweredQuery,
+  type Channel,
 } from "../lib/supabase";
 import { classifyQuery } from "../lib/query-classifier";
 import { lookupMyOrders, getOrderDetail, type OrderDetailResult } from "../lib/shopify";
@@ -13,6 +14,7 @@ import {
   addBehaviorEvent,
   getFirestoreEnv,
   type BehaviorEvent,
+  type BehaviorChannel,
 } from "../lib/firestore";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
@@ -32,6 +34,14 @@ type AgentResult = {
   flexMessages?: Array<{
     altText: string;
     contents: Record<string, unknown>;
+  }>;
+  /** チャネル非依存の商品カードデータ（Web チャット等で使用） */
+  productCards?: Array<{
+    name: string;
+    description: string;
+    price: string;
+    imageUrl?: string;
+    productUrl: string;
   }>;
   /** Quick Reply ボタン（テキストメッセージに付与） */
   quickReplies?: Array<{ label: string; text: string }>;
@@ -60,7 +70,8 @@ export async function runAgent(
   userMessage: string,
   conversationHistory: Message[],
   embedding: number[],
-  lineUserId: string,
+  userId: string,
+  channel: Channel,
   env: Env,
 ): Promise<AgentResult> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -71,12 +82,12 @@ export async function runAgent(
   let firestoreCustomerId: string | null = null;
   try {
     const fsEnv = getFirestoreEnv(env);
-    // LINE ユーザー ID から Shopify Customer ID を Supabase 経由で取得
-    const { data: linkage } = await supabase
-      .from("customer_linkages")
-      .select("shopify_customer_id")
-      .eq("line_user_id", lineUserId)
-      .single();
+    // ユーザー ID から Shopify Customer ID を Supabase 経由で取得
+    // LINE チャネルの場合は line_user_id で検索、Web の場合は将来 shopify_customer_id で検索
+    const linkageQuery = channel === "line"
+      ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
+      : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
+    const { data: linkage } = await linkageQuery;
     if (linkage?.shopify_customer_id) {
       firestoreCustomerId = String(linkage.shopify_customer_id);
       customerProfile = await getCustomerProfile(firestoreCustomerId, fsEnv);
@@ -90,18 +101,18 @@ export async function runAgent(
     try {
       const fsEnv = getFirestoreEnv(env);
 
-      // 基本の line_message イベント
-      const lineEvent: BehaviorEvent = {
+      // 基本のメッセージイベント（チャネルに応じて記録）
+      const messageEvent: BehaviorEvent = {
         action: "line_message",
-        channel: "line",
+        channel,
         metadata: { query: userMessage },
         personaSignal: null,
         createdAt: new Date().toISOString(),
       };
-      addBehaviorEvent(firestoreCustomerId, lineEvent, fsEnv).catch(() => {});
+      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch(() => {});
 
       // 会話シグナル検出 — お茶の種類言及・味の好み・関心トピックを検出
-      const signalEvents = extractLineSignals(userMessage);
+      const signalEvents = extractConversationSignals(userMessage, channel);
       for (const event of signalEvents) {
         addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch(() => {});
       }
@@ -193,6 +204,7 @@ export async function runAgent(
   let escalationReason: string | undefined;
   let escalationCategory: string | undefined;
   const flexMessages: Array<{ altText: string; contents: Record<string, unknown> }> = [];
+  const productCards: Array<{ name: string; description: string; price: string; imageUrl?: string; productUrl: string }> = [];
   const usedTools: string[] = [];
 
   // マルチターンのツールループ
@@ -240,7 +252,8 @@ export async function runAgent(
       // ナレッジ不足を記録
       if (isLowKnowledge) {
         logUnansweredQuery(supabase, {
-          lineUserId,
+          userId,
+          channel,
           queryText: userMessage,
           maxSimilarity,
           resultCount: knowledgeResults.length,
@@ -256,6 +269,7 @@ export async function runAgent(
         escalationReason,
         escalationCategory,
         ...(flexMessages.length > 0 ? { flexMessages } : {}),
+        ...(productCards.length > 0 ? { productCards } : {}),
         ...(quickReplies.length > 0 ? { quickReplies } : {}),
       };
     }
@@ -264,7 +278,7 @@ export async function runAgent(
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolUseBlocks) {
-      const execResult = await executeTool(toolUse, lineUserId, env);
+      const execResult = await executeTool(toolUse, userId, channel, env);
       usedTools.push(toolUse.name);
 
       // 注文確認カード Flex Message 追跡
@@ -276,7 +290,7 @@ export async function runAgent(
         });
       }
 
-      // 商品カード Flex Message 追跡
+      // 商品カード追跡（Flex Message + チャネル非依存 productCards）
       if (toolUse.name === "recommend_product") {
         const input = toolUse.input as {
           products: Array<{
@@ -293,6 +307,17 @@ export async function runAgent(
           productUrl: p.product_url,
         }));
 
+        // チャネル非依存の商品カードデータを常に追加
+        for (const p of products) {
+          productCards.push({
+            name: p.name,
+            description: p.description,
+            price: p.price,
+            productUrl: p.productUrl,
+          });
+        }
+
+        // LINE 用の Flex Message も生成（LINE チャネルで使用）
         if (products.length === 1) {
           flexMessages.push({
             altText: `商品のご案内: ${products[0].name}`,
@@ -317,7 +342,8 @@ export async function runAgent(
         escalationReason = input.reason;
         escalationCategory = input.category;
         await notifySlack(
-          lineUserId,
+          userId,
+          channel,
           input.reason,
           input.category,
           input.summary,
@@ -340,7 +366,8 @@ export async function runAgent(
   // ループ上限に達した場合のフォールバック
   if (isLowKnowledge) {
     logUnansweredQuery(supabase, {
-      lineUserId,
+      userId,
+      channel,
       queryText: userMessage,
       maxSimilarity,
       resultCount: knowledgeResults.length,
@@ -396,7 +423,8 @@ function generateQuickReplies(
  */
 async function executeTool(
   toolUse: Anthropic.ToolUseBlock,
-  lineUserId: string,
+  userId: string,
+  channel: Channel,
   env: Env,
 ): Promise<ToolExecResult> {
   try {
@@ -405,7 +433,7 @@ async function executeTool(
         return { text: "オペレーターに通知しました。" };
 
       case "lookup_my_orders":
-        return { text: await lookupMyOrders(lineUserId, env) };
+        return { text: await lookupMyOrders(userId, channel, env) };
 
       case "get_order_detail": {
         const input = toolUse.input as { order_number: string };
@@ -426,7 +454,7 @@ async function executeTool(
 }
 
 // ---------------------------------------------------------------------------
-// LINE 会話シグナル検出
+// 会話シグナル検出（チャネル非依存）
 // ---------------------------------------------------------------------------
 
 /** お茶の種類キーワード（tea_mention） */
@@ -477,12 +505,12 @@ const TOPIC_INTEREST_KEYWORDS = [
 ];
 
 /**
- * LINE 会話メッセージからお茶関連シグナルを抽出する。
+ * 会話メッセージからお茶関連シグナルを抽出する。
  *
  * キーワードマッチングによるルールベース検出。
  * 1回の会話から複数シグナルが発生する場合もある（例: 茶種 + フレーバー言及）。
  */
-function extractLineSignals(message: string): BehaviorEvent[] {
+function extractConversationSignals(message: string, channel: BehaviorChannel): BehaviorEvent[] {
   const normalized = message.toLowerCase();
   const events: BehaviorEvent[] = [];
   const now = new Date().toISOString();
@@ -494,7 +522,7 @@ function extractLineSignals(message: string): BehaviorEvent[] {
   if (teaMentions.length > 0) {
     events.push({
       action: "tea_mention",
-      channel: "line",
+      channel,
       metadata: { query: teaMentions.join(",") },
       personaSignal: "explorer", // 茶種に興味 → explorer傾向
       createdAt: now,
@@ -508,7 +536,7 @@ function extractLineSignals(message: string): BehaviorEvent[] {
   if (flavorHints.length > 0) {
     events.push({
       action: "flavor_preference",
-      channel: "line",
+      channel,
       metadata: { query: flavorHints.join(",") },
       personaSignal: "sensory", // 味覚表現 → sensory傾向
       createdAt: now,
@@ -525,7 +553,7 @@ function extractLineSignals(message: string): BehaviorEvent[] {
     const isSerenity = relaxKeywords.some((kw) => normalized.includes(kw.toLowerCase()));
     events.push({
       action: "topic_interest",
-      channel: "line",
+      channel,
       metadata: { query: topicHints.join(",") },
       personaSignal: isSerenity ? "serenity" : "explorer",
       createdAt: now,
@@ -548,7 +576,8 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 /** Slack にエスカレーション通知を送信 */
 async function notifySlack(
-  lineUserId: string,
+  userId: string,
+  channel: Channel,
   reason: string,
   category: string,
   summary: string,
@@ -560,9 +589,10 @@ async function notifySlack(
   }
 
   const categoryLabel = CATEGORY_LABELS[category] ?? category;
+  const channelLabel = channel === "line" ? "LINE" : "Web";
 
   const payload = {
-    text: `🚨 *エスカレーション* [${categoryLabel}]\n\n*LINE User:* ${lineUserId}\n*分類:* ${categoryLabel}\n*理由:* ${reason}\n*会話要約:* ${summary}`,
+    text: `*エスカレーション* [${categoryLabel}]\n\n*Channel:* ${channelLabel}\n*User:* ${userId}\n*分類:* ${categoryLabel}\n*理由:* ${reason}\n*会話要約:* ${summary}`,
   };
 
   const res = await fetch(env.SLACK_WEBHOOK_URL, {

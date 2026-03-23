@@ -6,19 +6,26 @@ export function createSupabaseClient(env: Env): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 }
 
+/** チャネル型 */
+export type Channel = "line" | "web";
+
 /** 会話履歴を保存 */
 export async function saveMessage(
   supabase: SupabaseClient,
   params: {
-    lineUserId: string;
+    userId: string;
+    channel: Channel;
     role: "user" | "assistant";
     content: string;
+    metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
   const { error } = await supabase.from("conversations").insert({
-    line_user_id: params.lineUserId,
+    user_id: params.userId,
+    channel: params.channel,
     role: params.role,
     content: params.content,
+    ...(params.metadata ? { metadata: params.metadata } : {}),
   });
 
   if (error) {
@@ -34,14 +41,16 @@ export async function saveMessage(
  */
 export async function getRecentMessages(
   supabase: SupabaseClient,
-  lineUserId: string,
+  userId: string,
+  channel: Channel,
   limit = 20,
   maxChars = 2500,
 ): Promise<{ role: "user" | "assistant"; content: string }[]> {
   const { data, error } = await supabase
     .from("conversations")
     .select("role, content")
-    .eq("line_user_id", lineUserId)
+    .eq("user_id", userId)
+    .eq("channel", channel)
     .order("created_at", { ascending: false })
     .limit(limit);
 
@@ -154,7 +163,8 @@ export async function searchKnowledgeHybrid(
 export async function logUnansweredQuery(
   supabase: SupabaseClient,
   params: {
-    lineUserId: string;
+    userId: string;
+    channel: Channel;
     queryText: string;
     maxSimilarity: number;
     resultCount: number;
@@ -162,7 +172,8 @@ export async function logUnansweredQuery(
   },
 ): Promise<void> {
   const { error } = await supabase.from("unanswered_queries").insert({
-    line_user_id: params.lineUserId,
+    user_id: params.userId,
+    channel: params.channel,
     query_text: params.queryText,
     max_similarity: params.maxSimilarity,
     result_count: params.resultCount,

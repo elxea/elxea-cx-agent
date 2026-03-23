@@ -211,11 +211,12 @@ async function handleTextMessage(
   // メッセージ保存・履歴取得・Embedding 生成を全て並列実行
   const [, history, embedding] = await Promise.all([
     saveMessage(supabase, {
-      lineUserId,
+      userId: lineUserId,
+      channel: "line",
       role: "user",
       content: processedMessage,
     }),
-    getRecentMessages(supabase, lineUserId),
+    getRecentMessages(supabase, lineUserId, "line"),
     createEmbedding(processedMessage, env),
   ]);
 
@@ -225,6 +226,7 @@ async function handleTextMessage(
     history,
     embedding,
     lineUserId,
+    "line",
     env,
   );
 
@@ -240,7 +242,8 @@ async function handleTextMessage(
   await Promise.all([
     pushTextMessage(lineUserId, result.response, env, quickReplyItems),
     saveMessage(supabase, {
-      lineUserId,
+      userId: lineUserId,
+      channel: "line",
       role: "assistant",
       content: result.response,
     }),

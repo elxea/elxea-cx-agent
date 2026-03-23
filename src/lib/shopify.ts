@@ -65,20 +65,21 @@ type OrderSummary = {
 };
 
 /**
- * LINE ユーザーの紐付け済み Shopify アカウントから注文履歴を取得。
+ * ユーザーの紐付け済み Shopify アカウントから注文履歴を取得。
  */
 export async function lookupMyOrders(
-  lineUserId: string,
+  userId: string,
+  channel: "line" | "web",
   env: Env,
 ): Promise<string> {
   const supabase = createSupabaseClient(env);
 
   // customer_linkages から Shopify customer ID を取得
-  const { data: linkage, error: linkError } = await supabase
-    .from("customer_linkages")
-    .select("shopify_customer_id, shopify_email")
-    .eq("line_user_id", lineUserId)
-    .single();
+  // LINE チャネルの場合は line_user_id で検索、Web の場合は将来対応
+  const linkageQuery = channel === "line"
+    ? supabase.from("customer_linkages").select("shopify_customer_id, shopify_email").eq("line_user_id", userId).single()
+    : supabase.from("customer_linkages").select("shopify_customer_id, shopify_email").eq("shopify_customer_id", userId).single();
+  const { data: linkage, error: linkError } = await linkageQuery;
 
   if (linkError || !linkage?.shopify_customer_id) {
     return "このLINEアカウントにはShopifyアカウントが紐付けられていません。注文状況の確認には注文番号をお教えください。";

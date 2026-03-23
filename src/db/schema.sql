@@ -33,17 +33,19 @@ create index knowledge_chunks_content_trgm_idx
 create index knowledge_chunks_title_trgm_idx
   on knowledge_chunks using gin (source_title gin_trgm_ops);
 
--- 会話履歴
+-- 会話履歴（v2: チャネル抽象化対応）
 create table conversations (
   id uuid primary key default gen_random_uuid(),
-  line_user_id text not null,
+  user_id text not null,              -- 汎用（line_user_id or session_id）
+  channel text not null default 'line', -- 'line' | 'web'
   role text not null check (role in ('user', 'assistant')),
   content text not null,
+  metadata jsonb,                     -- 商品カード、クイックリプライ等
   created_at timestamptz default now()
 );
 
-create index conversations_user_idx
-  on conversations (line_user_id, created_at desc);
+create index idx_conversations_user_channel
+  on conversations (user_id, channel, created_at desc);
 
 -- 顧客プロフィール（CDP）
 create table customer_profiles (
@@ -67,10 +69,11 @@ create table processed_events (
   processed_at timestamptz default now()
 );
 
--- 未回答クエリ記録テーブル（ナレッジ不足検知）
+-- 未回答クエリ記録テーブル（ナレッジ不足検知）（v2: チャネル抽象化対応）
 create table unanswered_queries (
   id uuid primary key default gen_random_uuid(),
-  line_user_id text not null,
+  user_id text not null,
+  channel text not null default 'line',
   query_text text not null,
   max_similarity float default 0,
   result_count int default 0,
@@ -80,6 +83,20 @@ create table unanswered_queries (
 
 create index unanswered_queries_created_idx
   on unanswered_queries (created_at desc);
+
+-- ユーザー ID 統合マップ（v2: オムニチャネル対応）
+create table user_identity_map (
+  id uuid primary key default gen_random_uuid(),
+  unified_user_id text not null,
+  line_user_id text unique,
+  web_session_id text,
+  shopify_customer_id text unique,
+  linked_at timestamptz default now()
+);
+
+create index idx_identity_map_unified on user_identity_map (unified_user_id);
+create index idx_identity_map_line on user_identity_map (line_user_id);
+create index idx_identity_map_web_session on user_identity_map (web_session_id);
 
 -- ナレッジ検索用の RPC 関数（ベクトル検索のみ）
 create or replace function search_knowledge(
