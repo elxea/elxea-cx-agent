@@ -13,7 +13,9 @@ import {
   createSupabaseClient,
   saveMessage,
   getRecentMessages,
+  getCrossChannelMessages,
 } from "../lib/supabase";
+import { resolveUnifiedUserId } from "../lib/identity";
 
 /** 入力テキストの最大文字数（Embedding + Claude 入力の上限考慮） */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -208,7 +210,13 @@ async function handleTextMessage(
 
   const supabase = createSupabaseClient(env);
 
+  // Identity Resolver: unified_user_id を解決
+  const identity = await resolveUnifiedUserId(supabase, lineUserId, "line");
+  const effectiveUserId = identity.unifiedUserId;
+
   // メッセージ保存・履歴取得・Embedding 生成を全て並列実行
+  // 保存は元の userId (lineUserId) で行い、取得は effectiveUserId で行う
+  // 紐付け済みユーザーはクロスチャネルで会話を取得
   const [, history, embedding] = await Promise.all([
     saveMessage(supabase, {
       userId: lineUserId,
@@ -216,16 +224,18 @@ async function handleTextMessage(
       role: "user",
       content: processedMessage,
     }),
-    getRecentMessages(supabase, lineUserId, "line"),
+    identity.isLinked
+      ? getCrossChannelMessages(supabase, effectiveUserId)
+      : getRecentMessages(supabase, effectiveUserId, "line"),
     createEmbedding(processedMessage, env),
   ]);
 
-  // エージェント実行（Embedding は計算済みを渡す）
+  // エージェント実行（effectiveUserId を渡す）
   const result = await runAgent(
     processedMessage,
     history,
     embedding,
-    lineUserId,
+    effectiveUserId,
     "line",
     env,
   );

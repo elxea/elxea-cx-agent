@@ -13,12 +13,14 @@ import {
   createSupabaseClient,
   saveMessage,
   getRecentMessages,
+  getCrossChannelMessages,
 } from "../lib/supabase";
 import {
   validateSessionId,
   checkRateLimit,
   getClientIp,
 } from "../lib/web-auth";
+import { resolveUnifiedUserId } from "../lib/identity";
 import { withTimeout } from "../lib/utils";
 
 /** 入力テキストの最大文字数 */
@@ -73,8 +75,14 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
   let result: Awaited<ReturnType<typeof runAgent>>;
   try {
+    // Identity Resolver: unified_user_id を解決
+    const identity = await resolveUnifiedUserId(supabase, sessionId, "web");
+    const effectiveUserId = identity.unifiedUserId;
+
     console.log("[web] step=pre-parallel");
     // メッセージ保存・履歴取得・Embedding 生成を並列実行（各 8 秒タイムアウト）
+    // 保存は元の sessionId で行い、取得は effectiveUserId で行う
+    // 紐付け済みユーザーはクロスチャネルで会話を取得
     const [, history, embedding] = await withTimeout(
       Promise.all([
         saveMessage(supabase, {
@@ -83,7 +91,9 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
           role: "user",
           content: processedMessage,
         }),
-        getRecentMessages(supabase, sessionId, "web"),
+        identity.isLinked
+          ? getCrossChannelMessages(supabase, effectiveUserId)
+          : getRecentMessages(supabase, effectiveUserId, "web"),
         createEmbedding(processedMessage, c.env),
       ]),
       8_000,
@@ -97,7 +107,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
         processedMessage,
         history,
         embedding,
-        sessionId,
+        effectiveUserId,
         "web",
         c.env,
       ),
@@ -184,27 +194,84 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
 /**
  * GET /api/chat/history
  *
- * クエリパラメータ: ?session_id=xxx
- * レスポンス: { messages: [...] }
+ * クエリパラメータ:
+ *   - session_id: セッション ID（必須）
+ *   - channel: チャネルフィルター（任意: "line" | "web"、省略時は全チャネル for linked users）
+ * レスポンス: { messages: [...], is_linked: boolean }
  */
 export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const sessionId = c.req.query("session_id");
+  const channelFilter = c.req.query("channel") as "line" | "web" | undefined;
 
   const sessionError = validateSessionId(sessionId);
   if (sessionError) {
     return c.json({ error: sessionError }, 400);
   }
 
+  // channel パラメータのバリデーション
+  if (channelFilter && channelFilter !== "line" && channelFilter !== "web") {
+    return c.json({ error: "channel must be 'line' or 'web'" }, 400);
+  }
+
   const supabase = createSupabaseClient(c.env);
 
-  // メタデータも含めて取得
-  const { data, error } = await supabase
-    .from("conversations")
-    .select("role, content, metadata, created_at")
-    .eq("user_id", sessionId as string)
-    .eq("channel", "web")
-    .order("created_at", { ascending: true })
-    .limit(50);
+  // Identity Resolver: unified_user_id を解決
+  const identity = await resolveUnifiedUserId(supabase, sessionId as string, "web");
+
+  let data: Array<{
+    role: string;
+    content: string;
+    channel: string;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+  }> | null = null;
+  let error: unknown = null;
+
+  if (identity.isLinked) {
+    // 紐付け済み: 全チャネルまたは指定チャネルの会話を取得
+    // user_identity_map から紐づいた全 user_id を収集
+    const { data: identityData } = await supabase
+      .from("user_identity_map")
+      .select("unified_user_id, line_user_id, web_session_id")
+      .eq("unified_user_id", identity.unifiedUserId)
+      .single();
+
+    const userIds: string[] = [identity.unifiedUserId];
+    if (identityData?.line_user_id && identityData.line_user_id !== identity.unifiedUserId) {
+      userIds.push(identityData.line_user_id);
+    }
+    if (identityData?.web_session_id && identityData.web_session_id !== identity.unifiedUserId) {
+      userIds.push(identityData.web_session_id);
+    }
+
+    let query = supabase
+      .from("conversations")
+      .select("role, content, channel, metadata, created_at")
+      .in("user_id", userIds);
+
+    if (channelFilter) {
+      query = query.eq("channel", channelFilter);
+    }
+
+    const result = await query
+      .order("created_at", { ascending: true })
+      .limit(50);
+
+    data = result.data;
+    error = result.error;
+  } else {
+    // 未紐付け: 従来通り sessionId + web チャネルのみ
+    const result = await supabase
+      .from("conversations")
+      .select("role, content, channel, metadata, created_at")
+      .eq("user_id", sessionId as string)
+      .eq("channel", channelFilter ?? "web")
+      .order("created_at", { ascending: true })
+      .limit(50);
+
+    data = result.data;
+    error = result.error;
+  }
 
   if (error) {
     console.error("Failed to fetch chat history:", error);
@@ -214,6 +281,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const messages = (data ?? []).map((row) => ({
     role: row.role,
     content: row.content,
+    channel: row.channel,
     created_at: row.created_at,
     ...(row.metadata?.product_cards
       ? { product_cards: row.metadata.product_cards }
@@ -223,5 +291,5 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
       : {}),
   }));
 
-  return c.json({ messages });
+  return c.json({ messages, is_linked: identity.isLinked });
 }
