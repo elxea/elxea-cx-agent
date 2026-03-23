@@ -69,27 +69,37 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
 
   const supabase = createSupabaseClient(c.env);
 
-  // メッセージ保存・履歴取得・Embedding 生成を並列実行
-  const [, history, embedding] = await Promise.all([
-    saveMessage(supabase, {
-      userId: sessionId,
-      channel: "web",
-      role: "user",
-      content: processedMessage,
-    }),
-    getRecentMessages(supabase, sessionId, "web"),
-    createEmbedding(processedMessage, c.env),
-  ]);
+  // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
+  let result: Awaited<ReturnType<typeof runAgent>>;
+  try {
+    // メッセージ保存・履歴取得・Embedding 生成を並列実行
+    const [, history, embedding] = await Promise.all([
+      saveMessage(supabase, {
+        userId: sessionId,
+        channel: "web",
+        role: "user",
+        content: processedMessage,
+      }),
+      getRecentMessages(supabase, sessionId, "web"),
+      createEmbedding(processedMessage, c.env),
+    ]);
 
-  // エージェント実行
-  const result = await runAgent(
-    processedMessage,
-    history,
-    embedding,
-    sessionId,
-    "web",
-    c.env,
-  );
+    // エージェント実行
+    result = await runAgent(
+      processedMessage,
+      history,
+      embedding,
+      sessionId,
+      "web",
+      c.env,
+    );
+  } catch (err) {
+    console.error("webChatHandler fatal error:", err);
+    return c.json(
+      { error: "Internal server error" },
+      500,
+    );
+  }
 
   // アシスタント応答を保存（メタデータ付き）
   const metadata: Record<string, unknown> = {};
