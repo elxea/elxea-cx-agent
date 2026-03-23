@@ -17,10 +17,14 @@ import {
 } from "../lib/supabase";
 import {
   validateSessionId,
+  validateShopifyCustomerId,
   checkRateLimit,
   getClientIp,
 } from "../lib/web-auth";
-import { resolveUnifiedUserId } from "../lib/identity";
+import {
+  resolveUnifiedUserId,
+  resolveWithShopifyCustomerId,
+} from "../lib/identity";
 import { withTimeout } from "../lib/utils";
 
 /** 入力テキストの最大文字数 */
@@ -44,19 +48,25 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   }
 
   // リクエストボディのパース
-  let body: { message?: string; session_id?: string };
+  let body: { message?: string; session_id?: string; shopify_customer_id?: string };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { message, session_id } = body;
+  const { message, session_id, shopify_customer_id } = body;
 
   // session_id バリデーション
   const sessionError = validateSessionId(session_id);
   if (sessionError) {
     return c.json({ error: sessionError }, 400);
+  }
+
+  // shopify_customer_id バリデーション（optional）
+  const shopifyError = validateShopifyCustomerId(shopify_customer_id);
+  if (shopifyError) {
+    return c.json({ error: shopifyError }, 400);
   }
 
   // message バリデーション
@@ -76,7 +86,11 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   let result: Awaited<ReturnType<typeof runAgent>>;
   try {
     // Identity Resolver: unified_user_id を解決
-    const identity = await resolveUnifiedUserId(supabase, sessionId, "web");
+    // ログイン済み（shopify_customer_id あり）→ Shopify Customer ID ベースで解決
+    // 未ログイン → 従来の session_id ベースで解決
+    const identity = shopify_customer_id
+      ? await resolveWithShopifyCustomerId(supabase, shopify_customer_id, sessionId)
+      : await resolveUnifiedUserId(supabase, sessionId, "web");
     const effectiveUserId = identity.unifiedUserId;
 
     console.log("[web] step=pre-parallel");

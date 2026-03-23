@@ -1,8 +1,9 @@
 /**
  * Web Chat 認証・レートリミット。
  *
- * 初期実装: session_id の UUID 形式バリデーション + IP ベースレートリミット。
- * 将来: Shopify OAuth トークン検証を追加予定。
+ * - session_id: UUID v4 形式のバリデーション
+ * - shopify_customer_id: Shopify GID 形式の検証（ログイン済みユーザー）
+ * - IP ベースレートリミット
  */
 
 /** UUID v4 形式のバリデーション */
@@ -77,6 +78,33 @@ export function checkRateLimit(ip: string): string | null {
     return "Rate limit exceeded. Please wait a moment before sending another message.";
   }
 
+  return null;
+}
+
+/**
+ * Shopify Customer GID 形式のバリデーション。
+ *
+ * Shopify Customer Account API は `gid://shopify/Customer/<numeric_id>` 形式の ID を返す。
+ * null/undefined は未ログインとして許可する（optional フィールド）。
+ * 文字列が渡された場合は形式を検証する。
+ *
+ * @returns null なら有効（未指定 or 正しい形式）。文字列ならエラーメッセージ。
+ */
+const SHOPIFY_GID_REGEX = /^gid:\/\/shopify\/Customer\/\d+$/;
+
+export function validateShopifyCustomerId(
+  customerId: unknown,
+): string | null {
+  // 未指定は OK（未ログインユーザー）
+  if (customerId === undefined || customerId === null || customerId === "") {
+    return null;
+  }
+  if (typeof customerId !== "string") {
+    return "shopify_customer_id must be a string";
+  }
+  if (!SHOPIFY_GID_REGEX.test(customerId)) {
+    return "shopify_customer_id must be a valid Shopify Customer GID (gid://shopify/Customer/<id>)";
+  }
   return null;
 }
 
