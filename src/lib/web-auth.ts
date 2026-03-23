@@ -40,8 +40,31 @@ const RATE_LIMIT_MAX_REQUESTS = 10; // 10req/min
  * IP アドレスに基づくレートリミットチェック。
  * @returns null なら許可。文字列ならエラーメッセージ。
  */
+/** Map サイズ上限（H-2 メモリリーク対策） */
+const RATE_LIMIT_MAP_MAX_SIZE = 10_000;
+
 export function checkRateLimit(ip: string): string | null {
   const now = Date.now();
+
+  // Map サイズが上限を超えたら期限切れエントリを掃除
+  if (rateLimitMap.size > RATE_LIMIT_MAP_MAX_SIZE) {
+    for (const [key, val] of rateLimitMap) {
+      if (now >= val.resetAt) {
+        rateLimitMap.delete(key);
+      }
+    }
+    // 掃除後もまだ上限超えなら、最も古いエントリを半分削除
+    if (rateLimitMap.size > RATE_LIMIT_MAP_MAX_SIZE) {
+      const toDelete = Math.floor(rateLimitMap.size / 2);
+      let deleted = 0;
+      for (const key of rateLimitMap.keys()) {
+        if (deleted >= toDelete) break;
+        rateLimitMap.delete(key);
+        deleted++;
+      }
+    }
+  }
+
   const entry = rateLimitMap.get(ip);
 
   if (!entry || now >= entry.resetAt) {

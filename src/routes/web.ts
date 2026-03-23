@@ -19,16 +19,7 @@ import {
   checkRateLimit,
   getClientIp,
 } from "../lib/web-auth";
-
-/** Promise にタイムアウトを設定するユーティリティ */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${ms}ms`)), ms),
-    ),
-  ]);
-}
+import { withTimeout } from "../lib/utils";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;

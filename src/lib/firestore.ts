@@ -88,8 +88,22 @@ function firestoreBaseUrl(projectId: string): string {
   return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
 }
 
+// ---------------------------------------------------------------------------
+// アクセストークンキャッシュ（C-1 修正）
+// モジュールレベルでキャッシュし、有効期限 - 60秒マージンまで再利用する。
+// Cloudflare Workers では同一 isolate 内で有効。
+// ---------------------------------------------------------------------------
+let cachedToken: string | null = null;
+let cachedTokenExpiresAt = 0; // Unix ms
+
 /** サービスアカウントから OAuth2 アクセストークンを取得（JWT → Google OAuth2） */
 async function getAccessToken(env: FirestoreEnv): Promise<string> {
+  // キャッシュが有効ならそのまま返す（60秒のマージンを確保）
+  const now = Date.now();
+  if (cachedToken && now < cachedTokenExpiresAt) {
+    return cachedToken;
+  }
+
   const { FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = env;
 
   // 秘密鍵は Cloudflare Secrets で \n が文字列になっているため変換
@@ -97,7 +111,7 @@ async function getAccessToken(env: FirestoreEnv): Promise<string> {
 
   const key = await importPKCS8(privateKey, "RS256");
 
-  const now = Math.floor(Date.now() / 1000);
+  const nowSec = Math.floor(now / 1000);
   const jwt = await new SignJWT({
     scope: "https://www.googleapis.com/auth/datastore",
   })
@@ -105,8 +119,8 @@ async function getAccessToken(env: FirestoreEnv): Promise<string> {
     .setIssuer(FIREBASE_CLIENT_EMAIL)
     .setSubject(FIREBASE_CLIENT_EMAIL)
     .setAudience("https://oauth2.googleapis.com/token")
-    .setIssuedAt(now)
-    .setExpirationTime(now + 3600)
+    .setIssuedAt(nowSec)
+    .setExpirationTime(nowSec + 3600)
     .sign(key);
 
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -123,8 +137,17 @@ async function getAccessToken(env: FirestoreEnv): Promise<string> {
     throw new Error(`Failed to get Firebase access token: ${err}`);
   }
 
-  const tokenData = (await tokenRes.json()) as { access_token: string };
-  return tokenData.access_token;
+  const tokenData = (await tokenRes.json()) as {
+    access_token: string;
+    expires_in?: number;
+  };
+
+  // キャッシュに保存（expires_in が返されない場合は 3600秒と仮定、60秒マージン）
+  const expiresInMs = ((tokenData.expires_in ?? 3600) - 60) * 1000;
+  cachedToken = tokenData.access_token;
+  cachedTokenExpiresAt = now + expiresInMs;
+
+  return cachedToken;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +245,19 @@ export function getFirestoreEnv(env: Env): FirestoreEnv {
 }
 
 // ---------------------------------------------------------------------------
+// バリデーション
+// ---------------------------------------------------------------------------
+
+/** shopifyCustomerId が数値のみで構成されることを検証（M-4 修正） */
+function validateShopifyCustomerId(id: string): void {
+  if (!/^\d+$/.test(id)) {
+    throw new Error(
+      `Invalid shopifyCustomerId: expected numeric string, got "${id}"`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CRUD 関数
 // ---------------------------------------------------------------------------
 
@@ -235,6 +271,7 @@ export async function getCustomerProfile(
   shopifyCustomerId: string,
   env: FirestoreEnv,
 ): Promise<CustomerProfile | null> {
+  validateShopifyCustomerId(shopifyCustomerId);
   const { FIREBASE_PROJECT_ID } = env;
   const accessToken = await getAccessToken(env);
   const url = `${firestoreBaseUrl(FIREBASE_PROJECT_ID)}/users/${shopifyCustomerId}`;
@@ -277,6 +314,7 @@ export async function updateCustomerProfile(
   updates: Partial<CustomerProfile>,
   env: FirestoreEnv,
 ): Promise<void> {
+  validateShopifyCustomerId(shopifyCustomerId);
   const { FIREBASE_PROJECT_ID } = env;
   const accessToken = await getAccessToken(env);
 
@@ -323,6 +361,7 @@ export async function addBehaviorEvent(
   event: BehaviorEvent,
   env: FirestoreEnv,
 ): Promise<void> {
+  validateShopifyCustomerId(shopifyCustomerId);
   const { FIREBASE_PROJECT_ID } = env;
   const accessToken = await getAccessToken(env);
 
@@ -366,6 +405,7 @@ export async function getRecentBehaviors(
   env: FirestoreEnv,
   limit = 20,
 ): Promise<BehaviorEvent[]> {
+  validateShopifyCustomerId(shopifyCustomerId);
   const { FIREBASE_PROJECT_ID } = env;
   const accessToken = await getAccessToken(env);
 

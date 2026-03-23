@@ -19,16 +19,7 @@ import {
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
-
-/** Promise にタイムアウトを設定するユーティリティ */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout: ${label} exceeded ${ms}ms`)), ms),
-    ),
-  ]);
-}
+import { withTimeout } from "../lib/utils";
 
 type Message = {
   role: "user" | "assistant";
@@ -131,12 +122,16 @@ export async function runAgent(
         personaSignal: null,
         createdAt: new Date().toISOString(),
       };
-      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch(() => {});
+      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch((err) => {
+        console.warn("[agent] addBehaviorEvent (message) failed:", err instanceof Error ? err.message : err);
+      });
 
       // 会話シグナル検出 — お茶の種類言及・味の好み・関心トピックを検出
       const signalEvents = extractConversationSignals(userMessage, channel);
       for (const event of signalEvents) {
-        addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch(() => {});
+        addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch((err) => {
+          console.warn("[agent] addBehaviorEvent (signal) failed:", err instanceof Error ? err.message : err);
+        });
       }
     } catch {
       // スキップ

@@ -37,19 +37,23 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/", (c) => c.json({ status: "ok", service: "elxea-agent" }));
 
-// CORS for Web Chat API
-app.use(
-  "/api/*",
-  cors({
-    origin: [
-      "https://www.elxea.com",
-      "https://elxea.com",
-      "http://localhost:3000",
-    ],
+// CORS for Web Chat API（M-1: localhost は開発環境のみ許可）
+app.use("/api/*", async (c, next) => {
+  const allowedOrigins = [
+    "https://www.elxea.com",
+    "https://elxea.com",
+  ];
+  // ENVIRONMENT 環境変数が "development" の場合のみ localhost を許可
+  if ((c.env as Env & { ENVIRONMENT?: string }).ENVIRONMENT === "development") {
+    allowedOrigins.push("http://localhost:3000");
+  }
+  const middleware = cors({
+    origin: allowedOrigins,
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
-  }),
-);
+  });
+  return middleware(c, next);
+});
 
 app.post("/webhook/line", lineWebhook);
 
