@@ -141,54 +141,47 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     }),
   );
 
-  // SSE ストリーミングレスポンス
-  const stream = new ReadableStream({
-    start(controller) {
-      const encoder = new TextEncoder();
+  // SSE レスポンスを文字列として構築し、一括返却
+  // （ReadableStream は Cloudflare Workers 本番でハングするため回避）
+  const events: string[] = [];
 
-      function send(data: Record<string, unknown>) {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(data)}\n\n`),
-        );
-      }
+  function pushEvent(data: Record<string, unknown>) {
+    events.push(`data: ${JSON.stringify(data)}\n\n`);
+  }
 
-      // テキストをチャンクに分割して text_delta イベントとして送信
-      const text = result.response;
-      for (let i = 0; i < text.length; i += TEXT_CHUNK_SIZE) {
-        const chunk = text.slice(i, i + TEXT_CHUNK_SIZE);
-        send({ type: "text_delta", content: chunk });
-      }
+  // テキストをチャンクに分割して text_delta イベントとして送信
+  const text = result.response;
+  for (let i = 0; i < text.length; i += TEXT_CHUNK_SIZE) {
+    const chunk = text.slice(i, i + TEXT_CHUNK_SIZE);
+    pushEvent({ type: "text_delta", content: chunk });
+  }
 
-      // 商品カード
-      if (result.productCards && result.productCards.length > 0) {
-        send({
-          type: "product_card",
-          products: result.productCards.map((p) => ({
-            name: p.name,
-            price: p.price,
-            url: p.productUrl,
-            image: p.imageUrl ?? null,
-            description: p.description,
-          })),
-        });
-      }
+  // 商品カード
+  if (result.productCards && result.productCards.length > 0) {
+    pushEvent({
+      type: "product_card",
+      products: result.productCards.map((p) => ({
+        name: p.name,
+        price: p.price,
+        url: p.productUrl,
+        image: p.imageUrl ?? null,
+        description: p.description,
+      })),
+    });
+  }
 
-      // クイックリプライ
-      if (result.quickReplies && result.quickReplies.length > 0) {
-        send({
-          type: "quick_replies",
-          items: result.quickReplies,
-        });
-      }
+  // クイックリプライ
+  if (result.quickReplies && result.quickReplies.length > 0) {
+    pushEvent({
+      type: "quick_replies",
+      items: result.quickReplies,
+    });
+  }
 
-      // 完了
-      send({ type: "done", session_id: sessionId });
+  // 完了
+  pushEvent({ type: "done", session_id: sessionId });
 
-      controller.close();
-    },
-  });
-
-  return new Response(stream, {
+  return new Response(events.join(""), {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
