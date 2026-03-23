@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { lineWebhook } from "./routes/line";
+import { webChatHandler, webChatHistoryHandler } from "./routes/web";
 import { runKnowledgeSync } from "./sync/knowledge";
 
 export type Env = {
@@ -35,7 +37,25 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/", (c) => c.json({ status: "ok", service: "elxea-agent" }));
 
+// CORS for Web Chat API
+app.use(
+  "/api/*",
+  cors({
+    origin: [
+      "https://www.elxea.com",
+      "https://elxea.com",
+      "http://localhost:3000",
+    ],
+    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  }),
+);
+
 app.post("/webhook/line", lineWebhook);
+
+// Web Chat routes
+app.post("/api/chat", webChatHandler);
+app.get("/api/chat/history", webChatHistoryHandler);
 
 /**
  * 手動同期 API（MS4 4.6）。
