@@ -599,6 +599,9 @@ function extractContentHubText(page: NotionPage, targetChannel: SyncChannel): st
   };
 
   add("記事タイトル", "Title");
+  add("ペルソナ", "content_persona");
+  add("深度レベル", "depth_level");
+  add("ターゲットレイヤー", "target_layer");
 
   if (targetChannel === "Roji") {
     add("イントロ", "🌐 Roji: Intro");
