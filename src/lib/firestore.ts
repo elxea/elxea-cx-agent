@@ -39,6 +39,13 @@ export type TasteProfile = {
   scenePref: string | null;
 };
 
+export type OnboardingStatus = {
+  completedAt: string | null;
+  initialAction: "view_tea" | "explore_tea" | "about" | "howto" | "none" | null;
+  twoWeekQuestionAnswered?: boolean;
+  twoWeekAnswer?: string | null;
+};
+
 export type CustomerProfile = {
   lineUserId?: string | null;
   email?: string;
@@ -47,6 +54,7 @@ export type CustomerProfile = {
   persona?: PersonaProfile;
   depthLevel?: DepthLevel;
   tasteProfile?: TasteProfile;
+  onboarding?: OnboardingStatus;
   createdAt?: string;
   lastActiveAt?: string;
 };
