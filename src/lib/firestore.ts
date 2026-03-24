@@ -562,12 +562,14 @@ export async function recordBehaviorEvent(
  * @param signals 抽出された嗜好シグナル
  * @param existingProfile 現在の顧客プロファイル（null 可）
  * @param env Firestore 環境変数
+ * @param weight シグナルごとのスコア加算値（デフォルト 1。購入データは 3）
  */
 export async function updateTasteProfile(
   shopifyCustomerId: string,
   signals: PreferenceSignals,
   existingProfile: CustomerProfile | null,
   env: FirestoreEnv,
+  weight = 1,
 ): Promise<Partial<CustomerProfile>> {
   const updates: Partial<CustomerProfile> = {};
 
@@ -619,9 +621,9 @@ export async function updateTasteProfile(
 
     const scores = { ...existingPersona.scores };
 
-    // 各シグナルに +1
+    // 各シグナルに +weight（会話: +1, 購入: +3）
     for (const signal of signals.persona_signals) {
-      scores[signal] = (scores[signal] ?? 0) + 1;
+      scores[signal] = (scores[signal] ?? 0) + weight;
     }
 
     // primary を再計算（最大スコアのペルソナ）

@@ -1,8 +1,13 @@
 /**
- * 嗜好抽出パイプライン — 会話完了後に非同期実行する。
+ * 嗜好抽出パイプライン — 会話完了後・購入完了後に非同期実行する。
  *
- * extractPreferences() で嗜好を抽出し、updateTasteProfile() で Firestore を更新する。
- * 紐付け済みユーザー（Shopify Customer ID が解決可能）のみ実行する。
+ * 会話パイプライン:
+ *   extractPreferences() で嗜好を抽出し、updateTasteProfile() で Firestore を更新する。
+ *   紐付け済みユーザー（Shopify Customer ID が解決可能）のみ実行する。
+ *
+ * 購入パイプライン:
+ *   Shopify 商品タグからペルソナシグナルを抽出し、+3 の重みでスコア加算する。
+ *   購入は実行動であり、会話での言及（+1）より強いシグナルとみなす。
  *
  * fire-and-forget で呼ぶことを想定:
  *   - Web: c.executionCtx.waitUntil(runPreferencePipeline(...))
@@ -16,10 +21,15 @@ import {
   getFirestoreEnv,
   getCustomerProfile,
   updateTasteProfile,
+  updateCustomerProfile,
   type FirestoreEnv,
 } from "./firestore";
 import { syncAfterProfileUpdate } from "../sync/shopify-metafield";
 import type { Channel } from "./supabase";
+import {
+  buildPurchaseSignals,
+  PURCHASE_SIGNAL_WEIGHT,
+} from "./purchase-signals";
 
 /**
  * 嗜好抽出 + プロファイル更新パイプライン。
@@ -97,6 +107,90 @@ export async function runPreferencePipeline(
     // fire-and-forget なのでエラーはログのみ
     console.warn(
       "[preference-pipeline] failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 購入データ反映パイプライン
+// ---------------------------------------------------------------------------
+
+/**
+ * 購入完了時にペルソナスコアを更新するパイプライン。
+ *
+ * Shopify orders webhook から呼ばれることを想定。
+ * 購入商品のタグからペルソナシグナルを抽出し、会話より重い +3 でスコア加算する。
+ *
+ * @param shopifyCustomerId Shopify の数値顧客 ID
+ * @param lineItems 購入商品リスト（各商品のタグ配列を含む）
+ * @param env Cloudflare Workers 環境変数
+ */
+export async function runPurchasePreferencePipeline(
+  shopifyCustomerId: string,
+  lineItems: Array<{ productTags: string[] }>,
+  env: Env,
+): Promise<void> {
+  try {
+    // Firestore 設定チェック
+    let fsEnv: FirestoreEnv;
+    try {
+      fsEnv = getFirestoreEnv(env);
+    } catch {
+      // Firebase 未設定 — スキップ
+      return;
+    }
+
+    // 全商品のタグからシグナルを生成
+    const allProductTags = lineItems.map((item) => item.productTags);
+    const signals = buildPurchaseSignals(allProductTags);
+
+    if (!signals) {
+      // マッピング可能なタグなし — スキップ
+      console.log(
+        `[purchase-pipeline] No mappable tags found for customer ${shopifyCustomerId}`,
+      );
+      return;
+    }
+
+    // 既存プロファイルを取得
+    const existingProfile = await getCustomerProfile(shopifyCustomerId, fsEnv);
+
+    // マージして更新（購入シグナルは +3 の重み）
+    const profileUpdates = await updateTasteProfile(
+      shopifyCustomerId,
+      signals,
+      existingProfile,
+      fsEnv,
+      PURCHASE_SIGNAL_WEIGHT,
+    );
+
+    // lastPurchaseAt を更新
+    await updateCustomerProfile(
+      shopifyCustomerId,
+      { lastPurchaseAt: new Date().toISOString() },
+      fsEnv,
+    );
+
+    console.log(
+      `[purchase-pipeline] Profile updated for customer ${shopifyCustomerId}: ` +
+      `categories=${signals.preferred_categories.length}, ` +
+      `flavors=${signals.flavor_preferences.length}, ` +
+      `persona_signals=${signals.persona_signals.length} (weight=${PURCHASE_SIGNAL_WEIGHT})`,
+    );
+
+    // Shopify metafield への即時同期（fire-and-forget）
+    const mergedProfile = { ...existingProfile, ...profileUpdates };
+    syncAfterProfileUpdate(shopifyCustomerId, mergedProfile, env).catch((err) => {
+      console.warn(
+        "[purchase-pipeline] Shopify metafield sync failed (non-blocking):",
+        err instanceof Error ? err.message : err,
+      );
+    });
+  } catch (err) {
+    // fire-and-forget なのでエラーはログのみ
+    console.warn(
+      "[purchase-pipeline] failed:",
       err instanceof Error ? err.message : err,
     );
   }
