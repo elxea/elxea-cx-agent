@@ -21,7 +21,10 @@
     "test:search-quality": "npx tsx tests/search-quality/run-search-quality.ts",
     "test:search-quality:discover": "npx tsx tests/search-quality/run-search-quality.ts --discover --verbose",
     "test:load": "npx tsx tests/load/run-load-test.ts",
-    "test:load:staging": "npx tsx tests/load/run-load-test.ts --base-url https://elxea-agent-staging.setaka1103.workers.dev"
+    "test:load:staging": "npx tsx tests/load/run-load-test.ts --base-url https://elxea-agent-staging.setaka1103.workers.dev",
+    "eval:quality": "npx tsx scripts/eval-quality.ts",
+    "eval:quality:json": "npx tsx scripts/eval-quality.ts --json",
+    "smoke-test": "npx tsx scripts/smoke-test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

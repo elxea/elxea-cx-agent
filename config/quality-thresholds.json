@@ -1,0 +1,33 @@
+{
+  "min_total_score": 20,
+  "min_per_category": 3,
+  "unanswered_rate_threshold": 0.15,
+  "sample_size": 20,
+  "categories": [
+    {
+      "key": "accuracy",
+      "label": "応答精度",
+      "description": "質問に正しく答えているか。ナレッジに基づいた回答か"
+    },
+    {
+      "key": "brand_tone",
+      "label": "ブランドトーン",
+      "description": "elxea のブランドに合った温かく丁寧なトーンか。敬語ベースだが堅すぎない口調か"
+    },
+    {
+      "key": "product_knowledge",
+      "label": "商品知識",
+      "description": "商品情報が正確か。RAG の引用が適切か。捏造がないか"
+    },
+    {
+      "key": "naturalness",
+      "label": "会話の自然さ",
+      "description": "不自然な文脈切り替えや繰り返しがないか。100文字目安の応答長か"
+    },
+    {
+      "key": "actionability",
+      "label": "アクション性",
+      "description": "商品カードやカートリンクなど、次のアクションへの導線があるか"
+    }
+  ]
+}
