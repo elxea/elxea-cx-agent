@@ -133,7 +133,7 @@ async function main() {
 
   // 新規登録
   console.log(`\nLIFF アプリを新規登録中... (endpoint: ${endpointUrl})`);
-  const liffId = await createLiffApp(endpointUrl, "full");
+  const liffId = await createLiffApp(endpointUrl!, "full");
 
   console.log(`\nLIFF アプリ登録成功:`);
   console.log(`  LIFF_ID=${liffId}`);
@@ -153,3 +153,5 @@ main().catch((err) => {
   console.error("エラー:", err.message);
   process.exit(1);
 });
+
+export {};
