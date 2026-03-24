@@ -24,6 +24,9 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  * LINE Login で取得した line_user_id + email + display_name を
  * user_identity_map に登録する。
  *
+ * session_id が提供された場合、anonymous session の会話データを
+ * identified user に統合する（mergeAnonymousSession）。
+ *
  * Shopify Customer が同じメールで存在する場合は自動紐付け。
  *
  * リクエストボディ:
@@ -31,6 +34,7 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  *   line_user_id: string,        // 必須
  *   email?: string | null,       // LINE に登録されたメール
  *   display_name?: string | null // LINE の表示名
+ *   session_id?: string | null   // Web チャットの session_id（cookie から取得）
  * }
  */
 export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
@@ -38,6 +42,7 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
     line_user_id?: string;
     email?: string | null;
     display_name?: string | null;
+    session_id?: string | null;
   };
   try {
     body = await c.req.json();
@@ -45,7 +50,7 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { line_user_id, email, display_name } = body;
+  const { line_user_id, email, display_name, session_id } = body;
 
   if (!line_user_id || typeof line_user_id !== "string") {
     return c.json({ error: "line_user_id is required" }, 400);
@@ -61,10 +66,25 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
       display_name ?? null,
     );
 
+    // If session_id is provided, merge anonymous session conversations
+    let mergedCount = 0;
+    if (session_id && typeof session_id === "string") {
+      console.log(
+        `[identity/link-line] Merging anonymous session ${session_id} to unified user ${result.unifiedUserId}`,
+      );
+      const mergeResult = await mergeAnonymousSession(
+        supabase,
+        session_id,
+        result.unifiedUserId,
+      );
+      mergedCount = mergeResult.mergedCount;
+    }
+
     return c.json({
       success: true,
       unified_user_id: result.unifiedUserId,
       action: result.action,
+      merged_count: mergedCount,
     });
   } catch (err) {
     console.error("[identity/link-line] error:", err);
