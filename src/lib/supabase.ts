@@ -219,23 +219,29 @@ export async function searchKnowledge(
   threshold = 0.5,
   filterSourceType: SourceType = null,
 ): Promise<KnowledgeChunk[]> {
+  // NOTE: filter_source_type パラメータ付きの RPC が DB 上に存在しない場合があるため、
+  // フィルタなしで検索し、アプリ側で source_type フィルタを適用する。
   const params: Record<string, unknown> = {
     query_embedding: embedding,
-    match_count: topK,
+    match_count: filterSourceType ? topK * 3 : topK,
     match_threshold: threshold,
   };
-  if (filterSourceType) {
-    params.filter_source_type = filterSourceType;
-  }
 
   const { data, error } = await supabase.rpc("search_knowledge", params);
 
   if (error) {
-    console.error("Knowledge search failed:", error);
+    console.error("[searchKnowledge] RPC failed:", error);
     return [];
   }
 
-  return data ?? [];
+  let results: KnowledgeChunk[] = data ?? [];
+
+  // アプリ側で source_type フィルタを適用
+  if (filterSourceType) {
+    results = results.filter((r) => r.source_type === filterSourceType);
+  }
+
+  return results.slice(0, topK);
 }
 
 /**
@@ -254,25 +260,46 @@ export async function searchKnowledgeHybrid(
   threshold = 0.3,
   filterSourceType: SourceType = null,
 ): Promise<KnowledgeChunk[]> {
+  // ゼロベクトル検知: Workers AI が失敗した場合のログ
+  const isZeroVector = embedding.every((v) => v === 0);
+  if (isZeroVector) {
+    console.warn("[searchKnowledgeHybrid] Zero vector detected — embedding generation likely failed. Search will rely on keyword matching only.");
+  }
+
+  // NOTE: filter_source_type パラメータ付きの RPC が DB 上に存在しない場合があるため、
+  // フィルタなしで検索し、アプリ側で source_type フィルタを適用する。
   const params: Record<string, unknown> = {
     query_embedding: embedding,
     query_text: queryText,
-    match_count: topK,
+    match_count: filterSourceType ? topK * 3 : topK,
     match_threshold: threshold,
   };
-  if (filterSourceType) {
-    params.filter_source_type = filterSourceType;
-  }
+
+  console.log(`[searchKnowledgeHybrid] query="${queryText}", filter=${filterSourceType ?? "none"}, threshold=${threshold}, topK=${topK}`);
 
   const { data, error } = await supabase.rpc("search_knowledge_hybrid", params);
 
   if (error) {
-    console.error("Hybrid search failed:", error);
+    console.error("[searchKnowledgeHybrid] RPC failed:", error);
     // フォールバック: 通常のベクトル検索（フィルタも引き継ぐ）
     return searchKnowledge(supabase, embedding, topK, threshold, filterSourceType);
   }
 
-  return data ?? [];
+  // NaN similarity をフィルタ（ゼロベクトルの場合に発生し得る）
+  let filtered = (data ?? []).filter(
+    (r: KnowledgeChunk) => !Number.isNaN(r.similarity),
+  );
+
+  // アプリ側で source_type フィルタを適用
+  if (filterSourceType) {
+    filtered = filtered.filter((r: KnowledgeChunk) => r.source_type === filterSourceType);
+  }
+
+  const results = filtered.slice(0, topK);
+
+  console.log(`[searchKnowledgeHybrid] results=${results.length} (raw=${data?.length ?? 0}, after_nan_filter=${filtered.length})`);
+
+  return results;
 }
 
 /**

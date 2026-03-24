@@ -75,10 +75,10 @@ export async function createEmbedding(
       return vector;
     }
 
-    console.error("createEmbedding: AI returned empty result", JSON.stringify(result));
+    console.error("[embedding] AI returned empty result — falling back to zero vector. RAG search will be keyword-only.", JSON.stringify(result));
     return new Array(1024).fill(0);
   } catch (err) {
-    console.error("createEmbedding failed, using zero vector:", err);
+    console.error("[embedding] Workers AI call failed — falling back to zero vector. RAG search will be keyword-only:", err);
     return new Array(1024).fill(0);
   }
 }
