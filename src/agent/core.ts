@@ -10,7 +10,6 @@ import { classifyQuery } from "../lib/query-classifier";
 import { lookupMyOrders, getOrderDetail, createCartLink, type OrderDetailResult, type CartLinkResult } from "../lib/shopify";
 import {
   getCustomerProfile,
-  updateCustomerProfile,
   addBehaviorEvent,
   getFirestoreEnv,
   type CustomerProfile,
@@ -21,7 +20,7 @@ import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
 import { withTimeout } from "../lib/utils";
-import { recordEscalation, recordApiError } from "../lib/alerts";
+import { recordEscalation } from "../lib/alerts";
 
 type Message = {
   role: "user" | "assistant";
@@ -57,6 +56,17 @@ const LOW_SIMILARITY_THRESHOLD = 0.4;
 
 /** ツールループの最大回数（無限ループ防止） */
 const MAX_TOOL_TURNS = 3;
+
+/** タイムアウト設定（ミリ秒） */
+const TIMEOUT_CUSTOMER_LINKAGE_MS = 5_000;
+const TIMEOUT_CUSTOMER_PROFILE_MS = 5_000;
+const TIMEOUT_KNOWLEDGE_SEARCH_MS = 8_000;
+const TIMEOUT_LLM_CALL_MS = 15_000;
+
+/** ハイブリッド検索のデフォルト件数 */
+const KNOWLEDGE_SEARCH_TOP_K = 3;
+/** ハイブリッド検索の類似度しきい値 */
+const KNOWLEDGE_SEARCH_THRESHOLD = 0.4;
 
 /** ツール実行結果（テキスト + オプションのメタデータ） */
 type ToolExecResult = {
@@ -115,14 +125,14 @@ export async function runAgent(
         : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
       const { data: linkage } = await withTimeout(
         Promise.resolve(linkageQuery),
-        5_000,
+        TIMEOUT_CUSTOMER_LINKAGE_MS,
         "customer_linkages query",
       );
       if (linkage?.shopify_customer_id) {
         firestoreCustomerId = String(linkage.shopify_customer_id);
         customerProfile = await withTimeout(
           getCustomerProfile(firestoreCustomerId, fsEnv),
-          5_000,
+          TIMEOUT_CUSTOMER_PROFILE_MS,
           "getCustomerProfile",
         );
       }
@@ -138,11 +148,11 @@ export async function runAgent(
       supabase,
       embedding,
       userMessage,
-      3,
-      0.4,
+      KNOWLEDGE_SEARCH_TOP_K,
+      KNOWLEDGE_SEARCH_THRESHOLD,
       sourceTypeFilter,
     ),
-    8_000,
+    TIMEOUT_KNOWLEDGE_SEARCH_MS,
     "searchKnowledgeHybrid",
   );
 
@@ -175,8 +185,8 @@ export async function runAgent(
           console.warn("[agent] addBehaviorEvent (signal) failed:", err instanceof Error ? err.message : err);
         });
       }
-    } catch {
-      // スキップ
+    } catch (err) {
+      console.warn("[agent] behavior event recording skipped:", err instanceof Error ? err.message : err);
     }
   }
 
@@ -309,7 +319,7 @@ export async function runAgent(
         ),
         messages,
       }),
-      15_000,
+      TIMEOUT_LLM_CALL_MS,
       `anthropic.messages.create turn=${turn}`,
     );
     console.log(`[agent] step=anthropic turn=${turn} done, llm_elapsed=${Date.now() - tLlm}ms, total_elapsed=${Date.now() - t0}ms`);

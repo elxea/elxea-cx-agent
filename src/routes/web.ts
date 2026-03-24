@@ -34,6 +34,12 @@ const MAX_MESSAGE_LENGTH = 2000;
 /** SSE text_delta のチャンクサイズ（文字数） */
 const TEXT_CHUNK_SIZE = 20;
 
+/** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
+const TIMEOUT_PRE_PARALLEL_MS = 8_000;
+
+/** エージェント実行のタイムアウト（ミリ秒 -- Workers 30秒制限内に収める） */
+const TIMEOUT_RUN_AGENT_MS = 20_000;
+
 /**
  * POST /api/chat
  *
@@ -112,7 +118,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
           : getRecentMessages(supabase, effectiveUserId, "web"),
         createEmbedding(processedMessage, c.env),
       ]),
-      8_000,
+      TIMEOUT_PRE_PARALLEL_MS,
       "pre-parallel (saveMessage+history+embedding)",
     );
 
@@ -128,7 +134,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
         c.env,
         { isLinked: identity.isLinked },
       ),
-      20_000,
+      TIMEOUT_RUN_AGENT_MS,
       "runAgent",
     );
     const elapsed = Date.now() - tStart;

@@ -300,8 +300,8 @@ async function processPage(
     if (pageContent.trim()) {
       text += "\n\n" + pageContent;
     }
-  } catch {
-    // ページ本文の取得に失敗しても続行
+  } catch (err) {
+    console.warn("[sync] Failed to fetch page content, continuing:", err instanceof Error ? err.message : err);
   }
 
   // タイトル取得
