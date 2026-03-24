@@ -21,6 +21,7 @@ import {
   getFirestoreEnv,
   updateCustomerProfile,
   addBehaviorEvent,
+  recordBehaviorEvent,
   type CustomerProfile,
   type BehaviorEvent,
 } from "../lib/firestore";
@@ -340,6 +341,14 @@ async function handleFeedbackMessage(
       comment: null,
     });
 
+    // 行動イベント記録（fire-and-forget）
+    recordBehaviorEvent(
+      lineUserId, "line", "feedback_given",
+      { query: rating === 1 ? "positive" : "negative" },
+      env as Parameters<typeof recordBehaviorEvent>[4],
+      supabase,
+    ).catch((err) => console.warn("[feedback] behavior event failed:", err instanceof Error ? err.message : err));
+
     if (rating === 1) {
       await pushTextMessage(
         lineUserId,
@@ -568,6 +577,15 @@ async function handleTextMessage(
       : getRecentMessages(supabase, effectiveUserId, "line"),
     createEmbedding(processedMessage, env),
   ]);
+
+  // 初回メッセージの場合、chat_started イベントを記録（fire-and-forget）
+  if (history.length === 0) {
+    recordBehaviorEvent(
+      lineUserId, "line", "chat_started", {},
+      env as Parameters<typeof recordBehaviorEvent>[4],
+      supabase,
+    ).catch((err) => console.warn("[line] chat_started event failed:", err instanceof Error ? err.message : err));
+  }
 
   // エージェント実行（effectiveUserId を渡す、紐付け状態も伝達）
   const result = await runAgent(

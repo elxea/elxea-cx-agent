@@ -68,7 +68,12 @@ export type BehaviorAction =
   | "search"
   | "tea_mention"
   | "flavor_preference"
-  | "topic_interest";
+  | "topic_interest"
+  | "chat_started"
+  | "product_viewed"
+  | "cart_link_clicked"
+  | "feedback_given"
+  | "survey_completed";
 
 export type BehaviorChannel = "line" | "web";
 
@@ -468,4 +473,66 @@ export async function getRecentBehaviors(
   return results
     .filter((r) => r.document?.fields)
     .map((r) => fromFirestoreFields(r.document!.fields!) as BehaviorEvent);
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: recordBehaviorEvent (fire-and-forget 用)
+// ---------------------------------------------------------------------------
+
+/**
+ * 行動イベントを記録する高レベルヘルパー。
+ *
+ * Shopify Customer ID の解決 → addBehaviorEvent を一貫して行う。
+ * 紐付けされていないユーザーの場合は何もしない（silent skip）。
+ *
+ * @param userId LINE user ID or web session ID
+ * @param channel "line" | "web"
+ * @param action BehaviorAction
+ * @param metadata イベントメタデータ
+ * @param env Env (Firestore + Supabase credentials)
+ * @param supabase 既に作成済みの Supabase クライアント（省略時は内部で作成）
+ */
+export async function recordBehaviorEvent(
+  userId: string,
+  channel: BehaviorChannel,
+  action: BehaviorAction,
+  metadata: BehaviorEventMetadata,
+  env: FirestoreEnv & { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string },
+  supabase?: ReturnType<typeof import("./supabase").createSupabaseClient>,
+): Promise<void> {
+  // Firestore credentials がなければスキップ
+  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
+    return;
+  }
+
+  // Supabase クライアント（渡されなければ動的 import を回避し throw）
+  if (!supabase) {
+    console.warn("[recordBehaviorEvent] supabase client required but not provided, skipping");
+    return;
+  }
+
+  // customer_linkages から Shopify Customer ID を解決
+  const column = channel === "line" ? "line_user_id" : "shopify_customer_id";
+  const { data: linkage } = await supabase
+    .from("customer_linkages")
+    .select("shopify_customer_id")
+    .eq(column, userId)
+    .single();
+
+  if (!linkage?.shopify_customer_id) {
+    // 紐付けなし — イベント記録をスキップ
+    return;
+  }
+
+  const shopifyId = String(linkage.shopify_customer_id);
+
+  const event: BehaviorEvent = {
+    action,
+    channel,
+    metadata,
+    personaSignal: null,
+    createdAt: new Date().toISOString(),
+  };
+
+  await addBehaviorEvent(shopifyId, event, env);
 }

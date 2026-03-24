@@ -7,6 +7,7 @@ import {
   webChatFeedbackHandler,
   webChatFeedbackStatsHandler,
   webChatImageHandler,
+  webChatEventHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
 import { runKnowledgeSync } from "./sync/knowledge";
@@ -74,6 +75,7 @@ app.post("/webhook/line", lineWebhook);
 app.post("/api/chat", webChatHandler);
 app.get("/api/chat/history", webChatHistoryHandler);
 app.post("/api/chat/image", webChatImageHandler);
+app.post("/api/chat/event", webChatEventHandler);
 app.post("/api/chat/feedback", webChatFeedbackHandler);
 app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
 

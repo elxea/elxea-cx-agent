@@ -27,6 +27,7 @@ import {
 } from "../lib/identity";
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
+import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -121,6 +122,15 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       TIMEOUT_PRE_PARALLEL_MS,
       "pre-parallel (saveMessage+history+embedding)",
     );
+
+    // 初回メッセージの場合、chat_started イベントを記録（fire-and-forget）
+    if (history.length === 0) {
+      recordBehaviorEvent(
+        effectiveUserId, "web", "chat_started", {},
+        c.env as Parameters<typeof recordBehaviorEvent>[4],
+        supabase,
+      ).catch((err) => console.warn("[web] chat_started event failed:", err instanceof Error ? err.message : err));
+    }
 
     console.log("[web] step=runAgent");
     // エージェント実行（20 秒タイムアウト — Workers の 30 秒制限内に収める）
@@ -482,6 +492,16 @@ export async function webChatFeedbackHandler(c: Context<{ Bindings: Env }>) {
     );
   }
 
+  // 行動イベント記録（fire-and-forget）
+  c.executionCtx.waitUntil(
+    recordBehaviorEvent(
+      userId, "web", "feedback_given",
+      { query: rating === 1 ? "positive" : "negative" },
+      c.env as Parameters<typeof recordBehaviorEvent>[4],
+      supabase,
+    ).catch((err) => console.warn("[web] feedback_given event failed:", err instanceof Error ? err.message : err)),
+  );
+
   return c.json({ success: true });
 }
 
@@ -654,4 +674,69 @@ export async function webChatFeedbackStatsHandler(c: Context<{ Bindings: Env }>)
     negative,
     positive_rate: positiveRate,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Behavior event endpoint
+// ---------------------------------------------------------------------------
+
+/** 有効なイベントアクション（Web クライアントから送信可能なもの） */
+const VALID_WEB_EVENTS: BehaviorAction[] = [
+  "chat_started",
+  "product_viewed",
+  "cart_link_clicked",
+  "feedback_given",
+  "survey_completed",
+];
+
+/**
+ * POST /api/chat/event
+ *
+ * Web アプリからの行動イベントを Firestore に記録する。
+ * リクエストボディ: { session_id, action, metadata?: { productId?, contentId?, ... } }
+ * レスポンス: { success: true }
+ */
+export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
+  let body: {
+    session_id?: string;
+    shopify_customer_id?: string;
+    action?: string;
+    metadata?: BehaviorEventMetadata;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { session_id, shopify_customer_id, action, metadata } = body;
+
+  // バリデーション
+  const sessionError = validateSessionId(session_id);
+  if (sessionError) {
+    return c.json({ error: sessionError }, 400);
+  }
+
+  if (!action || !VALID_WEB_EVENTS.includes(action as BehaviorAction)) {
+    return c.json({ error: `Invalid action. Valid actions: ${VALID_WEB_EVENTS.join(", ")}` }, 400);
+  }
+
+  // fire-and-forget で記録（レスポンスをブロックしない）
+  const supabase = createSupabaseClient(c.env);
+  const userId = shopify_customer_id ?? (session_id as string);
+
+  c.executionCtx.waitUntil(
+    recordBehaviorEvent(
+      userId,
+      "web",
+      action as BehaviorAction,
+      metadata ?? {},
+      c.env as Parameters<typeof recordBehaviorEvent>[4],
+      supabase,
+    ).catch((err) => {
+      console.warn("[event] recordBehaviorEvent failed:", err instanceof Error ? err.message : err);
+    }),
+  );
+
+  return c.json({ success: true });
 }
