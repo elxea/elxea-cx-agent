@@ -89,6 +89,14 @@ export async function runAgent(
   const sourceTypeFilter = classifyQuery(userMessage);
   console.log(`Query classified as: ${sourceTypeFilter ?? "null (no filter)"}`);
 
+  // Firestore env を一度だけ取得してキャッシュ（複数箇所で使用）
+  let fsEnv: ReturnType<typeof getFirestoreEnv> | null = null;
+  try {
+    fsEnv = getFirestoreEnv(env);
+  } catch {
+    // Firebase 未設定の場合はスキップ
+  }
+
   // --- 並列フェーズ: 顧客プロファイル取得 + ハイブリッド検索を同時実行 ---
   // 以前は直列だった2つの重い I/O を並列化し、初回トークンまでの時間を短縮する。
   console.log("[agent] step=parallel-fetch (profile + search)");
@@ -101,7 +109,7 @@ export async function runAgent(
     let customerProfile: CustomerProfile | null = null;
     let firestoreCustomerId: string | null = null;
     try {
-      const fsEnv = getFirestoreEnv(env);
+      if (!fsEnv) return { customerProfile: null, firestoreCustomerId: null };
       const linkageQuery = channel === "line"
         ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
         : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
@@ -148,10 +156,8 @@ export async function runAgent(
   console.log(`[agent] step=parallel-fetch done, search_results=${knowledgeResults.length}, has_profile=${!!customerProfile}, elapsed=${Date.now() - t0}ms`);
 
   // Firestore に behavior event を記録（fire-and-forget: レスポンスをブロックしない）
-  if (firestoreCustomerId) {
+  if (firestoreCustomerId && fsEnv) {
     try {
-      const fsEnv = getFirestoreEnv(env);
-
       const messageEvent: BehaviorEvent = {
         action: "line_message",
         channel,
