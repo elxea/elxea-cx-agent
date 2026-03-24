@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { lineWebhook } from "./routes/line";
 import { webChatHandler, webChatHistoryHandler } from "./routes/web";
 import { runKnowledgeSync } from "./sync/knowledge";
+import { getAlertStatus } from "./lib/alerts";
 
 export type Env = {
   // LINE
@@ -60,6 +61,22 @@ app.post("/webhook/line", lineWebhook);
 // Web Chat routes
 app.post("/api/chat", webChatHandler);
 app.get("/api/chat/history", webChatHistoryHandler);
+
+/**
+ * アラート状態確認 API。
+ * 認証付き — エスカレーション/エラー/レスポンスタイムの現在のカウンターを返す。
+ */
+app.get("/api/alerts/status", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  return c.json({ status: "ok", alerts: getAlertStatus() });
+});
 
 /**
  * 手動同期 API（MS4 4.6）。

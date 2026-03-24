@@ -21,6 +21,7 @@ import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
 import { withTimeout } from "../lib/utils";
+import { recordEscalation, recordApiError } from "../lib/alerts";
 
 type Message = {
   role: "user" | "assistant";
@@ -75,6 +76,7 @@ export async function runAgent(
   userId: string,
   channel: Channel,
   env: Env,
+  options?: { isLinked?: boolean },
 ): Promise<AgentResult> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const supabase = createSupabaseClient(env);
@@ -373,6 +375,8 @@ export async function runAgent(
       // エスカレーション追跡
       if (toolUse.name === "escalate_to_human") {
         escalated = true;
+        // アラート: エスカレーション急増検知
+        recordEscalation(env);
         const input = toolUse.input as {
           reason: string;
           category: string;

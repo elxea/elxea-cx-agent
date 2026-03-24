@@ -26,6 +26,7 @@ import {
   resolveWithShopifyCustomerId,
 } from "../lib/identity";
 import { withTimeout } from "../lib/utils";
+import { recordResponseTime, recordApiError } from "../lib/alerts";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -129,9 +130,14 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       20_000,
       "runAgent",
     );
-    console.log(`[web] step=runAgent done, total_elapsed=${Date.now() - tStart}ms`);
+    const elapsed = Date.now() - tStart;
+    console.log(`[web] step=runAgent done, total_elapsed=${elapsed}ms`);
+    // レスポンスタイム計測（アラート用）
+    recordResponseTime(c.env, elapsed);
   } catch (err) {
     console.error("webChatHandler fatal error:", err);
+    // API エラー記録（アラート用）
+    recordApiError(c.env, err instanceof Error ? err.message : String(err));
     return c.json(
       { error: "Internal server error" },
       500,

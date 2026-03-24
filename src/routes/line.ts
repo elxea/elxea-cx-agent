@@ -16,6 +16,7 @@ import {
   getCrossChannelMessages,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
+import { recordResponseTime, recordApiError } from "../lib/alerts";
 
 /** 入力テキストの最大文字数（Embedding + Claude 入力の上限考慮） */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -89,9 +90,12 @@ async function processEvents(
     // メッセージイベントの処理
     if (event.type === "message" && event.message) {
       try {
+        const lineStart = Date.now();
         await handleMessage(lineUserId, event.message, env);
+        recordResponseTime(env, Date.now() - lineStart);
       } catch (error) {
         console.error("Error processing message:", error);
+        recordApiError(env, error instanceof Error ? error.message : String(error));
         await pushTextMessage(
           lineUserId,
           "申し訳ありません、一時的にエラーが発生しました。しばらくしてからもう一度お試しください。",
