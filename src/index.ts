@@ -44,6 +44,8 @@ app.use("/api/*", async (c, next) => {
   const allowedOrigins = [
     "https://www.elxea.com",
     "https://elxea.com",
+    "https://www.elxea.jp",
+    "https://elxea.jp",
   ];
   // ENVIRONMENT 環境変数が "development" の場合のみ localhost を許可
   if ((c.env as Env & { ENVIRONMENT?: string }).ENVIRONMENT === "development") {
