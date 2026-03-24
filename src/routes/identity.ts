@@ -41,6 +41,12 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  * }
  */
 export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
+  // C1: Verify shared secret (SYNC_API_SECRET) via X-API-Key header
+  const apiKey = c.req.header("X-API-Key");
+  if (!c.env.SYNC_API_SECRET || apiKey !== c.env.SYNC_API_SECRET) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
   let body: {
     line_user_id?: string;
     email?: string | null;
