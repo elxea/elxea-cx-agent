@@ -133,23 +133,32 @@ export async function getCrossChannelMessages(
   supabase: SupabaseClient,
   unifiedUserId: string,
   channelFilter?: Channel,
-  limit = 20,
-  maxChars = 2500,
+  limit = 30,
+  maxChars = 3000,
+  /** 元の sessionId（Web メッセージは sessionId で保存されるため、検索対象に含める） */
+  originalSessionId?: string,
 ): Promise<{ role: "user" | "assistant"; content: string; channel: string }[]> {
   // user_identity_map から紐づいた全 user_id を取得
   const { data: identityData } = await supabase
     .from("user_identity_map")
-    .select("unified_user_id, line_user_id, web_session_id")
+    .select("unified_user_id, line_user_id, web_session_id, shopify_customer_id")
     .eq("unified_user_id", unifiedUserId)
     .single();
 
   // unified_user_id 自身 + 紐づいた各チャネルの user_id を収集
   const userIds: string[] = [unifiedUserId];
-  if (identityData?.line_user_id && identityData.line_user_id !== unifiedUserId) {
+  if (identityData?.line_user_id && !userIds.includes(identityData.line_user_id)) {
     userIds.push(identityData.line_user_id);
   }
-  if (identityData?.web_session_id && identityData.web_session_id !== unifiedUserId) {
+  if (identityData?.web_session_id && !userIds.includes(identityData.web_session_id)) {
     userIds.push(identityData.web_session_id);
+  }
+  if (identityData?.shopify_customer_id && !userIds.includes(identityData.shopify_customer_id)) {
+    userIds.push(identityData.shopify_customer_id);
+  }
+  // 元の sessionId を含める（Web メッセージは sessionId で保存されるため）
+  if (originalSessionId && !userIds.includes(originalSessionId)) {
+    userIds.push(originalSessionId);
   }
 
   let query = supabase

@@ -5,6 +5,7 @@ import {
   searchKnowledgeHybrid,
   logUnansweredQuery,
   type Channel,
+  type KnowledgeChunk,
 } from "../lib/supabase";
 import { classifyQuery } from "../lib/query-classifier";
 import { lookupMyOrders, getOrderDetail, createCartLink, type OrderDetailResult, type CartLinkResult } from "../lib/shopify";
@@ -60,8 +61,8 @@ const MAX_TOOL_TURNS = 3;
 /** タイムアウト設定（ミリ秒） */
 const TIMEOUT_CUSTOMER_LINKAGE_MS = 5_000;
 const TIMEOUT_CUSTOMER_PROFILE_MS = 5_000;
-const TIMEOUT_KNOWLEDGE_SEARCH_MS = 8_000;
-const TIMEOUT_LLM_CALL_MS = 15_000;
+const TIMEOUT_KNOWLEDGE_SEARCH_MS = 12_000;
+const TIMEOUT_LLM_CALL_MS = 18_000;
 
 /** ハイブリッド検索のデフォルト件数 */
 const KNOWLEDGE_SEARCH_TOP_K = 3;
@@ -146,6 +147,7 @@ export async function runAgent(
   })();
 
   // (B) ハイブリッド検索（ベクトル + キーワード + メタデータフィルタ）
+  // タイムアウトしても LLM が一般知識で応答できるよう、エラー時は空配列で続行する
   const searchPromise = withTimeout(
     searchKnowledgeHybrid(
       supabase,
@@ -157,7 +159,10 @@ export async function runAgent(
     ),
     TIMEOUT_KNOWLEDGE_SEARCH_MS,
     "searchKnowledgeHybrid",
-  );
+  ).catch((err) => {
+    console.warn("[agent] knowledge search failed/timed out, continuing without RAG:", err instanceof Error ? err.message : err);
+    return [] as KnowledgeChunk[];
+  });
 
   // 並列待機
   const [profileResult, knowledgeResults] = await Promise.all([
@@ -212,7 +217,7 @@ export async function runAgent(
       .join("\n\n");
     knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n以下の ${knowledgeResults.length} 件が見つかりました。この情報のみに基づいて回答してください。\n\n${items}`;
   } else {
-    knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n該当する情報が見つかりませんでした。「確認してお返事しますね」と伝え、escalate_to_human ツールを使ってください。`;
+    knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n該当する情報が見つかりませんでした。\n\n**対応方針**: まずは商品名やブランド名から推測できる一般的な情報で回答を試みてください。具体的な価格・在庫・成分などの正確な情報が必要な場合のみ、「詳しい情報を確認してお返事しますね」と伝えてください。お客様を待たせる回答は最小限にしてください。`;
   }
 
   // 顧客プロファイルコンテキスト（Firestore から取得済みの場合）
@@ -271,7 +276,7 @@ export async function runAgent(
     if (parts.length > 0) {
       customerContext = `\n\n## 顧客データ\n${parts.join("\n")}`;
       if (isLinked) {
-        customerContext += "\n\n**注意**: この顧客はアカウント連携済みです。過去の好みや購入履歴を踏まえたパーソナライズされた提案をしてください。名前で呼びかけ、以前の会話内容を自然に参照してください。";
+        customerContext += "\n\n**注意**: この顧客はアカウント連携済みです。過去の好みや購入履歴を踏まえたパーソナライズされた提案をしてください。名前で呼びかけ、以前の会話内容を自然に参照してください。\n\n**プロファイル活用ルール**:\n- 好みのカテゴリやフレーバーが記録されている場合、「前回、〇〇がお好みとのことでしたね」のように自然に参照する\n- プロファイルが空の場合は無理に参照せず、通常通り対応する\n- 好みの情報は押し付けではなく、提案の精度向上に使う";
       }
     }
   } else if (isLinked) {
@@ -556,12 +561,20 @@ export async function runAgent(
     }).catch(console.error);
   }
 
+  // ツールループ上限到達: 商品カードなど途中成果があればそれを返す
+  // 何もない場合は一般的な応答で繋ぐ（「少しお待ちください」だけで終わらない）
+  const fallbackResponse = productCards.length > 0
+    ? "こちらの商品情報をご参考になさってください。他にもご質問がございましたら、お気軽にどうぞ。"
+    : "申し訳ございません、ただいま情報の取得に少しお時間をいただいております。具体的なご質問をいただければ、改めてお調べいたしますね。";
+
   return {
-    response: "スタッフに確認いたしますので、少々お待ちくださいね。",
+    response: fallbackResponse,
     escalated,
     escalationReason,
     escalationCategory,
     ...(flexMessages.length > 0 ? { flexMessages } : {}),
+    ...(productCards.length > 0 ? { productCards } : {}),
+    ...(cartLink ? { cartLink } : {}),
   };
 }
 

@@ -28,6 +28,7 @@ import {
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
+import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -36,10 +37,10 @@ const MAX_MESSAGE_LENGTH = 2000;
 const TEXT_CHUNK_SIZE = 20;
 
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
-const TIMEOUT_PRE_PARALLEL_MS = 8_000;
+const TIMEOUT_PRE_PARALLEL_MS = 10_000;
 
 /** エージェント実行のタイムアウト（ミリ秒 -- Workers 30秒制限内に収める） */
-const TIMEOUT_RUN_AGENT_MS = 20_000;
+const TIMEOUT_RUN_AGENT_MS = 25_000;
 
 /**
  * POST /api/chat
@@ -93,6 +94,8 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
 
   // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
   let result: Awaited<ReturnType<typeof runAgent>>;
+  let effectiveUserId = sessionId;
+  let history: Array<{ role: "user" | "assistant"; content: string }> = [];
   try {
     // Identity Resolver: unified_user_id を解決
     // ログイン済み（shopify_customer_id あり）→ Shopify Customer ID ベースで解決
@@ -100,13 +103,13 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     const identity = shopify_customer_id
       ? await resolveWithShopifyCustomerId(supabase, shopify_customer_id, sessionId)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
-    const effectiveUserId = identity.unifiedUserId;
+    effectiveUserId = identity.unifiedUserId;
 
     console.log("[web] step=pre-parallel");
     // メッセージ保存・履歴取得・Embedding 生成を並列実行（各 8 秒タイムアウト）
     // 保存は元の sessionId で行い、取得は effectiveUserId で行う
     // 紐付け済みユーザーはクロスチャネルで会話を取得
-    const [, history, embedding] = await withTimeout(
+    const [, fetchedHistory, embedding] = await withTimeout(
       Promise.all([
         saveMessage(supabase, {
           userId: sessionId,
@@ -115,16 +118,17 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
           content: processedMessage,
         }),
         identity.isLinked
-          ? getCrossChannelMessages(supabase, effectiveUserId)
+          ? getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId)
           : getRecentMessages(supabase, effectiveUserId, "web"),
         createEmbedding(processedMessage, c.env),
       ]),
       TIMEOUT_PRE_PARALLEL_MS,
       "pre-parallel (saveMessage+history+embedding)",
     );
+    history = fetchedHistory;
 
     // 初回メッセージの場合、chat_started イベントを記録（fire-and-forget）
-    if (history.length === 0) {
+    if (fetchedHistory.length === 0) {
       recordBehaviorEvent(
         effectiveUserId, "web", "chat_started", {},
         c.env as Parameters<typeof recordBehaviorEvent>[4],
@@ -178,6 +182,16 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       content: result.response,
       ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
     }),
+  );
+
+  // 嗜好抽出パイプライン（fire-and-forget）
+  const fullHistory = [
+    ...history,
+    { role: "user", content: processedMessage },
+    { role: "assistant", content: result.response },
+  ];
+  c.executionCtx.waitUntil(
+    runPreferencePipeline(fullHistory, effectiveUserId, "web", c.env, supabase),
   );
 
   // SSE レスポンスを文字列として構築し、一括返却
@@ -270,7 +284,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   }
 
   // limit/offset バリデーション
-  const limit = Math.min(Math.max(parseInt(limitParam ?? "50", 10) || 50, 1), 200);
+  const limit = Math.min(Math.max(parseInt(limitParam ?? "100", 10) || 100, 1), 200);
   const offset = Math.max(parseInt(offsetParam ?? "0", 10) || 0, 0);
 
   // date バリデーション
@@ -287,20 +301,66 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const identity = await resolveUnifiedUserId(supabase, sessionId as string, "web");
 
   // 検索対象の user_id 一覧を構築
+  // Web メッセージは元の sessionId で保存されるため、sessionId 自体も必ず含める。
+  // また shopify_customer_id でログイン時に web_session_id が更新されるため、
+  // 過去の session_id で保存されたメッセージを取りこぼさないよう、
+  // conversations テーブルから該当ユーザーの過去の web user_id も収集する。
   const userIds: string[] = [identity.isLinked ? identity.unifiedUserId : (sessionId as string)];
+
+  // 現在の sessionId を常に含める（紐付け済みでも元の sessionId でメッセージが保存されているため）
+  if (identity.isLinked && !userIds.includes(sessionId as string)) {
+    userIds.push(sessionId as string);
+  }
 
   if (identity.isLinked) {
     const { data: identityData } = await supabase
       .from("user_identity_map")
-      .select("unified_user_id, line_user_id, web_session_id")
+      .select("unified_user_id, line_user_id, web_session_id, shopify_customer_id")
       .eq("unified_user_id", identity.unifiedUserId)
       .single();
 
-    if (identityData?.line_user_id && identityData.line_user_id !== identity.unifiedUserId) {
+    if (identityData?.line_user_id && !userIds.includes(identityData.line_user_id)) {
       userIds.push(identityData.line_user_id);
     }
-    if (identityData?.web_session_id && identityData.web_session_id !== identity.unifiedUserId) {
+    if (identityData?.web_session_id && !userIds.includes(identityData.web_session_id)) {
       userIds.push(identityData.web_session_id);
+    }
+    if (identityData?.shopify_customer_id && !userIds.includes(identityData.shopify_customer_id)) {
+      userIds.push(identityData.shopify_customer_id);
+    }
+
+    // 過去の異なる session_id で保存された Web メッセージも取得するため、
+    // conversations テーブルから該当 user_id の過去の web session を収集
+    const { data: pastSessions } = await supabase
+      .from("conversations")
+      .select("user_id")
+      .in("user_id", userIds)
+      .eq("channel", "web")
+      .limit(1);
+    // pastSessions が空 = 現在の userIds では web メッセージが見つからない場合、
+    // unified_user_id に紐づく全 conversations の user_id を幅広く取得
+    if (!pastSessions || pastSessions.length === 0) {
+      const { data: allWebMessages } = await supabase
+        .from("conversations")
+        .select("user_id")
+        .eq("channel", "web")
+        .in("user_id", [
+          ...(identityData ? [
+            identityData.unified_user_id,
+            identityData.line_user_id,
+            identityData.web_session_id,
+            identityData.shopify_customer_id,
+          ].filter((id): id is string => !!id) : []),
+          sessionId as string,
+        ])
+        .limit(50);
+      if (allWebMessages) {
+        for (const row of allWebMessages) {
+          if (!userIds.includes(row.user_id)) {
+            userIds.push(row.user_id);
+          }
+        }
+      }
     }
   }
 
@@ -584,7 +644,7 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
 
     // 履歴取得
     const history = identity.isLinked
-      ? await getCrossChannelMessages(supabase, effectiveUserId)
+      ? await getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId as string)
       : await getRecentMessages(supabase, effectiveUserId, "web");
 
     // 空の Embedding（画像メッセージではナレッジ検索をスキップ）
