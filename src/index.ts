@@ -7,6 +7,7 @@ import {
   webChatFeedbackHandler,
   webChatFeedbackStatsHandler,
 } from "./routes/web";
+import { surveyHandler } from "./routes/survey";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { getAlertStatus } from "./lib/alerts";
 
@@ -71,6 +72,9 @@ app.post("/api/chat", webChatHandler);
 app.get("/api/chat/history", webChatHistoryHandler);
 app.post("/api/chat/feedback", webChatFeedbackHandler);
 app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
+
+// Survey route
+app.post("/api/survey", surveyHandler);
 
 /**
  * アラート状態確認 API。
