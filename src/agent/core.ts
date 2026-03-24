@@ -7,7 +7,7 @@ import {
   type Channel,
 } from "../lib/supabase";
 import { classifyQuery } from "../lib/query-classifier";
-import { lookupMyOrders, getOrderDetail, type OrderDetailResult } from "../lib/shopify";
+import { lookupMyOrders, getOrderDetail, createCartLink, type OrderDetailResult, type CartLinkResult } from "../lib/shopify";
 import {
   getCustomerProfile,
   updateCustomerProfile,
@@ -46,6 +46,8 @@ type AgentResult = {
     imageUrl?: string;
     productUrl: string;
   }>;
+  /** カートリンク（チェックアウトURL） */
+  cartLink?: { checkoutUrl: string };
   /** Quick Reply ボタン（テキストメッセージに付与） */
   quickReplies?: Array<{ label: string; text: string }>;
 };
@@ -60,6 +62,7 @@ const MAX_TOOL_TURNS = 3;
 type ToolExecResult = {
   text: string;
   orderDetail?: OrderDetailResult;
+  cartLink?: CartLinkResult;
 };
 
 /**
@@ -271,6 +274,7 @@ export async function runAgent(
   let escalationCategory: string | undefined;
   const flexMessages: Array<{ altText: string; contents: Record<string, unknown> }> = [];
   const productCards: Array<{ name: string; description: string; price: string; imageUrl?: string; productUrl: string }> = [];
+  let cartLink: { checkoutUrl: string } | undefined;
   const usedTools: string[] = [];
 
   // マルチターンのツールループ
@@ -343,6 +347,7 @@ export async function runAgent(
         escalationCategory,
         ...(flexMessages.length > 0 ? { flexMessages } : {}),
         ...(productCards.length > 0 ? { productCards } : {}),
+        ...(cartLink ? { cartLink } : {}),
         ...(quickReplies.length > 0 ? { quickReplies } : {}),
       };
     }
@@ -402,6 +407,61 @@ export async function runAgent(
             contents: productCarousel(products),
           });
         }
+      }
+
+      // カートリンク追跡
+      if (toolUse.name === "create_cart_link" && execResult.cartLink?.checkoutUrl) {
+        cartLink = { checkoutUrl: execResult.cartLink.checkoutUrl };
+
+        // LINE 用: カート Flex Message（購入ボタン付き）
+        flexMessages.push({
+          altText: "カートを作成しました",
+          contents: {
+            type: "bubble",
+            size: "mega",
+            body: {
+              type: "box",
+              layout: "vertical",
+              spacing: "md",
+              backgroundColor: "#FFFEF2",
+              contents: [
+                {
+                  type: "text",
+                  text: "カートを作成しました",
+                  weight: "bold",
+                  size: "lg",
+                  color: "#333333",
+                },
+                {
+                  type: "text",
+                  text: "下のボタンからお会計に進めます",
+                  size: "sm",
+                  color: "#666666",
+                  wrap: true,
+                },
+              ],
+            },
+            footer: {
+              type: "box",
+              layout: "vertical",
+              spacing: "sm",
+              backgroundColor: "#FFFEF2",
+              contents: [
+                {
+                  type: "button",
+                  action: {
+                    type: "uri",
+                    label: "購入手続きへ",
+                    uri: execResult.cartLink.checkoutUrl,
+                  },
+                  style: "primary",
+                  color: "#333333",
+                  height: "sm",
+                },
+              ],
+            },
+          },
+        });
       }
 
       // エスカレーション追跡
@@ -473,11 +533,18 @@ function generateQuickReplies(
     ];
   }
 
+  if (usedTools.includes("create_cart_link")) {
+    return [
+      { label: "他の商品も追加", text: "他の商品もカートに追加したいです" },
+      { label: "おすすめを見る", text: "他のおすすめ商品も教えてください" },
+    ];
+  }
+
   if (usedTools.includes("recommend_product")) {
     return [
       { label: "詳しく教えて", text: "この商品についてもっと詳しく教えてください" },
       { label: "他の商品も見たい", text: "他のおすすめ商品も教えてください" },
-      { label: "購入方法は？", text: "購入方法を教えてください" },
+      { label: "購入したい", text: "この商品を購入したいです" },
     ];
   }
 
@@ -518,6 +585,18 @@ async function executeTool(
 
       case "recommend_product":
         return { text: "商品カードを送信しました。テキストでも簡潔に商品を紹介してください。" };
+
+      case "create_cart_link": {
+        const input = toolUse.input as {
+          items: Array<{ variant_id: string; quantity?: number }>;
+        };
+        const items = input.items.map((item) => ({
+          variantId: item.variant_id,
+          quantity: item.quantity ?? 1,
+        }));
+        const cartResult = await createCartLink(items, env);
+        return { text: cartResult.text, cartLink: cartResult };
+      }
 
       default:
         return { text: `不明なツール: ${toolUse.name}` };

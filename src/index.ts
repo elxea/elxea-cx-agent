@@ -24,6 +24,7 @@ export type Env = {
   // Shopify
   SHOPIFY_STORE_DOMAIN?: string;
   SHOPIFY_ADMIN_ACCESS_TOKEN?: string;
+  SHOPIFY_STOREFRONT_ACCESS_TOKEN?: string;
   // Notifications
   SLACK_WEBHOOK_URL?: string;
   // Sync

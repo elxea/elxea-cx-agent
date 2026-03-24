@@ -357,6 +357,183 @@ export async function getOrderDetail(
 }
 
 // -------------------------------------------------------------------
+// カートリンク生成（Storefront API）
+// -------------------------------------------------------------------
+
+/** Shopify Storefront GraphQL API を呼び出す */
+async function shopifyStorefrontQuery(
+  query: string,
+  variables: Record<string, unknown>,
+  env: Env,
+): Promise<Record<string, unknown>> {
+  if (!env.SHOPIFY_STOREFRONT_ACCESS_TOKEN || !env.SHOPIFY_STORE_DOMAIN) {
+    throw new Error("Shopify Storefront API credentials not configured");
+  }
+
+  const res = await fetch(
+    `https://${env.SHOPIFY_STORE_DOMAIN}/api/${SHOPIFY_API_VERSION}/graphql.json`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Storefront-Access-Token": env.SHOPIFY_STOREFRONT_ACCESS_TOKEN,
+      },
+      body: JSON.stringify({ query, variables }),
+    },
+  );
+
+  if (!res.ok) {
+    const error = await res.text();
+    throw new Error(`Shopify Storefront API error: ${res.status} ${error}`);
+  }
+
+  const json = (await res.json()) as {
+    data?: Record<string, unknown>;
+    errors?: Array<{ message: string }>;
+  };
+
+  if (json.errors?.length) {
+    throw new Error(
+      `Shopify Storefront GraphQL errors: ${json.errors.map((e) => e.message).join(", ")}`,
+    );
+  }
+
+  return json.data ?? {};
+}
+
+/** create_cart_link の結果 */
+export type CartLinkResult = {
+  text: string;
+  checkoutUrl?: string;
+};
+
+/**
+ * Shopify Storefront API でカートを作成し、チェックアウト URL を返す。
+ *
+ * Storefront API の cartCreate mutation を使用。
+ * 生成される URL は https://{store}.myshopify.com/cart/c/{cart_token} 形式。
+ *
+ * @param items 商品バリアント ID と数量のリスト
+ * @param env Workers 環境変数
+ */
+export async function createCartLink(
+  items: Array<{ variantId: string; quantity: number }>,
+  env: Env,
+): Promise<CartLinkResult> {
+  const mutation = `
+    mutation cartCreate($input: CartInput!) {
+      cartCreate(input: $input) {
+        cart {
+          id
+          checkoutUrl
+          lines(first: 10) {
+            edges {
+              node {
+                merchandise {
+                  ... on ProductVariant {
+                    title
+                    product {
+                      title
+                    }
+                    price {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+                quantity
+              }
+            }
+          }
+          cost {
+            totalAmount {
+              amount
+              currencyCode
+            }
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  try {
+    // Variant ID を Shopify GID 形式に正規化
+    const lines = items.map((item) => {
+      const merchandiseId = item.variantId.startsWith("gid://")
+        ? item.variantId
+        : `gid://shopify/ProductVariant/${item.variantId}`;
+      return {
+        merchandiseId,
+        quantity: item.quantity,
+      };
+    });
+
+    const data = await shopifyStorefrontQuery(
+      mutation,
+      { input: { lines } },
+      env,
+    );
+
+    const cartCreate = data.cartCreate as {
+      cart?: {
+        id: string;
+        checkoutUrl: string;
+        lines: {
+          edges: Array<{
+            node: {
+              merchandise: {
+                title: string;
+                product: { title: string };
+                price: { amount: string; currencyCode: string };
+              };
+              quantity: number;
+            };
+          }>;
+        };
+        cost: {
+          totalAmount: { amount: string; currencyCode: string };
+        };
+      };
+      userErrors?: Array<{ field: string[]; message: string }>;
+    };
+
+    if (cartCreate?.userErrors?.length) {
+      const errorMsg = cartCreate.userErrors
+        .map((e) => e.message)
+        .join(", ");
+      console.error("Cart creation user errors:", errorMsg);
+      return { text: `カートの作成に失敗しました: ${errorMsg}` };
+    }
+
+    if (!cartCreate?.cart?.checkoutUrl) {
+      return { text: "カートの作成に失敗しました。しばらくしてから再度お試しください。" };
+    }
+
+    const cart = cartCreate.cart;
+    const cartItems = cart.lines.edges.map((e) => {
+      const m = e.node.merchandise;
+      return `${m.product.title}${m.title !== "Default Title" ? ` (${m.title})` : ""} x${e.node.quantity} - ¥${Number(m.price.amount).toLocaleString()}`;
+    });
+
+    const totalAmount = `¥${Number(cart.cost.totalAmount.amount).toLocaleString()}`;
+
+    let text = "カートを作成しました。\n\n";
+    text += cartItems.join("\n");
+    text += `\n\n合計: ${totalAmount}`;
+    text += `\n\n購入はこちらから: ${cart.checkoutUrl}`;
+
+    return { text, checkoutUrl: cart.checkoutUrl };
+  } catch (error) {
+    console.error("createCartLink error:", error);
+    return { text: "カートの作成に失敗しました。しばらくしてから再度お試しください。" };
+  }
+}
+
+// -------------------------------------------------------------------
 // ステータスの日本語変換
 // -------------------------------------------------------------------
 

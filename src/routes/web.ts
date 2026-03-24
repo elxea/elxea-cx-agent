@@ -193,6 +193,14 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     });
   }
 
+  // カートリンク
+  if (result.cartLink?.checkoutUrl) {
+    pushEvent({
+      type: "cart_link",
+      checkout_url: result.cartLink.checkoutUrl,
+    });
+  }
+
   // クイックリプライ
   if (result.quickReplies && result.quickReplies.length > 0) {
     pushEvent({

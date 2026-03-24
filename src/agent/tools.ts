@@ -114,12 +114,47 @@ const RECOMMEND_PRODUCT_TOOL: Anthropic.Tool = {
   },
 };
 
+/** カートリンク生成ツール */
+const CREATE_CART_LINK_TOOL: Anthropic.Tool = {
+  name: "create_cart_link",
+  description:
+    "お客様が購入したい商品のカートリンク（チェックアウトURL）を生成します。「この商品を買いたい」「カートに入れたい」「購入したい」という意思表示があった場合に使用。商品のバリアントIDと数量を指定してください。バリアントIDはナレッジベースの商品情報から取得してください。",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            variant_id: {
+              type: "string",
+              description:
+                "Shopify の商品バリアント ID（数値文字列 or GID 形式 'gid://shopify/ProductVariant/xxx'）",
+            },
+            quantity: {
+              type: "number",
+              description: "数量（デフォルト: 1）",
+              minimum: 1,
+              maximum: 10,
+            },
+          },
+          required: ["variant_id"],
+        },
+        description: "カートに追加する商品リスト（1-5件）",
+      },
+    },
+    required: ["items"],
+  },
+};
+
 /** 全ツールをエクスポート */
 export const AGENT_TOOLS: Anthropic.Tool[] = [
   ESCALATION_TOOL,
   LOOKUP_ORDERS_TOOL,
   ORDER_DETAIL_TOOL,
   RECOMMEND_PRODUCT_TOOL,
+  CREATE_CART_LINK_TOOL,
 ];
 
 /** 後方互換のため旧名もエクスポート */
