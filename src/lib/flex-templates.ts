@@ -406,3 +406,383 @@ export function productCarousel(
     contents: products.slice(0, 10).map((p) => productCard(p)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Phase-3 Flex Message テンプレート
+// ---------------------------------------------------------------------------
+
+/**
+ * 商品紹介カード（マッチ度付き）。
+ *
+ * 診断済みユーザー向けに、パーソナライズされたマッチ度と
+ * 味わい説明を含む商品紹介 Flex Message。
+ * 未診断ユーザーの場合は matchScore / matchReason を省略して使用する。
+ */
+export function productIntroCard(params: {
+  name: string;
+  origin?: string;
+  variety?: string;
+  description: string;
+  price: string;
+  imageUrl?: string;
+  productUrl: string;
+  /** マッチ度（0-100）。診断済みユーザーのみ表示 */
+  matchScore?: number;
+  /** マッチ理由（1行）。診断済みユーザーのみ表示 */
+  matchReason?: string;
+}): Record<string, unknown> {
+  const bodyContents: Record<string, unknown>[] = [
+    {
+      type: "text",
+      text: params.name,
+      weight: "bold",
+      size: "lg",
+      color: COLORS.charcoal,
+      wrap: true,
+    },
+  ];
+
+  // 産地・品種（あれば表示）
+  if (params.origin || params.variety) {
+    const metaText = [params.origin, params.variety]
+      .filter(Boolean)
+      .join(" / ");
+    bodyContents.push({
+      type: "text",
+      text: metaText,
+      size: "xs",
+      color: COLORS.muted,
+      margin: "sm",
+    });
+  }
+
+  // 味わい説明
+  bodyContents.push({
+    type: "text",
+    text: params.description,
+    size: "sm",
+    color: COLORS.muted,
+    wrap: true,
+    maxLines: 3,
+    margin: "md",
+  });
+
+  // 価格
+  bodyContents.push({
+    type: "text",
+    text: params.price,
+    size: "md",
+    weight: "bold",
+    color: COLORS.charcoal,
+    margin: "md",
+  });
+
+  // マッチ度（診断済みユーザーのみ）
+  if (params.matchScore !== undefined && params.matchReason) {
+    bodyContents.push(
+      {
+        type: "separator",
+        color: COLORS.border,
+        margin: "md",
+      } as Record<string, unknown>,
+      {
+        type: "box",
+        layout: "horizontal",
+        spacing: "sm",
+        margin: "md",
+        contents: [
+          {
+            type: "text",
+            text: `${params.matchScore}% マッチ`,
+            size: "sm",
+            weight: "bold",
+            color: COLORS.charcoal,
+            flex: 0,
+          },
+          {
+            type: "text",
+            text: params.matchReason,
+            size: "xs",
+            color: COLORS.muted,
+            flex: 1,
+            wrap: true,
+          },
+        ],
+      } as Record<string, unknown>,
+    );
+  }
+
+  return {
+    type: "bubble",
+    size: "mega",
+    ...(params.imageUrl
+      ? {
+          hero: {
+            type: "image",
+            url: params.imageUrl,
+            size: "full",
+            aspectRatio: "4:3",
+            aspectMode: "cover",
+          },
+        }
+      : {}),
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      backgroundColor: COLORS.cream,
+      contents: bodyContents,
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      backgroundColor: COLORS.cream,
+      contents: [
+        {
+          type: "button",
+          action: {
+            type: "uri",
+            label: "詳しく見る",
+            uri: params.productUrl,
+          },
+          style: "primary",
+          color: COLORS.charcoal,
+          height: "sm",
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * レコメンドカルーセル（マッチ理由付き）。
+ *
+ * 「あなたにおすすめの N 種」として横スワイプで表示する。
+ * 各カードにマッチ理由を1行添え、パーソナライズされた印象を与える。
+ */
+export function recommendCarousel(
+  products: Array<{
+    name: string;
+    description: string;
+    price: string;
+    imageUrl?: string;
+    productUrl: string;
+    /** マッチ理由（1行。例: 「あなたが好む香ばしさとコクのバランス」） */
+    matchReason: string;
+  }>,
+): Record<string, unknown> {
+  const bubbles = products.slice(0, 10).map((p) => {
+    const bodyContents: Record<string, unknown>[] = [
+      {
+        type: "text",
+        text: p.name,
+        weight: "bold",
+        size: "md",
+        color: COLORS.charcoal,
+        wrap: true,
+      },
+      {
+        type: "text",
+        text: p.matchReason,
+        size: "xs",
+        color: COLORS.muted,
+        wrap: true,
+        margin: "sm",
+        style: "italic",
+      },
+      {
+        type: "text",
+        text: p.description,
+        size: "sm",
+        color: COLORS.muted,
+        wrap: true,
+        maxLines: 2,
+        margin: "md",
+      },
+      {
+        type: "text",
+        text: p.price,
+        size: "md",
+        weight: "bold",
+        color: COLORS.charcoal,
+        margin: "md",
+      },
+    ];
+
+    return {
+      type: "bubble",
+      size: "kilo",
+      ...(p.imageUrl
+        ? {
+            hero: {
+              type: "image",
+              url: p.imageUrl,
+              size: "full",
+              aspectRatio: "4:3",
+              aspectMode: "cover",
+            },
+          }
+        : {}),
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        backgroundColor: COLORS.cream,
+        contents: bodyContents,
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        backgroundColor: COLORS.cream,
+        contents: [
+          {
+            type: "button",
+            action: {
+              type: "uri",
+              label: "詳しく見る",
+              uri: p.productUrl,
+            },
+            style: "primary",
+            color: COLORS.charcoal,
+            height: "sm",
+          },
+        ],
+      },
+    } as Record<string, unknown>;
+  });
+
+  return {
+    type: "carousel",
+    contents: bubbles,
+  };
+}
+
+/**
+ * フィードバック UI テンプレート。
+ *
+ * 「今月のお茶はいかがでしたか？」の質問に対して
+ * 4段階評価ボタンを表示する Flex Message。
+ * タップ後は postback で feedback action として処理される。
+ *
+ * デザイン原則: 白ベース、淡いアクセント色、余白重視。
+ */
+export function feedbackCard(params: {
+  /** 評価対象の商品名（例: 「今月のほうじ茶 クラシック」） */
+  productName?: string;
+  /** コールバックデータのプレフィックス（postback 用） */
+  callbackPrefix?: string;
+}): Record<string, unknown> {
+  const prefix = params.callbackPrefix ?? "feedback";
+  const title = params.productName
+    ? `${params.productName}はいかがでしたか？`
+    : "今月のお茶はいかがでしたか？";
+
+  /**
+   * 4段階評価ボタン。
+   * postback data 形式: {prefix}:{rating}
+   * テキスト送信は行わない（displayText のみ表示）。
+   */
+  const ratingButtons: Record<string, unknown>[] = [
+    {
+      type: "button",
+      action: {
+        type: "postback",
+        label: "大好き",
+        data: `${prefix}:love`,
+        displayText: "大好き！",
+      },
+      style: "primary",
+      color: COLORS.charcoal,
+      height: "sm",
+    },
+    {
+      type: "button",
+      action: {
+        type: "postback",
+        label: "好き",
+        data: `${prefix}:like`,
+        displayText: "好きです",
+      },
+      style: "secondary",
+      height: "sm",
+    },
+    {
+      type: "button",
+      action: {
+        type: "postback",
+        label: "普通",
+        data: `${prefix}:neutral`,
+        displayText: "普通かな",
+      },
+      style: "secondary",
+      height: "sm",
+    },
+    {
+      type: "button",
+      action: {
+        type: "postback",
+        label: "苦手",
+        data: `${prefix}:dislike`,
+        displayText: "ちょっと苦手でした",
+      },
+      style: "secondary",
+      height: "sm",
+    },
+  ];
+
+  return {
+    type: "bubble",
+    size: "mega",
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "lg",
+      backgroundColor: COLORS.cream,
+      paddingAll: "xl",
+      contents: [
+        {
+          type: "text",
+          text: title,
+          weight: "bold",
+          size: "lg",
+          color: COLORS.charcoal,
+          wrap: true,
+          align: "center",
+        },
+        {
+          type: "text",
+          text: "あなたの声を、次回のおすすめに反映します。",
+          size: "xs",
+          color: COLORS.muted,
+          align: "center",
+          margin: "md",
+        },
+        {
+          type: "separator",
+          color: COLORS.border,
+          margin: "lg",
+        },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      backgroundColor: COLORS.cream,
+      paddingAll: "lg",
+      contents: [
+        ...ratingButtons,
+        {
+          type: "text",
+          text: "コメントがあればメッセージで教えてください",
+          size: "xxs",
+          color: COLORS.muted,
+          align: "center",
+          margin: "md",
+        },
+      ],
+    },
+  };
+}
