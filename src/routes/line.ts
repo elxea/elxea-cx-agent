@@ -234,7 +234,7 @@ async function handleTextMessage(
     createEmbedding(processedMessage, env),
   ]);
 
-  // エージェント実行（effectiveUserId を渡す）
+  // エージェント実行（effectiveUserId を渡す、紐付け状態も伝達）
   const result = await runAgent(
     processedMessage,
     history,
@@ -242,6 +242,7 @@ async function handleTextMessage(
     effectiveUserId,
     "line",
     env,
+    { isLinked: identity.isLinked },
   );
 
   // Quick Reply を LINE 形式に変換

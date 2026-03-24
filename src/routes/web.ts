@@ -126,6 +126,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
         effectiveUserId,
         "web",
         c.env,
+        { isLinked: identity.isLinked },
       ),
       20_000,
       "runAgent",

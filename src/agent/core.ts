@@ -195,6 +195,7 @@ export async function runAgent(
 
   // 顧客プロファイルコンテキスト（Firestore から取得済みの場合）
   // ペルソナ fragment を動的注入 (MS5 5.3)
+  const isLinked = options?.isLinked ?? false;
   const personaPrimary = customerProfile?.persona?.primary ?? null;
   const personaFragment = buildPersonaPromptFragment(personaPrimary);
 
@@ -202,6 +203,12 @@ export async function runAgent(
   let customerContext = "";
   if (customerProfile) {
     const parts: string[] = [];
+
+    // 紐付け済みフラグ: Agent にリピーター向け対応を促す
+    if (isLinked) {
+      parts.push("紐付け状態: LINE・Web アカウント連携済み（リピーターとして対応）");
+    }
+
     if (customerProfile.displayName) {
       parts.push(`顧客名: ${customerProfile.displayName}`);
     }
@@ -211,18 +218,43 @@ export async function runAgent(
     if (customerProfile.depthLevel) {
       parts.push(`茶の経験レベル: ${customerProfile.depthLevel}`);
     }
-    if (customerProfile.tasteProfile?.preferredCategories?.length) {
-      parts.push(`好みのカテゴリ: ${customerProfile.tasteProfile.preferredCategories.join(", ")}`);
+
+    // TasteProfile: 紐付け済み顧客の嗜好データを詳細に注入
+    if (customerProfile.tasteProfile) {
+      const tp = customerProfile.tasteProfile;
+      if (tp.preferredCategories?.length) {
+        parts.push(`好みのカテゴリ: ${tp.preferredCategories.join(", ")}`);
+      }
+      if (tp.flavorPreferences?.length) {
+        parts.push(`好みのフレーバー: ${tp.flavorPreferences.join(", ")}`);
+      }
+      if (tp.scenePref) {
+        parts.push(`好みのシーン: ${tp.scenePref}`);
+      }
     }
-    if (customerProfile.tasteProfile?.flavorPreferences?.length) {
-      parts.push(`好みのフレーバー: ${customerProfile.tasteProfile.flavorPreferences.join(", ")}`);
+
+    // PersonaProfile: スコア詳細も注入（紐付け済みの場合のみ）
+    if (isLinked && customerProfile.persona) {
+      const ps = customerProfile.persona;
+      if (ps.scores) {
+        parts.push(
+          `ペルソナスコア: serenity=${ps.scores.serenity}, explorer=${ps.scores.explorer}, sensory=${ps.scores.sensory}`,
+        );
+      }
+      if (ps.lastUpdated) {
+        parts.push(`ペルソナ最終更新: ${ps.lastUpdated}`);
+      }
     }
-    if (customerProfile.tasteProfile?.scenePref) {
-      parts.push(`好みのシーン: ${customerProfile.tasteProfile.scenePref}`);
-    }
+
     if (parts.length > 0) {
       customerContext = `\n\n## 顧客データ\n${parts.join("\n")}`;
+      if (isLinked) {
+        customerContext += "\n\n**注意**: この顧客はアカウント連携済みです。過去の好みや購入履歴を踏まえたパーソナライズされた提案をしてください。名前で呼びかけ、以前の会話内容を自然に参照してください。";
+      }
     }
+  } else if (isLinked) {
+    // 紐付け済みだが Firestore プロファイルが未作成のケース
+    customerContext = "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
   }
 
   // 会話履歴を Claude のメッセージ形式に変換
