@@ -1,21 +1,35 @@
 /**
  * Alert Monitoring -- 異常検知アラート
  *
- * Cloudflare Workers のインメモリカウンターを使用して異常を検知し、
- * Slack Webhook で通知する。
+ * Cloudflare Workers のインメモリカウンターを使用して異常を検知する。
+ *
+ * アラート送信先:
+ * - Notion CX Agent Alerts DB: 全アラートを蓄積（フィルタ・集計可能）
+ * - Slack Webhook: 緊急アラートのみ（escalation_surge, api_error の critical）
  *
  * 監視項目:
- * 1. エスカレーション急増: 1時間に3件以上 -> Slack 通知
- * 2. API エラー率上昇: 5分間で error 3件以上 -> Slack 通知
- * 3. レスポンス時間増加: 5分間の平均5秒以上 -> ログ記録
+ * 1. エスカレーション急増: 1時間に3件以上 -> Notion + Slack
+ * 2. API エラー率上昇: 5分間で error 3件以上 -> Notion + Slack
+ * 3. レスポンス時間増加: 5分間の平均5秒以上 -> Notion のみ
+ * 4. ネガティブフィードバック: 個別通知 -> Notion のみ
  *
  * 注意: Workers はリクエストごとにインスタンスが再利用される場合があるため、
  * インメモリカウンターは同一 isolate 内でのみ有効。
- * 完全な分散カウンターには Durable Objects が必要だが、
- * 初期実装としてはインメモリで十分（エスカレーション検知のみで十分な精度）。
  */
 
 import type { Env } from "../index";
+
+// ---------------------------------------------------------------------------
+// アラート型定義
+// ---------------------------------------------------------------------------
+
+export type AlertType =
+  | "escalation_surge"
+  | "api_error"
+  | "response_time"
+  | "negative_feedback";
+
+export type AlertSeverity = "critical" | "warning" | "info";
 
 // ---------------------------------------------------------------------------
 // 閾値設定
@@ -70,11 +84,9 @@ export function recordEscalation(env: Env): void {
   if (escalationEvents.length >= ESCALATION_THRESHOLD) {
     if (!isInCooldown("escalation_surge", now)) {
       lastAlertSent["escalation_surge"] = now;
-      sendSlackAlert(
-        env,
-        "escalation_surge",
-        `*[Alert] Escalation Surge*\n${escalationEvents.length} escalations in the past hour (threshold: ${ESCALATION_THRESHOLD}).\nPlease review the escalation queue.`,
-      ).catch(console.error);
+      const details = `${escalationEvents.length} escalations in the past hour (threshold: ${ESCALATION_THRESHOLD}). Please review the escalation queue.`;
+      // 緊急: Notion + Slack
+      sendAlert(env, "escalation_surge", "critical", details).catch(console.error);
     }
   }
 }
@@ -99,11 +111,9 @@ export function recordApiError(env: Env, errorMessage: string): void {
         .slice(-3)
         .map((e) => `  - ${e.errorMessage}`)
         .join("\n");
-      sendSlackAlert(
-        env,
-        "api_error_rate",
-        `*[Alert] API Error Rate Increase*\n${recentErrors.length} errors in the past 5 minutes (threshold: ${API_ERROR_THRESHOLD}).\n\nRecent errors:\n${errorSample}`,
-      ).catch(console.error);
+      const details = `${recentErrors.length} errors in the past 5 minutes (threshold: ${API_ERROR_THRESHOLD}).\n\nRecent errors:\n${errorSample}`;
+      // 緊急: Notion + Slack
+      sendAlert(env, "api_error", "critical", details).catch(console.error);
     }
   }
 }
@@ -127,10 +137,10 @@ export function recordResponseTime(env: Env, durationMs: number): void {
       recentTimes.length;
 
     if (avgMs >= RESPONSE_TIME_THRESHOLD_MS) {
-      console.warn(
-        `[alert] Response time degradation: avg ${avgMs.toFixed(0)}ms over ${recentTimes.length} requests (threshold: ${RESPONSE_TIME_THRESHOLD_MS}ms)`,
-      );
-      // レスポンス時間はログ記録のみ（Slack 通知は行わない）
+      const details = `avg ${avgMs.toFixed(0)}ms over ${recentTimes.length} requests (threshold: ${RESPONSE_TIME_THRESHOLD_MS}ms)`;
+      console.warn(`[alert] Response time degradation: ${details}`);
+      // 非緊急: Notion のみ（Slack には送信しない）
+      sendAlert(env, "response_time", "warning", details).catch(console.error);
     }
   }
 }
@@ -183,8 +193,9 @@ export function getAlertStatus(): {
 // ---------------------------------------------------------------------------
 
 /**
- * ネガティブフィードバック（👎）を Slack に通知する。
+ * ネガティブフィードバックを通知する。
  * ユーザーが改善希望を送信した際に呼び出す。
+ * Notion に記録（Slack には送信しない）。
  */
 export async function sendNegativeFeedbackAlert(
   env: Env,
@@ -197,12 +208,135 @@ export async function sendNegativeFeedbackAlert(
       ? messageContent.slice(0, 200) + "..."
       : messageContent;
 
-  let text = `*[Feedback] Negative Rating*\nUser: \`${userId.slice(0, 8)}...\`\nMessage: ${truncatedContent}`;
+  let details = `User: ${userId.slice(0, 8)}...\nMessage: ${truncatedContent}`;
   if (comment) {
-    text += `\nComment: ${comment}`;
+    details += `\nComment: ${comment}`;
   }
 
-  await sendSlackAlert(env, "negative_feedback", text);
+  // 非緊急: Notion のみ
+  await sendAlert(env, "negative_feedback", "info", details);
+}
+
+// ---------------------------------------------------------------------------
+// 統合アラート送信
+// ---------------------------------------------------------------------------
+
+/** 緊急アラートの判定: Slack にも送信するタイプ */
+const CRITICAL_ALERT_TYPES: AlertType[] = ["escalation_surge", "api_error"];
+
+/**
+ * アラートを送信する（統合エントリポイント）。
+ *
+ * 1. Notion DB にアラートページを作成（全アラート）
+ * 2. 緊急アラート（escalation_surge, api_error の critical）のみ Slack にも送信
+ */
+async function sendAlert(
+  env: Env,
+  type: AlertType,
+  severity: AlertSeverity,
+  details: string,
+): Promise<void> {
+  // 1. Notion に記録
+  await sendNotionAlert(env, type, severity, details).catch((err) => {
+    console.error(`[alert] Notion alert failed for ${type}:`, err instanceof Error ? err.message : err);
+  });
+
+  // 2. 緊急アラートのみ Slack にも送信
+  if (CRITICAL_ALERT_TYPES.includes(type) && severity === "critical") {
+    const slackText = `*[Alert] ${type.replace(/_/g, " ").toUpperCase()}* (${severity})\n${details}`;
+    await sendSlackAlert(env, type, slackText).catch((err) => {
+      console.error(`[alert] Slack alert failed for ${type}:`, err instanceof Error ? err.message : err);
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Notion Alert DB
+// ---------------------------------------------------------------------------
+
+/**
+ * Notion API でアラートページを作成する。
+ *
+ * DB スキーマ（CX Agent Alerts DB）:
+ * - Title (title): アラートタイプの日本語ラベル
+ * - Type (select): escalation_surge / api_error / response_time / negative_feedback
+ * - Severity (select): critical / warning / info
+ * - Details (rich_text): アラートの詳細情報
+ * - Timestamp (date): 発生日時
+ */
+async function sendNotionAlert(
+  env: Env,
+  type: AlertType,
+  severity: AlertSeverity,
+  details: string,
+): Promise<void> {
+  if (!env.NOTION_TOKEN || !env.NOTION_ALERTS_DB_ID) {
+    console.warn(
+      `[alert] NOTION_TOKEN or NOTION_ALERTS_DB_ID is not set, skipping Notion alert for ${type}`,
+    );
+    return;
+  }
+
+  const typeLabels: Record<AlertType, string> = {
+    escalation_surge: "エスカレーション急増",
+    api_error: "API エラー",
+    response_time: "レスポンス時間劣化",
+    negative_feedback: "ネガティブフィードバック",
+  };
+
+  const title = typeLabels[type] ?? type;
+  const timestamp = new Date().toISOString();
+
+  const body = {
+    parent: { database_id: env.NOTION_ALERTS_DB_ID },
+    properties: {
+      Title: {
+        title: [{ text: { content: title } }],
+      },
+      Type: {
+        select: { name: type },
+      },
+      Severity: {
+        select: { name: severity },
+      },
+      Details: {
+        rich_text: [
+          {
+            text: {
+              content: details.length > 2000 ? details.slice(0, 1997) + "..." : details,
+            },
+          },
+        ],
+      },
+      Timestamp: {
+        date: { start: timestamp },
+      },
+    },
+  };
+
+  try {
+    const res = await fetch("https://api.notion.com/v1/pages", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.NOTION_TOKEN}`,
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "unknown error");
+      console.error(`[alert] Notion API error (${res.status}) for ${type}:`, errText);
+    } else {
+      console.log(`[alert] Notion alert created: ${type} (${severity})`);
+    }
+  } catch (err) {
+    console.error(
+      `[alert] Failed to send Notion alert for ${type}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +375,7 @@ async function sendSlackAlert(
 ): Promise<void> {
   if (!env.SLACK_WEBHOOK_URL) {
     console.warn(
-      `[alert] SLACK_WEBHOOK_URL is not set, skipping ${alertType} alert`,
+      `[alert] SLACK_WEBHOOK_URL is not set, skipping ${alertType} Slack alert`,
     );
     return;
   }
