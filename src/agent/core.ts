@@ -13,6 +13,7 @@ import {
   updateCustomerProfile,
   addBehaviorEvent,
   getFirestoreEnv,
+  type CustomerProfile,
   type BehaviorEvent,
   type BehaviorChannel,
 } from "../lib/firestore";
@@ -77,76 +78,49 @@ export async function runAgent(
 ): Promise<AgentResult> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const supabase = createSupabaseClient(env);
+  const t0 = Date.now();
 
-  // Firestore から顧客プロファイルを取得（Firebase 設定がある場合のみ）
-  let customerProfile = null;
-  let firestoreCustomerId: string | null = null;
-  try {
-    const fsEnv = getFirestoreEnv(env);
-    console.log("[agent] step=customer-linkage");
-    // ユーザー ID から Shopify Customer ID を Supabase 経由で取得
-    // LINE チャネルの場合は line_user_id で検索、Web の場合は将来 shopify_customer_id で検索
-    const linkageQuery = channel === "line"
-      ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
-      : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
-    const { data: linkage } = await withTimeout(
-      Promise.resolve(linkageQuery),
-      5_000,
-      "customer_linkages query",
-    );
-    if (linkage?.shopify_customer_id) {
-      firestoreCustomerId = String(linkage.shopify_customer_id);
-      console.log("[agent] step=firestore-profile");
-      customerProfile = await withTimeout(
-        getCustomerProfile(firestoreCustomerId, fsEnv),
-        5_000,
-        "getCustomerProfile",
-      );
-    }
-    console.log("[agent] step=customer-linkage done");
-  } catch (err) {
-    // Firebase 未設定 or タイムアウトの場合はスキップ（後方互換）
-    console.warn("[agent] customer profile skipped:", err instanceof Error ? err.message : err);
-  }
-
-  // Firestore に LINE メッセージを behavior event として記録（+ シグナル検出）
-  if (firestoreCustomerId) {
-    try {
-      const fsEnv = getFirestoreEnv(env);
-
-      // 基本のメッセージイベント（チャネルに応じて記録）
-      const messageEvent: BehaviorEvent = {
-        action: "line_message",
-        channel,
-        metadata: { query: userMessage },
-        personaSignal: null,
-        createdAt: new Date().toISOString(),
-      };
-      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch((err) => {
-        console.warn("[agent] addBehaviorEvent (message) failed:", err instanceof Error ? err.message : err);
-      });
-
-      // 会話シグナル検出 — お茶の種類言及・味の好み・関心トピックを検出
-      const signalEvents = extractConversationSignals(userMessage, channel);
-      for (const event of signalEvents) {
-        addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch((err) => {
-          console.warn("[agent] addBehaviorEvent (signal) failed:", err instanceof Error ? err.message : err);
-        });
-      }
-    } catch {
-      // スキップ
-    }
-  }
-
-  // クエリカテゴリ判定（メタデータフィルタリング）
-  // 商品・FAQ・コンテンツ等に分類し、検索対象を絞り込む
+  // クエリカテゴリ判定（同期処理、高速）
   const sourceTypeFilter = classifyQuery(userMessage);
   console.log(`Query classified as: ${sourceTypeFilter ?? "null (no filter)"}`);
 
-  // ハイブリッド検索（ベクトル + キーワード + メタデータフィルタ）
-  // match_count: 5→3, match_threshold: 0.3→0.4（低品質ヒットのノイズ削減）
-  console.log("[agent] step=hybrid-search");
-  const knowledgeResults = await withTimeout(
+  // --- 並列フェーズ: 顧客プロファイル取得 + ハイブリッド検索を同時実行 ---
+  // 以前は直列だった2つの重い I/O を並列化し、初回トークンまでの時間を短縮する。
+  console.log("[agent] step=parallel-fetch (profile + search)");
+
+  // (A) 顧客プロファイル取得
+  const profilePromise = (async (): Promise<{
+    customerProfile: CustomerProfile | null;
+    firestoreCustomerId: string | null;
+  }> => {
+    let customerProfile: CustomerProfile | null = null;
+    let firestoreCustomerId: string | null = null;
+    try {
+      const fsEnv = getFirestoreEnv(env);
+      const linkageQuery = channel === "line"
+        ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
+        : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
+      const { data: linkage } = await withTimeout(
+        Promise.resolve(linkageQuery),
+        5_000,
+        "customer_linkages query",
+      );
+      if (linkage?.shopify_customer_id) {
+        firestoreCustomerId = String(linkage.shopify_customer_id);
+        customerProfile = await withTimeout(
+          getCustomerProfile(firestoreCustomerId, fsEnv),
+          5_000,
+          "getCustomerProfile",
+        );
+      }
+    } catch (err) {
+      console.warn("[agent] customer profile skipped:", err instanceof Error ? err.message : err);
+    }
+    return { customerProfile, firestoreCustomerId };
+  })();
+
+  // (B) ハイブリッド検索（ベクトル + キーワード + メタデータフィルタ）
+  const searchPromise = withTimeout(
     searchKnowledgeHybrid(
       supabase,
       embedding,
@@ -158,7 +132,42 @@ export async function runAgent(
     8_000,
     "searchKnowledgeHybrid",
   );
-  console.log("[agent] step=hybrid-search done, results=" + knowledgeResults.length);
+
+  // 並列待機
+  const [profileResult, knowledgeResults] = await Promise.all([
+    profilePromise,
+    searchPromise,
+  ]);
+
+  const { customerProfile, firestoreCustomerId } = profileResult;
+  console.log(`[agent] step=parallel-fetch done, search_results=${knowledgeResults.length}, has_profile=${!!customerProfile}, elapsed=${Date.now() - t0}ms`);
+
+  // Firestore に behavior event を記録（fire-and-forget: レスポンスをブロックしない）
+  if (firestoreCustomerId) {
+    try {
+      const fsEnv = getFirestoreEnv(env);
+
+      const messageEvent: BehaviorEvent = {
+        action: "line_message",
+        channel,
+        metadata: { query: userMessage },
+        personaSignal: null,
+        createdAt: new Date().toISOString(),
+      };
+      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch((err) => {
+        console.warn("[agent] addBehaviorEvent (message) failed:", err instanceof Error ? err.message : err);
+      });
+
+      const signalEvents = extractConversationSignals(userMessage, channel);
+      for (const event of signalEvents) {
+        addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch((err) => {
+          console.warn("[agent] addBehaviorEvent (signal) failed:", err instanceof Error ? err.message : err);
+        });
+      }
+    } catch {
+      // スキップ
+    }
+  }
 
   // ナレッジ不足検知（MS7 7.6）
   const maxSimilarity =
@@ -232,7 +241,8 @@ export async function runAgent(
 
   // マルチターンのツールループ
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    console.log(`[agent] step=anthropic turn=${turn}`);
+    const tLlm = Date.now();
+    console.log(`[agent] step=anthropic turn=${turn}, total_elapsed=${tLlm - t0}ms`);
     const response = await withTimeout(
       client.messages.create({
         model: "claude-haiku-4-5-20251001",
@@ -258,7 +268,7 @@ export async function runAgent(
       15_000,
       `anthropic.messages.create turn=${turn}`,
     );
-    console.log(`[agent] step=anthropic turn=${turn} done`);
+    console.log(`[agent] step=anthropic turn=${turn} done, llm_elapsed=${Date.now() - tLlm}ms, total_elapsed=${Date.now() - t0}ms`);
     console.log(JSON.stringify({
       type: "usage",
       input_tokens: response.usage.input_tokens,

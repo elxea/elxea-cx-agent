@@ -81,6 +81,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   }
 
   const supabase = createSupabaseClient(c.env);
+  const tStart = Date.now();
 
   // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
   let result: Awaited<ReturnType<typeof runAgent>>;
@@ -128,7 +129,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       20_000,
       "runAgent",
     );
-    console.log("[web] step=runAgent done");
+    console.log(`[web] step=runAgent done, total_elapsed=${Date.now() - tStart}ms`);
   } catch (err) {
     console.error("webChatHandler fatal error:", err);
     return c.json(
