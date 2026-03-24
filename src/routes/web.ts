@@ -211,11 +211,21 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
  * クエリパラメータ:
  *   - session_id: セッション ID（必須）
  *   - channel: チャネルフィルター（任意: "line" | "web"、省略時は全チャネル for linked users）
- * レスポンス: { messages: [...], is_linked: boolean }
+ *   - keyword: 全文検索キーワード（任意、日本語対応 pg_trgm）
+ *   - from: 日付範囲開始（任意、ISO-8601 形式）
+ *   - to: 日付範囲終了（任意、ISO-8601 形式）
+ *   - limit: 取得件数上限（任意、デフォルト 50、最大 200）
+ *   - offset: 取得開始位置（任意、デフォルト 0）
+ * レスポンス: { messages: [...], is_linked: boolean, total_count: number, limit: number, offset: number }
  */
 export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const sessionId = c.req.query("session_id");
   const channelFilter = c.req.query("channel") as "line" | "web" | undefined;
+  const keyword = c.req.query("keyword") ?? null;
+  const dateFrom = c.req.query("from") ?? null;
+  const dateTo = c.req.query("to") ?? null;
+  const limitParam = c.req.query("limit");
+  const offsetParam = c.req.query("offset");
 
   const sessionError = validateSessionId(sessionId);
   if (sessionError) {
@@ -227,64 +237,104 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "channel must be 'line' or 'web'" }, 400);
   }
 
+  // limit/offset バリデーション
+  const limit = Math.min(Math.max(parseInt(limitParam ?? "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(offsetParam ?? "0", 10) || 0, 0);
+
+  // date バリデーション
+  if (dateFrom && isNaN(Date.parse(dateFrom))) {
+    return c.json({ error: "'from' must be a valid ISO-8601 date" }, 400);
+  }
+  if (dateTo && isNaN(Date.parse(dateTo))) {
+    return c.json({ error: "'to' must be a valid ISO-8601 date" }, 400);
+  }
+
   const supabase = createSupabaseClient(c.env);
 
   // Identity Resolver: unified_user_id を解決
   const identity = await resolveUnifiedUserId(supabase, sessionId as string, "web");
 
-  let data: Array<{
-    role: string;
-    content: string;
-    channel: string;
-    metadata: Record<string, unknown> | null;
-    created_at: string;
-  }> | null = null;
-  let error: unknown = null;
+  // 検索対象の user_id 一覧を構築
+  const userIds: string[] = [identity.isLinked ? identity.unifiedUserId : (sessionId as string)];
 
   if (identity.isLinked) {
-    // 紐付け済み: 全チャネルまたは指定チャネルの会話を取得
-    // user_identity_map から紐づいた全 user_id を収集
     const { data: identityData } = await supabase
       .from("user_identity_map")
       .select("unified_user_id, line_user_id, web_session_id")
       .eq("unified_user_id", identity.unifiedUserId)
       .single();
 
-    const userIds: string[] = [identity.unifiedUserId];
     if (identityData?.line_user_id && identityData.line_user_id !== identity.unifiedUserId) {
       userIds.push(identityData.line_user_id);
     }
     if (identityData?.web_session_id && identityData.web_session_id !== identity.unifiedUserId) {
       userIds.push(identityData.web_session_id);
     }
+  }
+
+  // 検索パラメータの有無を判定（keyword/date がある場合は RPC 検索を使用）
+  const hasSearchParams = keyword || dateFrom || dateTo;
+
+  let data: Array<{
+    id?: string;
+    role: string;
+    content: string;
+    channel: string;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+    total_count?: number;
+  }> | null = null;
+  let error: unknown = null;
+  let totalCount = 0;
+
+  if (hasSearchParams) {
+    // RPC 検索: keyword, date range, pagination 対応
+    const { data: rpcData, error: rpcError } = await supabase.rpc(
+      "search_conversations",
+      {
+        user_ids: userIds,
+        keyword: keyword || null,
+        date_from: dateFrom ? new Date(dateFrom).toISOString() : null,
+        date_to: dateTo ? new Date(dateTo).toISOString() : null,
+        channel_filter: identity.isLinked ? (channelFilter ?? null) : (channelFilter ?? "web"),
+        result_limit: limit,
+        result_offset: offset,
+      },
+    );
+
+    if (rpcError) {
+      console.error("search_conversations RPC failed, falling back to basic query:", rpcError);
+      // フォールバック: 基本クエリ（RPC 未作成の場合）
+      const fallbackResult = await basicHistoryQuery(
+        supabase, userIds, identity.isLinked, channelFilter, limit, offset,
+      );
+      data = fallbackResult.data;
+      error = fallbackResult.error;
+      totalCount = fallbackResult.data?.length ?? 0;
+    } else {
+      data = rpcData;
+      totalCount = (rpcData && rpcData.length > 0) ? Number(rpcData[0].total_count) : 0;
+    }
+  } else {
+    // 基本クエリ（従来互換 + pagination 対応）
+    const effectiveChannel = identity.isLinked ? channelFilter : (channelFilter ?? "web");
 
     let query = supabase
       .from("conversations")
-      .select("role, content, channel, metadata, created_at")
+      .select("role, content, channel, metadata, created_at", { count: "exact" })
       .in("user_id", userIds);
 
-    if (channelFilter) {
-      query = query.eq("channel", channelFilter);
+    if (effectiveChannel) {
+      query = query.eq("channel", effectiveChannel);
     }
 
     const result = await query
       .order("created_at", { ascending: true })
-      .limit(50);
+      .range(offset, offset + limit - 1);
 
     data = result.data;
     error = result.error;
-  } else {
-    // 未紐付け: 従来通り sessionId + web チャネルのみ
-    const result = await supabase
-      .from("conversations")
-      .select("role, content, channel, metadata, created_at")
-      .eq("user_id", sessionId as string)
-      .eq("channel", channelFilter ?? "web")
-      .order("created_at", { ascending: true })
-      .limit(50);
-
-    data = result.data;
-    error = result.error;
+    totalCount = result.count ?? data?.length ?? 0;
   }
 
   if (error) {
@@ -305,5 +355,39 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
       : {}),
   }));
 
-  return c.json({ messages, is_linked: identity.isLinked });
+  return c.json({
+    messages,
+    is_linked: identity.isLinked,
+    total_count: totalCount,
+    limit,
+    offset,
+  });
+}
+
+/**
+ * 基本的な履歴クエリ（RPC フォールバック用）。
+ * search_conversations RPC が利用不可の場合に使用。
+ */
+async function basicHistoryQuery(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  userIds: string[],
+  isLinked: boolean,
+  channelFilter: "line" | "web" | undefined,
+  limit: number,
+  offset: number,
+) {
+  const effectiveChannel = isLinked ? channelFilter : (channelFilter ?? "web");
+
+  let query = supabase
+    .from("conversations")
+    .select("role, content, channel, metadata, created_at")
+    .in("user_id", userIds);
+
+  if (effectiveChannel) {
+    query = query.eq("channel", effectiveChannel);
+  }
+
+  return query
+    .order("created_at", { ascending: true })
+    .range(offset, offset + limit - 1);
 }
