@@ -76,6 +76,167 @@ export async function resolveUnifiedUserId(
 }
 
 /**
+ * anonymous session の会話データを identified user に統合する。
+ * LINE Login や Shopify OAuth 後に呼ばれる。
+ *
+ * 1. anonymous session の会話を identified user に移行
+ * 2. anonymous session のフィードバックも移行
+ * 3. user_identity_map の web_session_id を更新
+ *
+ * @param supabase Supabase クライアント
+ * @param anonymousSessionId 統合元の anonymous session ID
+ * @param identifiedUserId 統合先の identified user ID (unified_user_id)
+ * @returns 移行された会話数
+ */
+export async function mergeAnonymousSession(
+  supabase: SupabaseClient,
+  anonymousSessionId: string,
+  identifiedUserId: string,
+): Promise<{ mergedCount: number }> {
+  try {
+    // 1. anonymous session の会話を identified user に移行
+    const { count, error: convError } = await supabase
+      .from("conversations")
+      .update({ user_id: identifiedUserId })
+      .eq("user_id", anonymousSessionId);
+
+    if (convError) {
+      console.warn("[identity] merge conversations failed:", convError.message);
+    }
+
+    // 2. anonymous session のフィードバックも移行
+    const { error: fbError } = await supabase
+      .from("message_feedback")
+      .update({ user_id: identifiedUserId })
+      .eq("user_id", anonymousSessionId);
+
+    if (fbError) {
+      console.warn("[identity] merge feedback failed:", fbError.message);
+    }
+
+    // 3. user_identity_map の web_session_id を更新
+    const { error: mapError } = await supabase
+      .from("user_identity_map")
+      .update({ web_session_id: anonymousSessionId })
+      .eq("unified_user_id", identifiedUserId);
+
+    if (mapError) {
+      console.warn("[identity] update identity map failed:", mapError.message);
+    }
+
+    const mergedCount = count ?? 0;
+    if (mergedCount > 0) {
+      console.log(
+        `[identity] Merged ${mergedCount} conversations from anonymous session ${anonymousSessionId} to user ${identifiedUserId}`,
+      );
+    }
+
+    return { mergedCount };
+  } catch (err) {
+    console.warn(
+      "[identity] mergeAnonymousSession failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return { mergedCount: 0 };
+  }
+}
+
+/**
+ * Email アドレスで既存の identity_map レコードを検索し、
+ * LINE Login 時に line_user_id を追加で紐付ける。
+ *
+ * - email で既存レコードあり → line_user_id を追記して統合
+ * - email で既存レコードなし → 新規レコードを作成
+ *
+ * Auth.js signIn callback から呼ばれる。
+ */
+export async function linkLineByEmail(
+  supabase: SupabaseClient,
+  lineUserId: string,
+  email: string | null,
+  displayName: string | null,
+): Promise<{ unifiedUserId: string; action: "linked" | "created" | "updated" }> {
+  try {
+    // 1. line_user_id で既存レコードを検索
+    const { data: existingByLine } = await supabase
+      .from("user_identity_map")
+      .select("id, unified_user_id, email")
+      .eq("line_user_id", lineUserId)
+      .single();
+
+    if (existingByLine) {
+      // Already linked -- update email/display_name if needed
+      const updates: Record<string, string | null> = {};
+      if (email && !existingByLine.email) {
+        updates.email = email;
+      }
+      if (displayName) {
+        updates.display_name = displayName;
+      }
+      if (Object.keys(updates).length > 0) {
+        await supabase
+          .from("user_identity_map")
+          .update(updates)
+          .eq("id", existingByLine.id);
+      }
+      return { unifiedUserId: existingByLine.unified_user_id, action: "updated" };
+    }
+
+    // 2. email で既存レコードを検索（email-based auto-linking）
+    if (email) {
+      const { data: existingByEmail } = await supabase
+        .from("user_identity_map")
+        .select("id, unified_user_id, shopify_customer_id")
+        .eq("email", email)
+        .single();
+
+      if (existingByEmail) {
+        // Email match -- add line_user_id to existing record
+        await supabase
+          .from("user_identity_map")
+          .update({
+            line_user_id: lineUserId,
+            display_name: displayName,
+          })
+          .eq("id", existingByEmail.id);
+
+        console.log(
+          `[identity] Linked LINE ${lineUserId} to existing email record (unified=${existingByEmail.unified_user_id})`,
+        );
+        return { unifiedUserId: existingByEmail.unified_user_id, action: "linked" };
+      }
+    }
+
+    // 3. No existing record -- create new
+    const unifiedUserId = lineUserId; // Use LINE userId as unified ID for now
+    const { error: insertError } = await supabase
+      .from("user_identity_map")
+      .insert({
+        unified_user_id: unifiedUserId,
+        line_user_id: lineUserId,
+        email,
+        display_name: displayName,
+      });
+
+    if (insertError) {
+      console.warn("[identity] linkLineByEmail insert failed:", insertError.message);
+      return { unifiedUserId: lineUserId, action: "created" };
+    }
+
+    console.log(
+      `[identity] Created new identity mapping for LINE ${lineUserId} (email=${email})`,
+    );
+    return { unifiedUserId, action: "created" };
+  } catch (err) {
+    console.warn(
+      "[identity] linkLineByEmail failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return { unifiedUserId: lineUserId, action: "created" };
+  }
+}
+
+/**
  * Shopify Customer ID を使った Web ユーザーの Identity 解決。
  *
  * ログイン済みユーザーの場合に呼び出す。以下のロジックで処理:

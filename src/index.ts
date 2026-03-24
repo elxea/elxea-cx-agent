@@ -10,6 +10,7 @@ import {
   webChatEventHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
+import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { getAlertStatus } from "./lib/alerts";
 
@@ -81,6 +82,10 @@ app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
 
 // Survey route
 app.post("/api/survey", surveyHandler);
+
+// Identity link routes
+app.post("/api/identity/link", identityLinkHandler);
+app.post("/api/identity/link-line", identityLinkLineHandler);
 
 /**
  * アラート状態確認 API。
