@@ -6,6 +6,7 @@ import {
   webChatHistoryHandler,
   webChatFeedbackHandler,
   webChatFeedbackStatsHandler,
+  webChatImageHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
 import { runKnowledgeSync } from "./sync/knowledge";
@@ -33,6 +34,8 @@ export type Env = {
   SHOPIFY_STOREFRONT_ACCESS_TOKEN?: string;
   // Notifications
   SLACK_WEBHOOK_URL?: string;
+  // Notion Alerts DB
+  NOTION_ALERTS_DB_ID?: string;
   // Sync
   SYNC_API_SECRET?: string;
   // Firebase / Firestore
@@ -70,6 +73,7 @@ app.post("/webhook/line", lineWebhook);
 // Web Chat routes
 app.post("/api/chat", webChatHandler);
 app.get("/api/chat/history", webChatHistoryHandler);
+app.post("/api/chat/image", webChatImageHandler);
 app.post("/api/chat/feedback", webChatFeedbackHandler);
 app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
 

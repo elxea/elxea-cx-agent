@@ -139,6 +139,50 @@ export async function pushFlexMessage(
   );
 }
 
+/**
+ * LINE Content API で画像をダウンロードし、base64 エンコードして返す。
+ *
+ * LINE v2 Content API: GET https://api-data.line.me/v2/bot/message/{messageId}/content
+ * 画像は JPEG/PNG で返却される。
+ *
+ * @param messageId メッセージ ID
+ * @param env 環境変数
+ * @returns { base64: string; mediaType: "image/jpeg" | "image/png" }
+ */
+export async function getImageContent(
+  messageId: string,
+  env: Env,
+): Promise<{ base64: string; mediaType: "image/jpeg" | "image/png" }> {
+  const res = await fetch(
+    `https://api-data.line.me/v2/bot/message/${messageId}/content`,
+    {
+      headers: {
+        Authorization: `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+    },
+  );
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => "unknown error");
+    throw new Error(`LINE Content API error (${res.status}): ${err}`);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  const mediaType = contentType.includes("png") ? "image/png" as const : "image/jpeg" as const;
+
+  const arrayBuffer = await res.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+
+  // base64 encode (Workers 環境対応)
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  const base64 = btoa(binary);
+
+  return { base64, mediaType };
+}
+
 /** LINE Webhook のイベント型定義 */
 export type LineEvent = {
   type: string;

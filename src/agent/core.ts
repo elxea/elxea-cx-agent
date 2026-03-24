@@ -89,7 +89,10 @@ export async function runAgent(
   userId: string,
   channel: Channel,
   env: Env,
-  options?: { isLinked?: boolean },
+  options?: {
+    isLinked?: boolean;
+    imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
+  },
 ): Promise<AgentResult> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const supabase = createSupabaseClient(env);
@@ -276,14 +279,41 @@ export async function runAgent(
     customerContext = "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
   }
 
+  // 入力言語検出: 英語など非日本語の場合、応答言語を強制するリマインダーを生成
+  const languageReminder = detectLanguageReminder(userMessage);
+
   // 会話履歴を Claude のメッセージ形式に変換
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
     })),
-    { role: "user", content: userMessage },
   ];
+
+  // 画像付きメッセージの場合、multimodal content を構築
+  if (options?.imageContent) {
+    const contentParts: Anthropic.ContentBlockParam[] = [
+      {
+        type: "image" as const,
+        source: {
+          type: "base64" as const,
+          media_type: options.imageContent.mediaType,
+          data: options.imageContent.base64,
+        },
+      },
+    ];
+    if (userMessage) {
+      contentParts.push({ type: "text" as const, text: userMessage });
+    } else {
+      contentParts.push({
+        type: "text" as const,
+        text: "この画像について教えてください。お茶のパッケージや茶葉の写真であれば、商品の識別や種類の推定をしてください。",
+      });
+    }
+    messages.push({ role: "user", content: contentParts });
+  } else {
+    messages.push({ role: "user", content: userMessage });
+  }
 
   let escalated = false;
   let escalationReason: string | undefined;
@@ -309,7 +339,7 @@ export async function runAgent(
           },
           {
             type: "text" as const,
-            text: customerContext + knowledgeContext,
+            text: customerContext + knowledgeContext + languageReminder,
           },
         ],
         tools: AGENT_TOOLS.map((tool, i) =>
@@ -621,6 +651,38 @@ async function executeTool(
     console.error(`Tool execution error (${toolUse.name}):`, error);
     return { text: `ツールの実行中にエラーが発生しました。お客様には「確認してお返事します」と伝えてください。` };
   }
+}
+
+// ---------------------------------------------------------------------------
+// 入力言語検出 — 非日本語入力時に応答言語を強制するリマインダーを生成
+// ---------------------------------------------------------------------------
+
+/**
+ * ユーザーメッセージの言語を簡易判定し、非日本語の場合に
+ * 応答言語を強制するリマインダー文字列を返す。
+ *
+ * system prompt 全体が日本語であるため、LLM が日本語で応答する傾向がある。
+ * 明示的なリマインダーを動的コンテキストに追加することで、
+ * ユーザーの言語に合わせた応答を確実にする。
+ */
+function detectLanguageReminder(message: string): string {
+  // 日本語文字（ひらがな・カタカナ・漢字）の割合で判定
+  const jaChars = message.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF]/g);
+  const jaRatio = jaChars ? jaChars.length / message.length : 0;
+
+  // 日本語文字が10%未満 かつ ASCII文字が多い場合、英語と判定
+  if (jaRatio < 0.1 && message.length > 0) {
+    // ASCII ラテン文字の割合で英語かどうかを推定
+    const latinChars = message.match(/[a-zA-Z]/g);
+    const latinRatio = latinChars ? latinChars.length / message.length : 0;
+
+    if (latinRatio > 0.3) {
+      return `\n\n## CRITICAL: Response Language\nThe user's message is in English. You MUST respond in English. Do NOT respond in Japanese. Use a friendly, professional tone. The tone rules in the system prompt (敬語 etc.) do not apply — use natural English instead.`;
+    }
+  }
+
+  // 日本語入力の場合はリマインダー不要
+  return "";
 }
 
 // ---------------------------------------------------------------------------

@@ -486,6 +486,137 @@ export async function webChatFeedbackHandler(c: Context<{ Bindings: Env }>) {
 }
 
 /**
+ * POST /api/chat/image
+ *
+ * 画像付きチャットメッセージを処理する。
+ * リクエスト: multipart/form-data (image: File, session_id: string, message?: string, shopify_customer_id?: string)
+ * レスポンス: JSON { response: string, ... }
+ */
+export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
+  // レートリミット
+  const clientIp = getClientIp(c.req.raw);
+  const rateLimitError = checkRateLimit(clientIp);
+  if (rateLimitError) {
+    return c.json({ error: rateLimitError }, 429);
+  }
+
+  // multipart/form-data パース
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch {
+    return c.json({ error: "Invalid form data" }, 400);
+  }
+
+  const imageFile = formData.get("image") as File | null;
+  const sessionId = formData.get("session_id") as string | null;
+  const message = (formData.get("message") as string | null)?.trim() || "";
+  const shopifyCustomerId = formData.get("shopify_customer_id") as string | null;
+
+  // バリデーション
+  const sessionError = validateSessionId(sessionId);
+  if (sessionError) {
+    return c.json({ error: sessionError }, 400);
+  }
+
+  if (!imageFile || !(imageFile instanceof File)) {
+    return c.json({ error: "image file is required" }, 400);
+  }
+
+  // 画像サイズ制限 (5MB)
+  if (imageFile.size > 5 * 1024 * 1024) {
+    return c.json({ error: "Image must be less than 5MB" }, 400);
+  }
+
+  // MIME タイプチェック
+  const validTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+  if (!validTypes.includes(imageFile.type)) {
+    return c.json({ error: "Image must be JPEG, PNG, WebP, or GIF" }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+  const tStart = Date.now();
+
+  try {
+    // 画像を base64 に変換
+    const arrayBuffer = await imageFile.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    const mediaType = imageFile.type === "image/png" ? "image/png" as const : "image/jpeg" as const;
+
+    // Identity 解決
+    const identity = shopifyCustomerId
+      ? await resolveWithShopifyCustomerId(supabase, shopifyCustomerId, sessionId as string)
+      : await resolveUnifiedUserId(supabase, sessionId as string, "web");
+    const effectiveUserId = identity.unifiedUserId;
+
+    // メッセージ保存
+    await saveMessage(supabase, {
+      userId: sessionId as string,
+      channel: "web",
+      role: "user",
+      content: message || "[画像メッセージ]",
+    });
+
+    // 履歴取得
+    const history = identity.isLinked
+      ? await getCrossChannelMessages(supabase, effectiveUserId)
+      : await getRecentMessages(supabase, effectiveUserId, "web");
+
+    // 空の Embedding（画像メッセージではナレッジ検索をスキップ）
+    const embedding = new Array(1536).fill(0);
+
+    // エージェント実行（画像付き）
+    const imagePrompt = message || "この画像について教えてください。";
+    const result = await withTimeout(
+      runAgent(
+        imagePrompt,
+        history,
+        embedding,
+        effectiveUserId,
+        "web",
+        c.env,
+        { isLinked: identity.isLinked, imageContent: { base64, mediaType } },
+      ),
+      TIMEOUT_RUN_AGENT_MS,
+      "runAgent (image)",
+    );
+
+    const elapsed = Date.now() - tStart;
+    recordResponseTime(c.env, elapsed);
+
+    // 応答保存
+    c.executionCtx.waitUntil(
+      saveMessage(supabase, {
+        userId: sessionId as string,
+        channel: "web",
+        role: "assistant",
+        content: result.response,
+      }),
+    );
+
+    return c.json({
+      response: result.response,
+      session_id: sessionId,
+      ...(result.productCards && result.productCards.length > 0
+        ? { product_cards: result.productCards }
+        : {}),
+      ...(result.quickReplies && result.quickReplies.length > 0
+        ? { quick_replies: result.quickReplies }
+        : {}),
+    });
+  } catch (err) {
+    console.error("webChatImageHandler error:", err);
+    recordApiError(c.env, err instanceof Error ? err.message : String(err));
+    return c.json({ error: "Internal server error" }, 500);
+  }
+}
+
+/**
  * GET /api/chat/feedback/stats
  *
  * クエリパラメータ: session_id（必須）
