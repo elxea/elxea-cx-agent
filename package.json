@@ -12,10 +12,16 @@
     "setup-rich-menu": "npx tsx scripts/setup-rich-menu.ts",
     "setup-richmenu": "npx tsx scripts/setup-richmenu.ts",
     "typecheck": "tsc --noEmit",
+    "test:unit": "npx tsx tests/unit/run-unit-tests.ts",
     "test:e2e": "npx tsx tests/e2e/run-e2e.ts --all",
     "test:e2e:scenario": "npx tsx tests/e2e/run-e2e.ts",
+    "test:e2e:web": "npx tsx tests/web-chat-e2e/run-web-chat-e2e.ts --all",
+    "test:e2e:web:scenario": "npx tsx tests/web-chat-e2e/run-web-chat-e2e.ts",
+    "test:e2e:web:validation": "npx tsx tests/web-chat-e2e/run-web-chat-e2e.ts --validation-only",
     "test:search-quality": "npx tsx tests/search-quality/run-search-quality.ts",
-    "test:search-quality:discover": "npx tsx tests/search-quality/run-search-quality.ts --discover --verbose"
+    "test:search-quality:discover": "npx tsx tests/search-quality/run-search-quality.ts --discover --verbose",
+    "test:load": "npx tsx tests/load/run-load-test.ts",
+    "test:load:staging": "npx tsx tests/load/run-load-test.ts --base-url https://elxea-agent-staging.setaka1103.workers.dev"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

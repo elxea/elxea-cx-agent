@@ -9,3 +9,4 @@ dist/
 *.log
 .DS_Store
 .playwright-mcp/
+tests/load/results.json
