@@ -26,7 +26,7 @@ import {
   resolveWithShopifyCustomerId,
 } from "../lib/identity";
 import { withTimeout } from "../lib/utils";
-import { recordResponseTime, recordApiError } from "../lib/alerts";
+import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -412,4 +412,115 @@ async function basicHistoryQuery(
   return query
     .order("created_at", { ascending: true })
     .range(offset, offset + limit - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Feedback endpoints
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/chat/feedback
+ *
+ * リクエストボディ: { session_id, message_content, rating: 1|-1, comment?: string }
+ * レスポンス: { success: true }
+ */
+export async function webChatFeedbackHandler(c: Context<{ Bindings: Env }>) {
+  let body: {
+    session_id?: string;
+    message_content?: string;
+    rating?: number;
+    comment?: string;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { session_id, message_content, rating, comment } = body;
+
+  // session_id バリデーション
+  const sessionError = validateSessionId(session_id);
+  if (sessionError) {
+    return c.json({ error: sessionError }, 400);
+  }
+
+  // rating バリデーション
+  if (rating !== 1 && rating !== -1) {
+    return c.json({ error: "rating must be 1 or -1" }, 400);
+  }
+
+  // message_content バリデーション
+  if (typeof message_content !== "string" || message_content.trim().length === 0) {
+    return c.json({ error: "message_content is required" }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+
+  // session_id から user_id を解決
+  const identity = await resolveUnifiedUserId(supabase, session_id as string, "web");
+  const userId = identity.unifiedUserId;
+
+  // message_feedback テーブルに保存
+  const { error } = await supabase.from("message_feedback").insert({
+    user_id: userId,
+    channel: "web",
+    message_content: message_content.trim(),
+    rating,
+    comment: comment?.trim() || null,
+  });
+
+  if (error) {
+    console.error("Failed to save feedback:", error);
+    return c.json({ error: "Failed to save feedback" }, 500);
+  }
+
+  // rating = -1 の場合、Slack に通知
+  if (rating === -1) {
+    c.executionCtx.waitUntil(
+      sendNegativeFeedbackAlert(c.env, userId, message_content.trim(), comment?.trim()),
+    );
+  }
+
+  return c.json({ success: true });
+}
+
+/**
+ * GET /api/chat/feedback/stats
+ *
+ * クエリパラメータ: session_id（必須）
+ * レスポンス: { total, positive, negative, positive_rate }
+ */
+export async function webChatFeedbackStatsHandler(c: Context<{ Bindings: Env }>) {
+  const sessionId = c.req.query("session_id");
+  const sessionError = validateSessionId(sessionId);
+  if (sessionError) {
+    return c.json({ error: sessionError }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+  const identity = await resolveUnifiedUserId(supabase, sessionId as string, "web");
+  const userId = identity.unifiedUserId;
+
+  const { data, error } = await supabase
+    .from("message_feedback")
+    .select("rating")
+    .eq("user_id", userId);
+
+  if (error) {
+    console.error("Failed to fetch feedback stats:", error);
+    return c.json({ error: "Failed to fetch stats" }, 500);
+  }
+
+  const total = data?.length ?? 0;
+  const positive = data?.filter((r) => r.rating === 1).length ?? 0;
+  const negative = data?.filter((r) => r.rating === -1).length ?? 0;
+  const positiveRate = total > 0 ? Math.round((positive / total) * 100) / 100 : 0;
+
+  return c.json({
+    total,
+    positive,
+    negative,
+    positive_rate: positiveRate,
+  });
 }

@@ -16,10 +16,20 @@ import {
   getCrossChannelMessages,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
-import { recordResponseTime, recordApiError } from "../lib/alerts";
+import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 
 /** 入力テキストの最大文字数（Embedding + Claude 入力の上限考慮） */
 const MAX_MESSAGE_LENGTH = 2000;
+
+/** フィードバック Quick Reply のトリガーテキスト */
+const FEEDBACK_POSITIVE_TEXT = "feedback:positive";
+const FEEDBACK_NEGATIVE_TEXT = "feedback:negative";
+
+/** フィードバック待ちユーザーのコメント収集状態（インメモリ） */
+const pendingFeedbackComments = new Map<string, { messageContent: string; expiresAt: number }>();
+
+/** コメント待ちの有効期限（5分） */
+const FEEDBACK_COMMENT_TTL_MS = 5 * 60 * 1000;
 
 /**
  * LINE Webhook ハンドラー。
@@ -194,6 +204,122 @@ async function handleFollowEvent(
   await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
 }
 
+/**
+ * フィードバック Quick Reply アイテムを生成する。
+ * エージェント応答の Quick Reply に追加する。
+ */
+function buildFeedbackQuickReplies(): QuickReplyItem[] {
+  return [
+    {
+      type: "action",
+      action: { type: "message", label: "\uD83D\uDC4D よかった", text: FEEDBACK_POSITIVE_TEXT },
+    },
+    {
+      type: "action",
+      action: { type: "message", label: "\uD83D\uDC4E 改善希望", text: FEEDBACK_NEGATIVE_TEXT },
+    },
+  ];
+}
+
+/**
+ * フィードバックメッセージを処理する。
+ * @returns true if the message was a feedback action (handled), false otherwise.
+ */
+async function handleFeedbackMessage(
+  lineUserId: string,
+  userMessage: string,
+  env: Env,
+): Promise<boolean> {
+  const supabase = createSupabaseClient(env);
+
+  // コメント待ち状態のチェック（「改善希望」タップ後の次メッセージ）
+  const pending = pendingFeedbackComments.get(lineUserId);
+  if (pending && Date.now() < pending.expiresAt) {
+    // 次メッセージをコメントとして記録
+    pendingFeedbackComments.delete(lineUserId);
+
+    const identity = await resolveUnifiedUserId(supabase, lineUserId, "line");
+
+    await supabase.from("message_feedback").insert({
+      user_id: identity.unifiedUserId,
+      channel: "line",
+      message_content: pending.messageContent,
+      rating: -1,
+      comment: userMessage.trim(),
+    });
+
+    // Slack 通知
+    await sendNegativeFeedbackAlert(env, identity.unifiedUserId, pending.messageContent, userMessage.trim());
+
+    await pushTextMessage(
+      lineUserId,
+      "ご意見ありがとうございます。改善に活かしてまいります。",
+      env,
+    );
+    return true;
+  }
+
+  // フィードバック Quick Reply のタップ処理
+  if (userMessage === FEEDBACK_POSITIVE_TEXT || userMessage === FEEDBACK_NEGATIVE_TEXT) {
+    const rating = userMessage === FEEDBACK_POSITIVE_TEXT ? 1 : -1;
+    const identity = await resolveUnifiedUserId(supabase, lineUserId, "line");
+
+    // 直近のアシスタントメッセージを取得
+    const { data: recentMessages } = await supabase
+      .from("conversations")
+      .select("content")
+      .eq("user_id", lineUserId)
+      .eq("channel", "line")
+      .eq("role", "assistant")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    const lastAssistantContent = recentMessages?.[0]?.content ?? "";
+
+    await supabase.from("message_feedback").insert({
+      user_id: identity.unifiedUserId,
+      channel: "line",
+      message_content: lastAssistantContent,
+      rating,
+      comment: null,
+    });
+
+    if (rating === 1) {
+      await pushTextMessage(
+        lineUserId,
+        "ありがとうございます！お役に立てて嬉しいです。",
+        env,
+      );
+    } else {
+      // コメント待ち状態をセット
+      pendingFeedbackComments.set(lineUserId, {
+        messageContent: lastAssistantContent,
+        expiresAt: Date.now() + FEEDBACK_COMMENT_TTL_MS,
+      });
+      await pushTextMessage(
+        lineUserId,
+        "ご意見ありがとうございます。よろしければ、どんな点を改善できるかメッセージで教えてください。",
+        env,
+      );
+    }
+
+    // Slack 通知（ネガティブ時）
+    if (rating === -1) {
+      await sendNegativeFeedbackAlert(env, identity.unifiedUserId, lastAssistantContent);
+    }
+
+    return true;
+  }
+
+  // フィードバックメッセージではない
+  // コメント待ち状態が期限切れの場合はクリア
+  if (pending) {
+    pendingFeedbackComments.delete(lineUserId);
+  }
+
+  return false;
+}
+
 /** テキストメッセージを処理してエージェントに渡す */
 async function handleTextMessage(
   lineUserId: string,
@@ -202,6 +328,10 @@ async function handleTextMessage(
 ): Promise<void> {
   // 空メッセージをスキップ
   if (!userMessage.trim()) return;
+
+  // フィードバックメッセージの処理（Quick Reply タップ or コメント入力）
+  const wasFeedback = await handleFeedbackMessage(lineUserId, userMessage, env);
+  if (wasFeedback) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;
@@ -245,17 +375,20 @@ async function handleTextMessage(
     { isLinked: identity.isLinked },
   );
 
-  // Quick Reply を LINE 形式に変換
-  const quickReplyItems: QuickReplyItem[] | undefined = result.quickReplies?.map(
+  // Quick Reply を LINE 形式に変換し、フィードバック Quick Reply を追加
+  const agentQuickReplies: QuickReplyItem[] = result.quickReplies?.map(
     (qr) => ({
       type: "action" as const,
       action: { type: "message" as const, label: qr.label, text: qr.text },
     }),
-  );
+  ) ?? [];
+
+  const feedbackQuickReplies = buildFeedbackQuickReplies();
+  const allQuickReplies = [...agentQuickReplies, ...feedbackQuickReplies];
 
   // テキスト送信と応答保存を並列実行
   await Promise.all([
-    pushTextMessage(lineUserId, result.response, env, quickReplyItems),
+    pushTextMessage(lineUserId, result.response, env, allQuickReplies),
     saveMessage(supabase, {
       userId: lineUserId,
       channel: "line",

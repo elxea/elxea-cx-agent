@@ -179,6 +179,33 @@ export function getAlertStatus(): {
 }
 
 // ---------------------------------------------------------------------------
+// Negative Feedback Alert
+// ---------------------------------------------------------------------------
+
+/**
+ * ネガティブフィードバック（👎）を Slack に通知する。
+ * ユーザーが改善希望を送信した際に呼び出す。
+ */
+export async function sendNegativeFeedbackAlert(
+  env: Env,
+  userId: string,
+  messageContent: string,
+  comment?: string | null,
+): Promise<void> {
+  const truncatedContent =
+    messageContent.length > 200
+      ? messageContent.slice(0, 200) + "..."
+      : messageContent;
+
+  let text = `*[Feedback] Negative Rating*\nUser: \`${userId.slice(0, 8)}...\`\nMessage: ${truncatedContent}`;
+  if (comment) {
+    text += `\nComment: ${comment}`;
+  }
+
+  await sendSlackAlert(env, "negative_feedback", text);
+}
+
+// ---------------------------------------------------------------------------
 // ヘルパー
 // ---------------------------------------------------------------------------
 

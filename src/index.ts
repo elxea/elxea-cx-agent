@@ -1,7 +1,12 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { lineWebhook } from "./routes/line";
-import { webChatHandler, webChatHistoryHandler } from "./routes/web";
+import {
+  webChatHandler,
+  webChatHistoryHandler,
+  webChatFeedbackHandler,
+  webChatFeedbackStatsHandler,
+} from "./routes/web";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { getAlertStatus } from "./lib/alerts";
 
@@ -64,6 +69,8 @@ app.post("/webhook/line", lineWebhook);
 // Web Chat routes
 app.post("/api/chat", webChatHandler);
 app.get("/api/chat/history", webChatHistoryHandler);
+app.post("/api/chat/feedback", webChatFeedbackHandler);
+app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
 
 /**
  * アラート状態確認 API。
