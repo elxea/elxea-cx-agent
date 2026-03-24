@@ -344,7 +344,7 @@ export async function runAgent(
           },
           {
             type: "text" as const,
-            text: customerContext + knowledgeContext + languageReminder,
+            text: languageReminder + customerContext + knowledgeContext,
           },
         ],
         tools: AGENT_TOOLS.map((tool, i) =>
@@ -679,6 +679,11 @@ async function executeTool(
  * ユーザーの言語に合わせた応答を確実にする。
  */
 function detectLanguageReminder(message: string): string {
+  // 短文（5文字未満）は言語判定を行わない（"OK", "Hi" 等の共通語で誤検出を防止）
+  if (message.length < 5) {
+    return "";
+  }
+
   // 日本語文字（ひらがな・カタカナ・漢字）の割合で判定
   const jaChars = message.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF]/g);
   const jaRatio = jaChars ? jaChars.length / message.length : 0;

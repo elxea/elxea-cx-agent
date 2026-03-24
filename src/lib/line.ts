@@ -191,6 +191,14 @@ export type LineEvent = {
     id: string;
     text?: string;
   };
+  /** follow イベント固有のプロパティ（LINE Messaging API） */
+  follow?: {
+    isUnblocked: boolean;
+  };
+  /** postback イベントのデータ */
+  postback?: {
+    data: string;
+  };
   source: {
     type: string;
     userId?: string;

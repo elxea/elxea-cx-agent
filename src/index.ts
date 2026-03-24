@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { lineWebhook } from "./routes/line";
+import { lineWebhook, storePendingFollowRef } from "./routes/line";
 import {
   webChatHandler,
   webChatHistoryHandler,
@@ -12,6 +12,8 @@ import {
 import { surveyHandler } from "./routes/survey";
 import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
 import { runKnowledgeSync } from "./sync/knowledge";
+import { runBatchMetafieldSync } from "./sync/shopify-metafield";
+import { runSegmentBroadcast } from "./lib/segment-broadcast";
 import { getAlertStatus } from "./lib/alerts";
 
 export type Env = {
@@ -88,6 +90,32 @@ app.post("/api/identity/link", identityLinkHandler);
 app.post("/api/identity/link-line", identityLinkLineHandler);
 
 /**
+ * LIFF Follow Ref API。
+ * QR コードスキャン後の LIFF ページが友だち追加前に呼び出す。
+ * ref パラメータと LINE userId を紐付けて一時保存する。
+ *
+ * Body: { lineUserId: string, ref: string }
+ */
+app.post("/api/follow-ref", async (c) => {
+  const body = await c.req.json<{ lineUserId?: string; ref?: string }>().catch(
+    () => ({}) as { lineUserId?: string; ref?: string },
+  );
+
+  if (!body.lineUserId || !body.ref) {
+    return c.json({ error: "lineUserId and ref are required" }, 400);
+  }
+
+  // ref パラメータのバリデーション（英数字・アンダースコア・ハイフンのみ）
+  if (!/^[a-zA-Z0-9_-]+$/.test(body.ref)) {
+    return c.json({ error: "Invalid ref format" }, 400);
+  }
+
+  await storePendingFollowRef(body.lineUserId, body.ref, c.env);
+
+  return c.json({ status: "ok" });
+});
+
+/**
  * アラート状態確認 API。
  * 認証付き — エスカレーション/エラー/レスポンスタイムの現在のカウンターを返す。
  */
@@ -131,21 +159,97 @@ app.post("/api/sync", async (c) => {
 });
 
 /**
+ * Shopify Metafield バッチ同期 API（MS4-2）。
+ * Bearer トークンで認証。Firestore の更新された顧客プロファイルを
+ * Shopify Customer Metafields に同期する。
+ */
+app.post("/api/sync/shopify-metafields", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const body = await c.req.json<{ since?: string }>().catch(() => ({}));
+
+  c.executionCtx.waitUntil(
+    runBatchMetafieldSync(c.env, (body as { since?: string }).since).then(
+      (result) => {
+        console.log(
+          "Shopify metafield batch sync completed:",
+          JSON.stringify({
+            total: result.total,
+            succeeded: result.succeeded,
+            failed: result.failed,
+            skipped: result.skipped,
+            durationMs: result.durationMs,
+          }),
+        );
+      },
+    ),
+  );
+
+  return c.json({ status: "sync_started", type: "shopify-metafields" });
+});
+
+/**
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
- * - scheduled: Cron Trigger による定期同期（MS4 4.5）
+ * - scheduled: Cron Trigger による定期処理
+ *   - 毎日 18:00 UTC (03:00 JST): ナレッジ同期 + Shopify Metafield 同期
+ *   - 1日・15日 21:00 UTC (06:00 JST): セグメント別自動配信（月2回）
+ *     NOTE: セグメント配信 cron は disabled 状態でデプロイ。Setaka が有効化する。
  */
 export default {
   fetch: app.fetch,
   scheduled: async (
-    _event: ScheduledController,
+    event: ScheduledController,
     env: Env,
     ctx: ExecutionContext,
   ) => {
+    const cronPattern = event.cron;
+
+    // セグメント配信 cron（1日・15日 21:00 UTC = 06:00 JST）
+    if (cronPattern === "0 21 1,15 * *") {
+      ctx.waitUntil(
+        runSegmentBroadcast(env).then((result) => {
+          console.log(
+            "Scheduled segment broadcast completed:",
+            JSON.stringify({
+              totalDelivered: result.totalDelivered,
+              skippedCount: result.skippedCount,
+              segments: result.segments.map((s) => ({
+                persona: s.persona,
+                userCount: s.userCount,
+                success: s.success,
+              })),
+            }),
+          );
+        }),
+      );
+      return;
+    }
+
+    // デフォルト: 日次同期処理
     ctx.waitUntil(
-      runKnowledgeSync(env, "incremental").then((result) => {
-        console.log("Scheduled sync completed:", JSON.stringify(result));
-      }),
+      Promise.all([
+        runKnowledgeSync(env, "incremental").then((result) => {
+          console.log("Scheduled knowledge sync completed:", JSON.stringify(result));
+        }),
+        runBatchMetafieldSync(env).then((result) => {
+          console.log(
+            "Scheduled metafield sync completed:",
+            JSON.stringify({
+              total: result.total,
+              succeeded: result.succeeded,
+              failed: result.failed,
+              durationMs: result.durationMs,
+            }),
+          );
+        }),
+      ]),
     );
   },
 } satisfies ExportedHandler<Env>;

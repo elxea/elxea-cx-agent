@@ -15,6 +15,7 @@ import {
   saveMessage,
   getRecentMessages,
   getCrossChannelMessages,
+  searchKnowledgeHybrid,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
 import {
@@ -45,6 +46,17 @@ const TASTING_NOTE_CTA_TEXT =
 const ONBOARDING_EXPLORE_TEXT = "onboarding:explore_tea";
 const ONBOARDING_ABOUT_TEXT = "onboarding:about_elxea";
 const ONBOARDING_HOWTO_TEXT = "onboarding:how_to_use";
+
+/** 商品固有オンボーディング Quick Reply のトリガーテキスト */
+const ONBOARDING_BREWING_TEXT = "onboarding:brewing_guide";
+const ONBOARDING_PRODUCT_DETAIL_TEXT = "onboarding:product_detail";
+const ONBOARDING_SIMILAR_TEXT = "onboarding:similar_products";
+
+/** ref パラメータのプレフィックス（QR同梱物経由） */
+const REF_PACKAGE_PREFIX = "pkg_";
+
+/** pending_follow_refs の有効期限（10分 — QRスキャンから友だち追加までのバッファ） */
+const PENDING_REF_TTL_MINUTES = 10;
 
 /** フィードバック Quick Reply のトリガーテキスト */
 const FEEDBACK_POSITIVE_TEXT = "feedback:positive";
@@ -83,6 +95,174 @@ export async function lineWebhook(c: Context<{ Bindings: Env }>) {
   c.executionCtx.waitUntil(processEvents(webhookBody, c.env));
 
   return c.json({ status: "ok" });
+}
+
+// ---------------------------------------------------------------------------
+// Pending Follow Ref — QR コード経由の ref パラメータを一時保存
+// ---------------------------------------------------------------------------
+// LINE follow event は ref パラメータをネイティブにサポートしないため、
+// LIFF ページが友だち追加前に storePendingFollowRef() を呼び出し、
+// follow event 時に getPendingFollowRef() で取得する方式を採用。
+// ---------------------------------------------------------------------------
+
+/**
+ * LIFF 経由で受け取った ref パラメータを Supabase に一時保存する。
+ * LIFF ページ → POST /api/follow-ref → この関数 → Supabase pending_follow_refs テーブル
+ */
+export async function storePendingFollowRef(
+  lineUserId: string,
+  ref: string,
+  env: Env,
+): Promise<void> {
+  const supabase = createSupabaseClient(env);
+  const expiresAt = new Date(Date.now() + PENDING_REF_TTL_MINUTES * 60 * 1000).toISOString();
+
+  // upsert: 同じユーザーが短時間に複数回スキャンした場合は最新を採用
+  await supabase
+    .from("pending_follow_refs")
+    .upsert(
+      { line_user_id: lineUserId, ref, expires_at: expiresAt },
+      { onConflict: "line_user_id" },
+    )
+    .then(({ error }) => {
+      if (error) console.error("[follow-ref] Failed to store pending ref:", error.message);
+    });
+}
+
+/**
+ * 友だち追加時に pending ref を取得し、取得後に削除する（ワンタイム読み取り）。
+ * 有効期限切れのレコードは無視する。
+ */
+async function getPendingFollowRef(
+  lineUserId: string,
+  env: Env,
+): Promise<string | null> {
+  const supabase = createSupabaseClient(env);
+
+  const { data } = await supabase
+    .from("pending_follow_refs")
+    .select("ref, expires_at")
+    .eq("line_user_id", lineUserId)
+    .single();
+
+  if (!data) return null;
+
+  // 有効期限チェック
+  if (new Date(data.expires_at) < new Date()) {
+    // 期限切れ — 削除して null を返す
+    await supabase
+      .from("pending_follow_refs")
+      .delete()
+      .eq("line_user_id", lineUserId);
+    return null;
+  }
+
+  // ワンタイム読み取り: 取得後に削除
+  await supabase
+    .from("pending_follow_refs")
+    .delete()
+    .eq("line_user_id", lineUserId);
+
+  return data.ref;
+}
+
+/**
+ * ref パラメータから product_slug を抽出する。
+ * ref=pkg_{product_slug} のフォーマットを解析。
+ * @returns product_slug or null（pkg_ プレフィックスでない場合）
+ */
+function extractProductSlug(ref: string): string | null {
+  if (ref.startsWith(REF_PACKAGE_PREFIX)) {
+    return ref.slice(REF_PACKAGE_PREFIX.length);
+  }
+  return null;
+}
+
+/**
+ * product_slug から商品情報を RAG（Supabase pgvector）で検索し、
+ * 商品名と関連情報を取得する。
+ */
+async function lookupProductBySlug(
+  productSlug: string,
+  env: Env,
+): Promise<{ productName: string; context: string } | null> {
+  const supabase = createSupabaseClient(env);
+
+  // product_slug をスペース区切りに変換して検索キーワードにする
+  // 例: "hojicha_classic" → "hojicha classic"
+  const searchQuery = productSlug.replace(/_/g, " ");
+
+  const embedding = await createEmbedding(searchQuery, env);
+  const results = await searchKnowledgeHybrid(
+    supabase,
+    embedding,
+    searchQuery,
+    3,       // topK: 上位3件
+    0.3,     // threshold
+    null,    // source_type: フィルタなし（product_slug 自体が十分な検索キー）
+  );
+
+  if (results.length === 0) {
+    console.log(`[follow-ref] No product found for slug: ${productSlug}`);
+    return null;
+  }
+
+  // 最上位の結果から商品名を抽出（source_title を使用）
+  const topResult = results[0];
+  const productName = topResult.source_title || searchQuery;
+
+  // 上位結果のコンテンツを結合してコンテキストとする
+  const context = results.map((r) => r.content).join("\n\n");
+
+  return { productName, context };
+}
+
+/**
+ * 商品固有のウェルカムメッセージを生成する。
+ * Planning のテンプレートに基づく。
+ */
+function buildProductWelcomeMessage(productName: string): string {
+  return (
+    `こんにちは！elxea へようこそ。\n\n` +
+    `${productName} をお届けしましたね。\n` +
+    `おいしく楽しんでいただけていますか？\n\n` +
+    `このお茶のおすすめの淹れ方や、\n` +
+    `あなたに合う他のお茶のことなど、\n` +
+    `何でも気軽に聞いてくださいね。`
+  );
+}
+
+/**
+ * 商品固有の Quick Reply ボタンを生成する。
+ * Planning: 「おいしい淹れ方を教えて」「この茶葉について詳しく」「似たお茶をもっと見たい」
+ */
+function buildProductQuickReplies(_productSlug: string): QuickReplyItem[] {
+  return [
+    {
+      type: "action",
+      action: {
+        type: "message",
+        label: "おいしい淹れ方を教えて",
+        text: ONBOARDING_BREWING_TEXT,
+      },
+    },
+    {
+      type: "action",
+      action: {
+        type: "message",
+        label: "この茶葉について詳しく",
+        text: ONBOARDING_PRODUCT_DETAIL_TEXT,
+      },
+    },
+    {
+      type: "action",
+      action: {
+        type: "message",
+        label: "似たお茶をもっと見たい",
+        text: ONBOARDING_SIMILAR_TEXT,
+      },
+    },
+  ];
 }
 
 /** イベントをバックグラウンドで処理 */
@@ -290,29 +470,65 @@ async function handleFollowEvent(
     console.warn("[follow] Identity linking failed:", err instanceof Error ? err.message : err);
   }
 
-  const welcomeText =
-    "こんにちは！elxea（エルシア）へようこそ。\n\n" +
-    "鹿児島の茶畑から届くお茶を、あなたにぴったりの一杯としてお届けします。\n\n" +
-    "まずは、何から始めましょうか？";
+  // --- ref パラメータの取得（QR同梱物経由かどうかの判定） ---
+  let ref: string | null = null;
+  try {
+    ref = await getPendingFollowRef(lineUserId, env);
+    if (ref) {
+      console.log(`[follow] Found pending ref for ${lineUserId}: ${ref}`);
+    }
+  } catch (err) {
+    console.warn("[follow] Failed to get pending ref:", err instanceof Error ? err.message : err);
+  }
 
-  const quickReplyItems: QuickReplyItem[] = [
-    {
-      type: "action",
-      action: { type: "message", label: "お茶を探す", text: ONBOARDING_EXPLORE_TEXT },
-    },
-    {
-      type: "action",
-      action: { type: "message", label: "elxea について知る", text: ONBOARDING_ABOUT_TEXT },
-    },
-    {
-      type: "action",
-      action: { type: "message", label: "使い方を教えて", text: ONBOARDING_HOWTO_TEXT },
-    },
-  ];
+  // ref の有無で分岐: 商品固有 or 通常のウェルカムメッセージ
+  const onboardingSource = ref ?? "direct";
+  const productSlug = ref ? extractProductSlug(ref) : null;
 
-  await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
+  if (productSlug) {
+    // --- 商品固有ウェルカムメッセージ（QR同梱物経由） ---
+    let productName = productSlug.replace(/_/g, " ");
 
-  // Firestore にオンボーディング開始を記録（fire-and-forget）
+    try {
+      const productInfo = await lookupProductBySlug(productSlug, env);
+      if (productInfo) {
+        productName = productInfo.productName;
+      }
+    } catch (err) {
+      console.warn("[follow] Product lookup failed, using slug as name:", err instanceof Error ? err.message : err);
+    }
+
+    const welcomeText = buildProductWelcomeMessage(productName);
+    const quickReplyItems = buildProductQuickReplies(productSlug);
+
+    await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
+    console.log(`[follow] Sent product-specific welcome for ${productSlug} to ${lineUserId}`);
+  } else {
+    // --- 通常の友だち追加ウェルカムメッセージ（既存フロー維持） ---
+    const welcomeText =
+      "こんにちは！elxea（エルシア）へようこそ。\n\n" +
+      "鹿児島の茶畑から届くお茶を、あなたにぴったりの一杯としてお届けします。\n\n" +
+      "まずは、何から始めましょうか？";
+
+    const quickReplyItems: QuickReplyItem[] = [
+      {
+        type: "action",
+        action: { type: "message", label: "お茶を探す", text: ONBOARDING_EXPLORE_TEXT },
+      },
+      {
+        type: "action",
+        action: { type: "message", label: "elxea について知る", text: ONBOARDING_ABOUT_TEXT },
+      },
+      {
+        type: "action",
+        action: { type: "message", label: "使い方を教えて", text: ONBOARDING_HOWTO_TEXT },
+      },
+    ];
+
+    await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
+  }
+
+  // Firestore にオンボーディング開始 + source を記録（fire-and-forget）
   try {
     const fsEnv = getFirestoreEnv(env);
     const { data: linkage } = await supabase
@@ -328,6 +544,7 @@ async function handleFollowEvent(
           onboarding: {
             completedAt: null,
             initialAction: null,
+            source: onboardingSource,
           },
         } as Partial<CustomerProfile>,
         fsEnv,
@@ -540,12 +757,50 @@ async function handleOnboardingMessage(
       ];
       break;
 
+    // --- 商品固有オンボーディング Quick Reply（QR同梱物経由） ---
+    case ONBOARDING_BREWING_TEXT:
+      initialAction = "brewing_guide";
+      responseText = "おいしい淹れ方をご案内しますね。お届けしたお茶の最適な淹れ方をお伝えします。";
+      // エージェントに自然言語で問い合わせを流す（Quick Reply テキストは内部トリガー）
+      return handleProductOnboardingAction(lineUserId, "おいしい淹れ方を教えてください", initialAction, env);
+
+    case ONBOARDING_PRODUCT_DETAIL_TEXT:
+      initialAction = "product_detail";
+      return handleProductOnboardingAction(lineUserId, "この茶葉について詳しく教えてください", initialAction, env);
+
+    case ONBOARDING_SIMILAR_TEXT:
+      initialAction = "similar_products";
+      return handleProductOnboardingAction(lineUserId, "似たお茶をもっと見たいです", initialAction, env);
+
     default:
       return false;
   }
 
   // 応答送信
   await pushTextMessage(lineUserId, responseText, env, followUpQuickReplies);
+
+  // Firestore にオンボーディング完了を記録（fire-and-forget）
+  recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {
+    console.log("[onboarding] Firestore completion recording failed:", err instanceof Error ? err.message : err);
+  });
+
+  return true;
+}
+
+/**
+ * 商品固有オンボーディング Quick Reply のタップを処理する。
+ * 内部トリガーテキストを自然言語に変換してエージェントに渡す。
+ * Firestore に記録した上で true を返す。
+ */
+async function handleProductOnboardingAction(
+  lineUserId: string,
+  naturalLanguageQuery: string,
+  initialAction: string,
+  env: Env,
+): Promise<boolean> {
+  // エージェントに自然言語で問い合わせを転送
+  // （handleTextMessage の通常フローに乗せる）
+  await handleTextMessage(lineUserId, naturalLanguageQuery, env);
 
   // Firestore にオンボーディング完了を記録（fire-and-forget）
   recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {

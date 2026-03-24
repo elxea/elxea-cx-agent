@@ -12,6 +12,7 @@
 
 import { SignJWT, importPKCS8 } from "jose";
 import type { Env } from "../index";
+import type { PreferenceSignals } from "./preference-extractor";
 
 // ---------------------------------------------------------------------------
 // 型定義（elxea-web-app の types.ts に準拠）
@@ -42,6 +43,8 @@ export type TasteProfile = {
 export type OnboardingStatus = {
   completedAt: string | null;
   initialAction: "view_tea" | "explore_tea" | "about" | "howto" | "none" | null;
+  /** 友だち追加の流入元。pkg_{product_slug} = QR同梱物経由、brand_card = ブランドカード、direct = 通常追加 */
+  source?: string | null;
   twoWeekQuestionAnswered?: boolean;
   twoWeekAnswer?: string | null;
 };
@@ -57,6 +60,12 @@ export type CustomerProfile = {
   onboarding?: OnboardingStatus;
   createdAt?: string;
   lastActiveAt?: string;
+  /** 最終購入日時 (ISO 8601) — 注文 webhook で更新されるデノーマライズフィールド */
+  lastPurchaseAt?: string | null;
+  /** 今月の配信受信回数 — broadcastHistory 書き込み時にインクリメント */
+  broadcastCountThisMonth?: number;
+  /** broadcastCountThisMonth のリセット対象月 (YYYY-MM) */
+  broadcastCountMonth?: string;
 };
 
 export type BehaviorAction =
@@ -97,7 +106,7 @@ export type BehaviorEvent = {
 // ---------------------------------------------------------------------------
 
 /** Firestore REST API エンドポイント */
-function firestoreBaseUrl(projectId: string): string {
+export function firestoreBaseUrl(projectId: string): string {
   return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
 }
 
@@ -110,7 +119,7 @@ let cachedToken: string | null = null;
 let cachedTokenExpiresAt = 0; // Unix ms
 
 /** サービスアカウントから OAuth2 アクセストークンを取得（JWT → Google OAuth2） */
-async function getAccessToken(env: FirestoreEnv): Promise<string> {
+export async function getAccessToken(env: FirestoreEnv): Promise<string> {
   // キャッシュが有効ならそのまま返す（60秒のマージンを確保）
   const now = Date.now();
   if (cachedToken && now < cachedTokenExpiresAt) {
@@ -168,7 +177,7 @@ async function getAccessToken(env: FirestoreEnv): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /** JavaScript 値を Firestore Value 形式に変換 */
-function toFirestoreValue(value: unknown): Record<string, unknown> {
+export function toFirestoreValue(value: unknown): Record<string, unknown> {
   if (value === null || value === undefined) {
     return { nullValue: null };
   }
@@ -204,7 +213,7 @@ function toFirestoreValue(value: unknown): Record<string, unknown> {
 }
 
 /** Firestore ドキュメントフィールドを JavaScript オブジェクトに変換 */
-function fromFirestoreFields(
+export function fromFirestoreFields(
   fields: Record<string, Record<string, unknown>>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -215,7 +224,7 @@ function fromFirestoreFields(
 }
 
 /** Firestore Value を JavaScript 値に変換 */
-function fromFirestoreValue(value: Record<string, unknown>): unknown {
+export function fromFirestoreValue(value: Record<string, unknown>): unknown {
   if ("nullValue" in value) return null;
   if ("booleanValue" in value) return value.booleanValue;
   if ("integerValue" in value) return Number(value.integerValue);
@@ -535,4 +544,103 @@ export async function recordBehaviorEvent(
   };
 
   await addBehaviorEvent(shopifyId, event, env);
+}
+
+// ---------------------------------------------------------------------------
+// TasteProfile / PersonaProfile 更新（嗜好抽出パイプライン用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 嗜好シグナルを既存の TasteProfile / PersonaProfile にマージして更新する。
+ *
+ * 上書きではなく追記（union）方式:
+ * - preferredCategories, flavorPreferences: 既存リストに新規値を追加（重複排除）
+ * - scenePref: 新しい値があれば上書き（最新の関心シーンを反映）
+ * - persona scores: シグナルごとに +1 加算し、primary を再計算
+ *
+ * @param shopifyCustomerId Shopify 顧客 ID
+ * @param signals 抽出された嗜好シグナル
+ * @param existingProfile 現在の顧客プロファイル（null 可）
+ * @param env Firestore 環境変数
+ */
+export async function updateTasteProfile(
+  shopifyCustomerId: string,
+  signals: PreferenceSignals,
+  existingProfile: CustomerProfile | null,
+  env: FirestoreEnv,
+): Promise<Partial<CustomerProfile>> {
+  const updates: Partial<CustomerProfile> = {};
+
+  // --- TasteProfile マージ ---
+  const existingTaste = existingProfile?.tasteProfile ?? {
+    preferredCategories: [],
+    flavorPreferences: [],
+    scenePref: null,
+  };
+
+  // 配列上限（unbounded growth 防止）
+  const MAX_ARRAY_SIZE = 50;
+
+  // preferredCategories: 既存 + 新規（重複排除、上限50件 — 超過時は古いものから削除）
+  const mergedCategories = [
+    ...new Set([
+      ...existingTaste.preferredCategories,
+      ...signals.preferred_categories,
+    ]),
+  ].slice(-MAX_ARRAY_SIZE);
+
+  // flavorPreferences: 既存 + 新規（重複排除、上限50件 — 超過時は古いものから削除）
+  const mergedFlavors = [
+    ...new Set([
+      ...existingTaste.flavorPreferences,
+      ...signals.flavor_preferences,
+    ]),
+  ].slice(-MAX_ARRAY_SIZE);
+
+  // scenePref: 新しいシーンがあれば最初のものを採用
+  const scenePref =
+    signals.scene_preferences.length > 0
+      ? signals.scene_preferences[0]
+      : existingTaste.scenePref;
+
+  updates.tasteProfile = {
+    preferredCategories: mergedCategories,
+    flavorPreferences: mergedFlavors,
+    scenePref,
+  };
+
+  // --- PersonaProfile マージ ---
+  if (signals.persona_signals.length > 0) {
+    const existingPersona = existingProfile?.persona ?? {
+      primary: null,
+      scores: { serenity: 0, explorer: 0, sensory: 0 },
+      lastUpdated: new Date().toISOString(),
+    };
+
+    const scores = { ...existingPersona.scores };
+
+    // 各シグナルに +1
+    for (const signal of signals.persona_signals) {
+      scores[signal] = (scores[signal] ?? 0) + 1;
+    }
+
+    // primary を再計算（最大スコアのペルソナ）
+    const primary = (
+      Object.entries(scores) as Array<[PersonaType, number]>
+    ).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+
+    updates.persona = {
+      primary,
+      scores,
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+
+  // lastActiveAt を更新
+  updates.lastActiveAt = new Date().toISOString();
+
+  await updateCustomerProfile(shopifyCustomerId, updates, env);
+
+  // 更新後のプロファイルを返す（Shopify 同期トリガー用）
+  return updates;
 }
