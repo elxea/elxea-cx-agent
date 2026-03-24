@@ -21,8 +21,11 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  * POST /api/identity/link-line
  *
  * Auth.js signIn callback から呼ばれる。
- * LINE Login で取得した line_user_id + email + display_name を
- * user_identity_map に登録する。
+ * LINE Login で取得した line_user_id（実際は LINE Login userId）を
+ * user_identity_map の line_login_user_id カラムに登録する。
+ *
+ * 注意: リクエストの `line_user_id` フィールド名は後方互換のため維持するが、
+ * 内部では line_login_user_id として保存する（Messaging API userId とは異なる）。
  *
  * session_id が提供された場合、anonymous session の会話データを
  * identified user に統合する（mergeAnonymousSession）。
@@ -31,7 +34,7 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  *
  * リクエストボディ:
  * {
- *   line_user_id: string,        // 必須
+ *   line_user_id: string,        // 必須（LINE Login userId）
  *   email?: string | null,       // LINE に登録されたメール
  *   display_name?: string | null // LINE の表示名
  *   session_id?: string | null   // Web チャットの session_id（cookie から取得）
@@ -59,6 +62,8 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
   const supabase = createSupabaseClient(c.env);
 
   try {
+    // line_user_id は LINE Login userId なので、linkLineByEmail に渡す
+    // （linkLineByEmail 内部で line_login_user_id カラムに保存される）
     const result = await linkLineByEmail(
       supabase,
       line_user_id,

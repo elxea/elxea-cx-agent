@@ -26,6 +26,7 @@ import {
   type BehaviorEvent,
 } from "../lib/firestore";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
+import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数（Embedding + Claude 入力の上限考慮） */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -206,11 +207,89 @@ async function handleMessage(
  *
  * Spec v1 MS2-3 準拠: 友だち追加時に3つの Quick Reply ボタンを表示し、
  * タップした選択肢を行動ログとして記録する。
+ *
+ * Identity Linking: Messaging API userId を user_identity_map の line_user_id に登録する。
+ * line_login_user_id が既に設定されているレコードがあれば、そこに line_user_id を追加して
+ * LINE Login userId と Messaging API userId を紐付ける。
  */
 async function handleFollowEvent(
   lineUserId: string,
   env: Env,
 ): Promise<void> {
+  const supabase = createSupabaseClient(env);
+
+  // Identity Linking: Messaging API userId を user_identity_map に登録
+  // line_login_user_id で既にレコードがあるユーザーを email 経由で特定し、
+  // line_user_id（Messaging API）を追加する
+  try {
+    // まず line_user_id が既に登録されているか確認
+    const { data: existingByMessaging } = await supabase
+      .from("user_identity_map")
+      .select("id, unified_user_id")
+      .eq("line_user_id", lineUserId)
+      .single();
+
+    if (!existingByMessaging) {
+      // line_user_id 未登録の場合:
+      // LINE Profile API でプロフィールを取得して email ベースでマッチングを試みる
+      // ただし LINE Profile API は email を返さないため、
+      // line_login_user_id が設定されていて line_user_id が未設定のレコードを探す
+      // (同一プロバイダー内で友だち追加前に LINE Login 済みのユーザー)
+      //
+      // 注: 直接的なマッチングは困難なため、line_user_id が null のレコードのうち
+      // 最近作成されたものに line_user_id を設定するのではなく、
+      // customer_linkages テーブルも活用する
+      const { data: linkage } = await supabase
+        .from("customer_linkages")
+        .select("shopify_customer_id, email")
+        .eq("line_user_id", lineUserId)
+        .single();
+
+      if (linkage?.email) {
+        // customer_linkages 経由で email が取得できた場合、
+        // user_identity_map で同じ email のレコードに line_user_id を設定
+        const { data: identityByEmail } = await supabase
+          .from("user_identity_map")
+          .select("id, unified_user_id, line_user_id")
+          .eq("email", linkage.email)
+          .single();
+
+        if (identityByEmail && !identityByEmail.line_user_id) {
+          await supabase
+            .from("user_identity_map")
+            .update({ line_user_id: lineUserId })
+            .eq("id", identityByEmail.id);
+          console.log(
+            `[follow] Linked Messaging API userId ${lineUserId} to existing identity (unified=${identityByEmail.unified_user_id}) via email`,
+          );
+        }
+      } else {
+        // customer_linkages にもない場合:
+        // line_login_user_id が設定されていて line_user_id が null のレコードを
+        // email なしでは特定できないため、新規レコードを作成
+        // (後で LINE Login 時に email ベースで統合される)
+        const { error: insertError } = await supabase
+          .from("user_identity_map")
+          .insert({
+            unified_user_id: lineUserId,
+            line_user_id: lineUserId,
+          });
+
+        if (insertError) {
+          // unique constraint violation の場合はスキップ（既に別経路で登録済み）
+          if (!insertError.message.includes("duplicate") && !insertError.message.includes("unique")) {
+            console.warn("[follow] Failed to create identity mapping:", insertError.message);
+          }
+        } else {
+          console.log(`[follow] Created new identity mapping for Messaging API userId ${lineUserId}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Identity linking 失敗時もウェルカムメッセージは送る
+    console.warn("[follow] Identity linking failed:", err instanceof Error ? err.message : err);
+  }
+
   const welcomeText =
     "こんにちは！elxea（エルシア）へようこそ。\n\n" +
     "鹿児島の茶畑から届くお茶を、あなたにぴったりの一杯としてお届けします。\n\n" +
@@ -236,7 +315,6 @@ async function handleFollowEvent(
   // Firestore にオンボーディング開始を記録（fire-and-forget）
   try {
     const fsEnv = getFirestoreEnv(env);
-    const supabase = createSupabaseClient(env);
     const { data: linkage } = await supabase
       .from("customer_linkages")
       .select("shopify_customer_id")
@@ -511,7 +589,7 @@ async function recordOnboardingCompletion(
     {
       onboarding: {
         completedAt: now,
-        initialAction: initialAction as "view_tea" | "about" | "none",
+        initialAction: initialAction as "view_tea" | "explore_tea" | "about" | "howto" | "none",
       },
     } as Partial<CustomerProfile>,
     fsEnv,
@@ -639,6 +717,16 @@ async function handleTextMessage(
         });
     }
   }
+
+  // 嗜好抽出パイプライン（fire-and-forget: レスポンスをブロックしない）
+  // 今回の会話（user message + assistant response）を含む履歴で実行
+  const fullHistory = [
+    ...history,
+    { role: "user", content: processedMessage },
+    { role: "assistant", content: result.response },
+  ];
+  runPreferencePipeline(fullHistory, lineUserId, "line", env, supabase)
+    .catch((err) => console.warn("[line] preference pipeline failed:", err instanceof Error ? err.message : err));
 }
 
 /** 画像メッセージを処理して vision で解析する */

@@ -39,12 +39,51 @@ export async function resolveUnifiedUserId(
   channel: Channel,
 ): Promise<IdentityResult> {
   try {
-    const column = channel === "line" ? "line_user_id" : "web_session_id";
+    if (channel === "line") {
+      // LINE の場合: line_user_id (Messaging API) で検索し、
+      // 見つからなければ line_login_user_id (LINE Login) でも検索する
+      const { data: byMessaging } = await supabase
+        .from("user_identity_map")
+        .select("unified_user_id")
+        .eq("line_user_id", userId)
+        .single();
 
+      if (byMessaging?.unified_user_id) {
+        return {
+          unifiedUserId: byMessaging.unified_user_id,
+          originalUserId: userId,
+          isLinked: true,
+        };
+      }
+
+      // line_login_user_id でもフォールバック検索
+      const { data: byLogin } = await supabase
+        .from("user_identity_map")
+        .select("unified_user_id")
+        .eq("line_login_user_id", userId)
+        .single();
+
+      if (byLogin?.unified_user_id) {
+        return {
+          unifiedUserId: byLogin.unified_user_id,
+          originalUserId: userId,
+          isLinked: true,
+        };
+      }
+
+      // 未紐付け: そのまま返す
+      return {
+        unifiedUserId: userId,
+        originalUserId: userId,
+        isLinked: false,
+      };
+    }
+
+    // Web の場合: web_session_id で検索
     const { data, error } = await supabase
       .from("user_identity_map")
       .select("unified_user_id")
-      .eq(column, userId)
+      .eq("web_session_id", userId)
       .single();
 
     if (error || !data?.unified_user_id) {
@@ -143,31 +182,35 @@ export async function mergeAnonymousSession(
 
 /**
  * Email アドレスで既存の identity_map レコードを検索し、
- * LINE Login 時に line_user_id を追加で紐付ける。
+ * LINE Login 時に line_login_user_id を追加で紐付ける。
  *
- * - email で既存レコードあり → line_user_id を追記して統合
- * - email で既存レコードなし → 新規レコードを作成
+ * LINE Login (Auth.js / LIFF) で取得する userId は line_login_user_id に保存する。
+ * line_user_id (Messaging API) とは異なるため、別カラムで管理する。
+ *
+ * - line_login_user_id で既存レコードあり → email/display_name を更新
+ * - email で既存レコードあり → line_login_user_id を追記して統合
+ * - 既存レコードなし → 新規レコードを作成
  *
  * Auth.js signIn callback から呼ばれる。
  */
 export async function linkLineByEmail(
   supabase: SupabaseClient,
-  lineUserId: string,
+  lineLoginUserId: string,
   email: string | null,
   displayName: string | null,
 ): Promise<{ unifiedUserId: string; action: "linked" | "created" | "updated" }> {
   try {
-    // 1. line_user_id で既存レコードを検索
-    const { data: existingByLine } = await supabase
+    // 1. line_login_user_id で既存レコードを検索
+    const { data: existingByLineLogin } = await supabase
       .from("user_identity_map")
       .select("id, unified_user_id, email")
-      .eq("line_user_id", lineUserId)
+      .eq("line_login_user_id", lineLoginUserId)
       .single();
 
-    if (existingByLine) {
+    if (existingByLineLogin) {
       // Already linked -- update email/display_name if needed
       const updates: Record<string, string | null> = {};
-      if (email && !existingByLine.email) {
+      if (email && !existingByLineLogin.email) {
         updates.email = email;
       }
       if (displayName) {
@@ -177,8 +220,40 @@ export async function linkLineByEmail(
         await supabase
           .from("user_identity_map")
           .update(updates)
-          .eq("id", existingByLine.id);
+          .eq("id", existingByLineLogin.id);
       }
+      return { unifiedUserId: existingByLineLogin.unified_user_id, action: "updated" };
+    }
+
+    // 1b. line_user_id (旧: Messaging API userId を LINE Login で誤登録した既存データ) でも検索
+    // 既存データの後方互換性を維持する
+    const { data: existingByLine } = await supabase
+      .from("user_identity_map")
+      .select("id, unified_user_id, email, line_user_id")
+      .eq("line_user_id", lineLoginUserId)
+      .single();
+
+    if (existingByLine) {
+      // 旧データ: line_user_id に LINE Login userId が入っている
+      // line_login_user_id に移動し、line_user_id をクリアする
+      const updates: Record<string, string | null> = {
+        line_login_user_id: lineLoginUserId,
+        line_user_id: null, // Messaging API Follow Event で再設定される
+      };
+      if (email && !existingByLine.email) {
+        updates.email = email;
+      }
+      if (displayName) {
+        updates.display_name = displayName;
+      }
+      await supabase
+        .from("user_identity_map")
+        .update(updates)
+        .eq("id", existingByLine.id);
+
+      console.log(
+        `[identity] Migrated LINE Login userId ${lineLoginUserId} from line_user_id to line_login_user_id (unified=${existingByLine.unified_user_id})`,
+      );
       return { unifiedUserId: existingByLine.unified_user_id, action: "updated" };
     }
 
@@ -191,40 +266,40 @@ export async function linkLineByEmail(
         .single();
 
       if (existingByEmail) {
-        // Email match -- add line_user_id to existing record
+        // Email match -- add line_login_user_id to existing record
         await supabase
           .from("user_identity_map")
           .update({
-            line_user_id: lineUserId,
+            line_login_user_id: lineLoginUserId,
             display_name: displayName,
           })
           .eq("id", existingByEmail.id);
 
         console.log(
-          `[identity] Linked LINE ${lineUserId} to existing email record (unified=${existingByEmail.unified_user_id})`,
+          `[identity] Linked LINE Login ${lineLoginUserId} to existing email record (unified=${existingByEmail.unified_user_id})`,
         );
         return { unifiedUserId: existingByEmail.unified_user_id, action: "linked" };
       }
     }
 
     // 3. No existing record -- create new
-    const unifiedUserId = lineUserId; // Use LINE userId as unified ID for now
+    const unifiedUserId = lineLoginUserId; // Use LINE Login userId as unified ID for now
     const { error: insertError } = await supabase
       .from("user_identity_map")
       .insert({
         unified_user_id: unifiedUserId,
-        line_user_id: lineUserId,
+        line_login_user_id: lineLoginUserId,
         email,
         display_name: displayName,
       });
 
     if (insertError) {
       console.warn("[identity] linkLineByEmail insert failed:", insertError.message);
-      return { unifiedUserId: lineUserId, action: "created" };
+      return { unifiedUserId: lineLoginUserId, action: "created" };
     }
 
     console.log(
-      `[identity] Created new identity mapping for LINE ${lineUserId} (email=${email})`,
+      `[identity] Created new identity mapping for LINE Login ${lineLoginUserId} (email=${email})`,
     );
     return { unifiedUserId, action: "created" };
   } catch (err) {
@@ -232,7 +307,7 @@ export async function linkLineByEmail(
       "[identity] linkLineByEmail failed:",
       err instanceof Error ? err.message : err,
     );
-    return { unifiedUserId: lineUserId, action: "created" };
+    return { unifiedUserId: lineLoginUserId, action: "created" };
   }
 }
 
