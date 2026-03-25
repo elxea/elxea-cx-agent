@@ -180,7 +180,7 @@ async function executeSingleProbe(
     }
 
     // Step 2: Send to CX Agent
-    const sessionId = `${PROBE_SESSION_PREFIX}${persona}_${depth}_${Date.now()}`;
+    const sessionId = crypto.randomUUID();
     console.log(`[probe] Sending to CX Agent (session: ${sessionId})...`);
 
     const agentResult = await sendToCxAgent(result.question, sessionId);
