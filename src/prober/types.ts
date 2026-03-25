@@ -87,6 +87,49 @@ export const QUESTION_CATEGORIES = [
   "ギフト選び",
 ] as const;
 
+/** Target layer mapping from persona */
+export const PERSONA_TARGET_LAYER: Record<Persona, "wellbeing" | "tea_lover" | "gourmet"> = {
+  serenity: "wellbeing",
+  explorer: "tea_lover",
+  sensory: "gourmet",
+};
+
+/** Article generation result from Claude Sonnet */
+export type GeneratedArticle = {
+  title: string;
+  content: string;
+  content_persona: Persona[];
+  depth_level: DepthLevel;
+  target_layer: Array<"tea_lover" | "wellbeing" | "gourmet">;
+  channel: "LINE CRM";
+};
+
+/** Content Hub write result */
+export type ContentHubWriteResult = {
+  pageId: string;
+  title: string;
+  url: string;
+};
+
+/** Article generation context (passed from evaluation) */
+export type ArticleContext = {
+  question: string;
+  missing_info: string;
+  gap_category: GapCategory;
+  persona: Persona;
+  depth_level: DepthLevel;
+  probeHistoryId?: string;
+};
+
+/** Max articles per day */
+export const MAX_DAILY_ARTICLES = 3;
+
+/** Gap categories that should NOT trigger article generation */
+export const SKIP_GAP_CATEGORIES: GapCategory[] = ["order_support"];
+
+/** Days to check for duplicate article generation per gap_category */
+export const DUPLICATE_CHECK_DAYS = 7;
+
 /** Seasonal keywords by month */
 export function getSeasonalContext(): string {
   const month = new Date().getMonth() + 1;

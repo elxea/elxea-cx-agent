@@ -6,18 +6,20 @@
  * stores results in probe_history table.
  *
  * Phase 1: Question generation + CX Agent call + response evaluation + Slack summary.
- * Phase 2 (future): Article generation for low-scoring responses.
+ * Phase 2: Gap detection + article generation (Claude Sonnet) + Content Hub write (Draft).
  *
  * Usage:
  *   npx tsx scripts/knowledge-prober.ts
  *   npx tsx scripts/knowledge-prober.ts --dry-run        # No DB writes or API calls to CX Agent
  *   npx tsx scripts/knowledge-prober.ts --target=URL      # Override CX Agent base URL
  *   npx tsx scripts/knowledge-prober.ts --limit=3         # Limit number of probes (for testing)
+ *   npx tsx scripts/knowledge-prober.ts --skip-articles   # Skip article generation (Phase 1 only)
  *
  * Schedule: Daily AM 2:00 JST via launchd (com.elxea.knowledge-prober.plist)
  *
  * Environment (.dev.vars):
- *   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SLACK_WEBHOOK_URL
+ *   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SLACK_WEBHOOK_URL,
+ *   NOTION_TOKEN
  */
 
 import dotenv from "dotenv";
@@ -25,12 +27,21 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { generateQuestion } from "../src/prober/question-generator";
 import { evaluateResponse } from "../src/prober/response-evaluator";
+import { generateArticle } from "../src/prober/article-generator";
+import { checkDuplicates } from "../src/prober/duplicate-checker";
+import {
+  writeToContentHub,
+  markArticleGenerated,
+} from "../src/prober/content-hub-writer";
 import {
   PERSONA_DEPTH_MATRIX,
+  SKIP_GAP_CATEGORIES,
   type Persona,
   type DepthLevel,
+  type GapCategory,
   type ProbeRecord,
   type EvaluationResult,
+  type ArticleContext,
 } from "../src/prober/types";
 
 // ---------------------------------------------------------------------------
@@ -43,9 +54,14 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY!;
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+const NOTION_TOKEN = process.env.NOTION_TOKEN!;
+
+/** Content Hub DB ID */
+const CONTENT_HUB_DB_ID = "16451cee-ec90-4dc0-92d9-85cca2842412";
 
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
+const skipArticles = args.includes("--skip-articles");
 const targetArg = args.find((a) => a.startsWith("--target="))?.split("=")[1];
 const limitArg = args.find((a) => a.startsWith("--limit="))?.split("=")[1];
 
@@ -129,6 +145,8 @@ type ProbeResult = {
   evaluation: EvaluationResult | null;
   durationMs: number;
   error?: string;
+  /** probe_history row ID (set after DB save) */
+  probeHistoryId?: string;
 };
 
 /**
@@ -193,12 +211,12 @@ async function executeSingleProbe(
 }
 
 /**
- * Save probe result to probe_history table.
+ * Save probe result to probe_history table. Returns the inserted row ID.
  */
 async function saveProbeResult(
   supabase: SupabaseClient,
   result: ProbeResult,
-): Promise<void> {
+): Promise<string | undefined> {
   const record: Omit<ProbeRecord, "id" | "created_at"> = {
     persona: result.persona,
     depth_level: result.depth,
@@ -213,15 +231,31 @@ async function saveProbeResult(
     content_hub_page_id: null,
   };
 
-  const { error } = await supabase.from("probe_history").insert(record);
+  const { data, error } = await supabase
+    .from("probe_history")
+    .insert(record)
+    .select("id")
+    .single();
+
   if (error) {
     console.error("[probe] Failed to save probe result:", error);
+    return undefined;
   }
+
+  return data?.id;
 }
 
 // ---------------------------------------------------------------------------
 // Slack notification
 // ---------------------------------------------------------------------------
+
+type ArticleGenResult = {
+  probeHistoryId: string;
+  title: string;
+  pageId: string;
+  url: string;
+  gapCategory: string;
+};
 
 type ProbeSummary = {
   total: number;
@@ -230,9 +264,15 @@ type ProbeSummary = {
   avgScore: number;
   errors: number;
   durationMs: number;
+  articlesGenerated: number;
+  articleTitles: string[];
 };
 
-function buildSummary(results: ProbeResult[], durationMs: number): ProbeSummary {
+function buildSummary(
+  results: ProbeResult[],
+  durationMs: number,
+  articleResults: ArticleGenResult[] = [],
+): ProbeSummary {
   const scores: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   const gaps: Record<string, number> = {};
   let totalScore = 0;
@@ -259,6 +299,8 @@ function buildSummary(results: ProbeResult[], durationMs: number): ProbeSummary 
     avgScore: scored > 0 ? Math.round((totalScore / scored) * 10) / 10 : 0,
     errors,
     durationMs,
+    articlesGenerated: articleResults.length,
+    articleTitles: articleResults.map((a) => a.title),
   };
 }
 
@@ -289,6 +331,13 @@ async function sendSlackSummary(summary: ProbeSummary): Promise<void> {
     ...(Object.keys(summary.gaps).length > 0
       ? ["*Knowledge gaps detected:*", gapList]
       : ["No knowledge gaps detected."]),
+    ...(summary.articlesGenerated > 0
+      ? [
+          "",
+          `*Articles generated: ${summary.articlesGenerated}*`,
+          ...summary.articleTitles.map((t) => `  - ${t}`),
+        ]
+      : []),
   ].join("\n");
 
   try {
@@ -311,10 +360,148 @@ async function sendSlackSummary(summary: ProbeSummary): Promise<void> {
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Phase 2: Process low-scoring probes and generate articles for knowledge gaps.
+ *
+ * For each probe with quality_score <= 3 and a valid gap_category,
+ * run duplicate checks, generate an article with Claude Sonnet,
+ * and write it to Content Hub as Draft.
+ */
+async function processGapsAndGenerateArticles(
+  client: Anthropic,
+  supabase: SupabaseClient,
+  results: ProbeResult[],
+): Promise<ArticleGenResult[]> {
+  // Filter candidates: score <= 3, has gap_category, has probeHistoryId
+  const candidates = results.filter(
+    (r) =>
+      r.evaluation &&
+      r.evaluation.quality_score <= 3 &&
+      r.evaluation.gap_category &&
+      !SKIP_GAP_CATEGORIES.includes(r.evaluation.gap_category) &&
+      r.probeHistoryId,
+  );
+
+  if (candidates.length === 0) {
+    console.log("[phase2] No gap candidates for article generation");
+    return [];
+  }
+
+  console.log(
+    `[phase2] ${candidates.length} gap candidates found, processing...`,
+  );
+
+  const articleResults: ArticleGenResult[] = [];
+  let articlesGeneratedToday = 0;
+
+  for (const candidate of candidates) {
+    const eval_ = candidate.evaluation!;
+    const gapCategory = eval_.gap_category as GapCategory;
+
+    console.log(
+      `\n[phase2] Processing gap: ${gapCategory} (score: ${eval_.quality_score}) for ${candidate.persona}/${candidate.depth}`,
+    );
+
+    // Step 1: Duplicate/skip checks (without title -- pre-generation check)
+    const preCheck = await checkDuplicates(
+      client,
+      supabase,
+      gapCategory,
+      null, // no title yet
+      NOTION_TOKEN,
+      CONTENT_HUB_DB_ID,
+      articlesGeneratedToday,
+    );
+
+    if (preCheck.shouldSkip) {
+      console.log(`[phase2] Skipping: ${preCheck.reason}`);
+      continue;
+    }
+
+    // Step 2: Generate article
+    const context: ArticleContext = {
+      question: candidate.question,
+      missing_info: eval_.missing_info,
+      gap_category: gapCategory,
+      persona: candidate.persona,
+      depth_level: candidate.depth,
+      probeHistoryId: candidate.probeHistoryId,
+    };
+
+    let article;
+    try {
+      console.log("[phase2] Generating article with Claude Sonnet...");
+      article = await generateArticle(client, supabase, context);
+      console.log(`[phase2] Article generated: "${article.title}"`);
+    } catch (err) {
+      console.error(
+        "[phase2] Article generation failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+      continue;
+    }
+
+    // Step 3: Post-generation duplicate check (with title)
+    const postCheck = await checkDuplicates(
+      client,
+      supabase,
+      gapCategory,
+      article.title,
+      NOTION_TOKEN,
+      CONTENT_HUB_DB_ID,
+      articlesGeneratedToday,
+    );
+
+    if (postCheck.shouldSkip) {
+      console.log(`[phase2] Skipping after title check: ${postCheck.reason}`);
+      continue;
+    }
+
+    // Step 4: Write to Content Hub
+    try {
+      console.log("[phase2] Writing to Content Hub (Draft)...");
+      const writeResult = await writeToContentHub(
+        NOTION_TOKEN,
+        article,
+        candidate.question,
+        CONTENT_HUB_DB_ID,
+      );
+      console.log(
+        `[phase2] Written: ${writeResult.pageId} (${writeResult.url})`,
+      );
+
+      // Step 5: Update probe_history
+      await markArticleGenerated(
+        supabase,
+        candidate.probeHistoryId!,
+        writeResult.pageId,
+      );
+
+      articleResults.push({
+        probeHistoryId: candidate.probeHistoryId!,
+        title: article.title,
+        pageId: writeResult.pageId,
+        url: writeResult.url,
+        gapCategory,
+      });
+
+      articlesGeneratedToday++;
+    } catch (err) {
+      console.error(
+        "[phase2] Content Hub write failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  return articleResults;
+}
+
 async function main(): Promise<void> {
   console.log("=== Knowledge Prober ===");
   console.log(`Target: ${CX_AGENT_BASE_URL}`);
   console.log(`Dry run: ${isDryRun}`);
+  console.log(`Skip articles: ${skipArticles}`);
   console.log(`Time: ${new Date().toISOString()}`);
   console.log("");
 
@@ -322,6 +509,7 @@ async function main(): Promise<void> {
   if (!ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is required");
   if (!SUPABASE_URL) throw new Error("SUPABASE_URL is required");
   if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
+  if (!skipArticles && !NOTION_TOKEN) throw new Error("NOTION_TOKEN is required for article generation");
 
   const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -340,12 +528,13 @@ async function main(): Promise<void> {
 
   for (const { persona, depth } of shuffled) {
     const result = await executeSingleProbe(client, supabase, persona, depth);
-    allResults.push(result);
 
-    // Save to DB
+    // Save to DB and capture row ID
     if (!isDryRun && result.question) {
-      await saveProbeResult(supabase, result);
+      result.probeHistoryId = await saveProbeResult(supabase, result);
     }
+
+    allResults.push(result);
 
     // Rate limit protection (skip delay after last probe)
     if (allResults.length < shuffled.length) {
@@ -355,15 +544,35 @@ async function main(): Promise<void> {
     console.log("");
   }
 
+  // Phase 2: Article generation for knowledge gaps
+  let articleResults: ArticleGenResult[] = [];
+  if (!isDryRun && !skipArticles) {
+    console.log("\n=== Phase 2: Article Generation ===");
+    articleResults = await processGapsAndGenerateArticles(
+      client,
+      supabase,
+      allResults,
+    );
+    console.log(
+      `\n[phase2] Total articles generated: ${articleResults.length}`,
+    );
+  }
+
   const totalDuration = Date.now() - startTime;
 
   // Summary
-  const summary = buildSummary(allResults, totalDuration);
-  console.log("=== Summary ===");
+  const summary = buildSummary(allResults, totalDuration, articleResults);
+  console.log("\n=== Summary ===");
   console.log(`Total: ${summary.total} | Avg: ${summary.avgScore} | Errors: ${summary.errors}`);
   console.log(`Scores: ${JSON.stringify(summary.scores)}`);
   if (Object.keys(summary.gaps).length > 0) {
     console.log(`Gaps: ${JSON.stringify(summary.gaps)}`);
+  }
+  if (summary.articlesGenerated > 0) {
+    console.log(`Articles generated: ${summary.articlesGenerated}`);
+    for (const title of summary.articleTitles) {
+      console.log(`  - ${title}`);
+    }
   }
   console.log(`Duration: ${Math.round(totalDuration / 1000)}s`);
 
