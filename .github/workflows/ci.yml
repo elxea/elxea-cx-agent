@@ -45,11 +45,12 @@ jobs:
     needs: static-checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     env:
       LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
+      STAGING_WORKER_URL: https://elxea-agent-staging.setaka1103.workers.dev
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
