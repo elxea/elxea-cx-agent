@@ -735,6 +735,8 @@ export async function runAgentStreaming(
   const productCards: Array<{ name: string; description: string; price: string; imageUrl?: string; productUrl: string }> = [];
   let cartLink: { checkoutUrl: string } | undefined;
   const usedTools: string[] = [];
+  /** ツール使用ターンで生成されたテキストを蓄積（最終応答に含める） */
+  let accumulatedText = "";
 
   const apiParams = {
     model: "claude-haiku-4-5-20251001" as const,
@@ -795,7 +797,9 @@ export async function runAgentStreaming(
     }
     const quickReplies = generateQuickReplies(usedTools, escalated);
     if (quickReplies.length > 0) callbacks.onQuickReplies(quickReplies);
-    callbacks.onDone(finalText || "申し訳ありません、お返事の生成に失敗しました。");
+    // ツール使用ターンで蓄積されたテキストと最終テキストを結合
+    const fullResponse = (accumulatedText + finalText) || "申し訳ありません、お返事の生成に失敗しました。";
+    callbacks.onDone(fullResponse);
     return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies };
   };
 
@@ -875,6 +879,16 @@ export async function runAgentStreaming(
         callbacks.onTextDelta(finalText.slice(i, i + 8));
       }
       return finalize(finalText);
+    }
+
+    // ツール使用時: テキストブロックがあればクライアントに即時送信
+    // (turn 0 は非ストリーミングなので、テキストを手動でチャンク送信する)
+    const turnText = textBlocks.map((b) => b.text).join("");
+    if (turnText) {
+      for (let i = 0; i < turnText.length; i += 8) {
+        callbacks.onTextDelta(turnText.slice(i, i + 8));
+      }
+      accumulatedText += turnText;
     }
 
     // ツール実行
