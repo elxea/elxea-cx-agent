@@ -82,7 +82,7 @@ export type CreatedTask = {
 // ---------------------------------------------------------------------------
 
 /** Notion All Tasks DB ID */
-const ALL_TASKS_DB_ID = "50adc342-b98e-4b35-858c-4268c4802ba0";
+const ALL_TASKS_DB_ID = "50adc3426a7f4affbbfb677722369486";
 
 /** Max tasks per run */
 const MAX_TASKS_PER_RUN = 3;
@@ -442,7 +442,7 @@ async function isDuplicateTask(
               },
             },
             {
-              property: "Created time",
+              timestamp: "created_time",
               created_time: {
                 on_or_after: sinceDate.toISOString(),
               },

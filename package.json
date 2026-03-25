@@ -27,7 +27,8 @@
     "verify:staging": "npx tsx scripts/verify-staging.ts",
     "smoke-test": "npx tsx scripts/smoke-test.ts",
     "prober": "npx tsx scripts/knowledge-prober.ts",
-    "regression": "npx tsx scripts/knowledge-regression.ts"
+    "regression": "npx tsx scripts/knowledge-regression.ts",
+    "test:staging-smoke": "npx tsx tests/staging/smoke.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
