@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-checks:
+    name: static-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsc -p tsconfig.ci.json --noEmit
+
+  unit-tests:
+    name: unit-tests
+    needs: static-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run test:unit
+
+  e2e-tests:
+    name: e2e-tests
+    needs: static-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name != 'pull_request'
+    env:
+      LINE_CHANNEL_SECRET_TEST: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run test:e2e
+
+  search-quality:
+    name: search-quality
+    needs: static-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request'
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run test:search-quality
+
+  deploy-staging:
+    name: deploy-staging
+    needs: [unit-tests, e2e-tests, search-quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx wrangler deploy --env staging
+      - name: Staging smoke test
+        run: npm run test:staging-smoke
+        env:
+          STAGING_WORKER_URL: https://elxea-agent-staging.setaka1103.workers.dev
