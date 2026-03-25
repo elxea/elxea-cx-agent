@@ -1,5 +1,11 @@
 # elxea-agent — LINE AI カスタマーエージェント
 
+## Git ルール（厳守）
+- 開発作業は developer ブランチで行う
+- master への直接 push は禁止
+- developer → master のマージは CI 全 PASS 後のみ
+- コミットメッセージは conventional commits に従う（feat:, fix:, ci:, test:, docs:, chore:）
+
 ## 概要
 
 LINE 公式アカウントで動作する AI カスタマーエージェント。
