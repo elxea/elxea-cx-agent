@@ -52,6 +52,37 @@ type AgentResult = {
   quickReplies?: Array<{ label: string; text: string }>;
 };
 
+/**
+ * ストリーミング用コールバック型。
+ * runAgentStreaming() が Claude API のストリーミングレスポンスを
+ * リアルタイムでクライアントに転送するために使用する。
+ */
+export type StreamCallbacks = {
+  /** テキストチャンク到着時（Claude API の content_block_delta） */
+  onTextDelta: (text: string) => void;
+  /** 商品カード送信時 */
+  onProductCards: (products: Array<{ name: string; price: string; url: string; image: string | null; description: string }>) => void;
+  /** カートリンク送信時 */
+  onCartLink: (checkoutUrl: string) => void;
+  /** クイックリプライ送信時 */
+  onQuickReplies: (items: Array<{ label: string; text: string }>) => void;
+  /** 完了時（fullResponse = 保存用の全テキスト） */
+  onDone: (fullResponse: string) => void;
+  /** エラー時 */
+  onError: (error: string) => void;
+};
+
+/** runAgentStreaming の戻り値（保存に必要なメタデータ） */
+export type StreamingAgentMeta = {
+  escalated: boolean;
+  escalationReason?: string;
+  escalationCategory?: string;
+  flexMessages: Array<{ altText: string; contents: Record<string, unknown> }>;
+  productCards: Array<{ name: string; description: string; price: string; imageUrl?: string; productUrl: string }>;
+  cartLink?: { checkoutUrl: string };
+  quickReplies: Array<{ label: string; text: string }>;
+};
+
 /** ナレッジ不足と判定する類似度しきい値 */
 const LOW_SIMILARITY_THRESHOLD = 0.4;
 
@@ -576,6 +607,329 @@ export async function runAgent(
     ...(productCards.length > 0 ? { productCards } : {}),
     ...(cartLink ? { cartLink } : {}),
   };
+}
+
+/**
+ * エージェントのストリーミング版メインループ。
+ *
+ * runAgent() と同じ前処理（プロファイル取得・ハイブリッド検索）を行った後、
+ * Claude API のストリーミングレスポンスをリアルタイムでコールバック経由で
+ * クライアントに転送する。
+ *
+ * - 初回ターンは非ストリーミングで実行（ツール呼び出しの有無を確認）
+ * - ツール使用後の最終ターンはストリーミング API を使用
+ */
+export async function runAgentStreaming(
+  userMessage: string,
+  conversationHistory: Message[],
+  embedding: number[],
+  userId: string,
+  channel: Channel,
+  env: Env,
+  callbacks: StreamCallbacks,
+  options?: {
+    isLinked?: boolean;
+    imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
+  },
+): Promise<StreamingAgentMeta> {
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const supabase = createSupabaseClient(env);
+  const t0 = Date.now();
+
+  const sourceTypeFilter = classifyQuery(userMessage);
+
+  let fsEnv: ReturnType<typeof getFirestoreEnv> | null = null;
+  try { fsEnv = getFirestoreEnv(env); } catch { /* Firebase 未設定 */ }
+
+  // --- 並列フェーズ: 顧客プロファイル取得 + ハイブリッド検索 ---
+  console.log("[agent-stream] step=parallel-fetch");
+
+  const profilePromise = (async (): Promise<{
+    customerProfile: CustomerProfile | null;
+    firestoreCustomerId: string | null;
+  }> => {
+    let customerProfile: CustomerProfile | null = null;
+    let firestoreCustomerId: string | null = null;
+    try {
+      if (!fsEnv) return { customerProfile: null, firestoreCustomerId: null };
+      const linkageQuery = channel === "line"
+        ? supabase.from("customer_linkages").select("shopify_customer_id").eq("line_user_id", userId).single()
+        : supabase.from("customer_linkages").select("shopify_customer_id").eq("shopify_customer_id", userId).single();
+      const { data: linkage } = await withTimeout(
+        Promise.resolve(linkageQuery), TIMEOUT_CUSTOMER_LINKAGE_MS, "customer_linkages query",
+      );
+      if (linkage?.shopify_customer_id) {
+        firestoreCustomerId = String(linkage.shopify_customer_id);
+        customerProfile = await withTimeout(
+          getCustomerProfile(firestoreCustomerId, fsEnv), TIMEOUT_CUSTOMER_PROFILE_MS, "getCustomerProfile",
+        );
+      }
+    } catch (err) {
+      console.warn("[agent-stream] customer profile skipped:", err instanceof Error ? err.message : err);
+    }
+    return { customerProfile, firestoreCustomerId };
+  })();
+
+  const searchPromise = withTimeout(
+    searchKnowledgeHybrid(supabase, embedding, userMessage, KNOWLEDGE_SEARCH_TOP_K, KNOWLEDGE_SEARCH_THRESHOLD, sourceTypeFilter),
+    TIMEOUT_KNOWLEDGE_SEARCH_MS, "searchKnowledgeHybrid",
+  ).catch((err) => {
+    console.warn("[agent-stream] knowledge search failed:", err instanceof Error ? err.message : err);
+    return [] as KnowledgeChunk[];
+  });
+
+  const [profileResult, knowledgeResults] = await Promise.all([profilePromise, searchPromise]);
+  const { customerProfile, firestoreCustomerId } = profileResult;
+  console.log(`[agent-stream] step=parallel-fetch done, search=${knowledgeResults.length}, elapsed=${Date.now() - t0}ms`);
+
+  // Behavior event 記録（fire-and-forget）
+  if (firestoreCustomerId && fsEnv) {
+    try {
+      addBehaviorEvent(firestoreCustomerId, {
+        action: "line_message", channel, metadata: { query: userMessage },
+        personaSignal: null, createdAt: new Date().toISOString(),
+      }, fsEnv).catch(() => {});
+      for (const ev of extractConversationSignals(userMessage, channel)) {
+        addBehaviorEvent(firestoreCustomerId, ev, fsEnv).catch(() => {});
+      }
+    } catch { /* skip */ }
+  }
+
+  // ナレッジコンテキスト構築
+  const maxSimilarity = knowledgeResults.length > 0 ? Math.max(...knowledgeResults.map((r) => r.similarity)) : 0;
+  const isLowKnowledge = knowledgeResults.length === 0 || maxSimilarity < LOW_SIMILARITY_THRESHOLD;
+
+  let knowledgeContext: string;
+  if (knowledgeResults.length > 0) {
+    const items = knowledgeResults
+      .map((r, i) => `### 検索結果 ${i + 1}（${r.source_type} | 類似度: ${(r.similarity * 100).toFixed(0)}%）\n**${r.source_title}**\n${r.content}`)
+      .join("\n\n");
+    knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n以下の ${knowledgeResults.length} 件が見つかりました。この情報のみに基づいて回答してください。\n\n${items}`;
+  } else {
+    knowledgeContext = `\n\n## 検索結果（ナレッジベース）\n該当する情報が見つかりませんでした。\n\n**対応方針**: まずは商品名やブランド名から推測できる一般的な情報で回答を試みてください。具体的な価格・在庫・成分などの正確な情報が必要な場合のみ、「詳しい情報を確認してお返事しますね」と伝えてください。お客様を待たせる回答は最小限にしてください。`;
+  }
+
+  const isLinked = options?.isLinked ?? false;
+  const personaPrimary = customerProfile?.persona?.primary ?? null;
+  const personaFragment = buildPersonaPromptFragment(personaPrimary);
+  const customerContext = buildCustomerContext(customerProfile, isLinked);
+  const languageReminder = detectLanguageReminder(userMessage);
+
+  // メッセージ構築
+  const messages: Anthropic.MessageParam[] = [
+    ...conversationHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+  ];
+  if (options?.imageContent) {
+    messages.push({ role: "user", content: [
+      { type: "image" as const, source: { type: "base64" as const, media_type: options.imageContent.mediaType, data: options.imageContent.base64 } },
+      { type: "text" as const, text: userMessage || "この画像について教えてください。お茶のパッケージや茶葉の写真であれば、商品の識別や種類の推定をしてください。" },
+    ] });
+  } else {
+    messages.push({ role: "user", content: userMessage });
+  }
+
+  let escalated = false;
+  let escalationReason: string | undefined;
+  let escalationCategory: string | undefined;
+  const flexMessages: Array<{ altText: string; contents: Record<string, unknown> }> = [];
+  const productCards: Array<{ name: string; description: string; price: string; imageUrl?: string; productUrl: string }> = [];
+  let cartLink: { checkoutUrl: string } | undefined;
+  const usedTools: string[] = [];
+
+  const apiParams = {
+    model: "claude-haiku-4-5-20251001" as const,
+    max_tokens: 1024,
+    system: [
+      { type: "text" as const, text: SYSTEM_PROMPT + personaFragment, cache_control: { type: "ephemeral" as const } },
+      { type: "text" as const, text: languageReminder + customerContext + knowledgeContext },
+    ],
+    tools: AGENT_TOOLS.map((tool, i) =>
+      i === AGENT_TOOLS.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
+    ),
+  };
+
+  /** ツール結果の共通後処理 */
+  const handleToolResult = (toolUse: Anthropic.ToolUseBlock, execResult: ToolExecResult) => {
+    if (toolUse.name === "get_order_detail" && execResult.orderDetail?.data) {
+      const od = execResult.orderDetail.data;
+      flexMessages.push({ altText: `注文 ${od.orderName} の詳細`, contents: orderCard(od) });
+    }
+    if (toolUse.name === "recommend_product") {
+      const input = toolUse.input as { products: Array<{ name: string; description: string; price: string; product_url: string }> };
+      const products = input.products.map((p) => ({ name: p.name, description: p.description, price: p.price, productUrl: p.product_url }));
+      for (const p of products) productCards.push(p);
+      if (products.length === 1) flexMessages.push({ altText: `商品のご案内: ${products[0].name}`, contents: productCard(products[0]) });
+      else if (products.length > 1) flexMessages.push({ altText: `${products.length}件の商品のご案内`, contents: productCarousel(products) });
+      callbacks.onProductCards(products.map((p) => ({ name: p.name, price: p.price, url: p.productUrl, image: null, description: p.description })));
+    }
+    if (toolUse.name === "create_cart_link" && execResult.cartLink?.checkoutUrl) {
+      cartLink = { checkoutUrl: execResult.cartLink.checkoutUrl };
+      callbacks.onCartLink(execResult.cartLink.checkoutUrl);
+      flexMessages.push({
+        altText: "カートを作成しました",
+        contents: { type: "bubble", size: "mega",
+          body: { type: "box", layout: "vertical", spacing: "md", backgroundColor: "#FFFEF2",
+            contents: [
+              { type: "text", text: "カートを作成しました", weight: "bold", size: "lg", color: "#333333" },
+              { type: "text", text: "下のボタンからお会計に進めます", size: "sm", color: "#666666", wrap: true },
+            ] },
+          footer: { type: "box", layout: "vertical", spacing: "sm", backgroundColor: "#FFFEF2",
+            contents: [{ type: "button", action: { type: "uri", label: "購入手続きへ", uri: execResult.cartLink.checkoutUrl }, style: "primary", color: "#333333", height: "sm" }] },
+        },
+      });
+    }
+    if (toolUse.name === "escalate_to_human") {
+      escalated = true;
+      recordEscalation(env);
+      const input = toolUse.input as { reason: string; category: string; summary: string };
+      escalationReason = input.reason;
+      escalationCategory = input.category;
+      notifySlack(userId, channel, input.reason, input.category, input.summary, env).catch(console.error);
+    }
+  };
+
+  /** 最終応答処理 */
+  const finalize = (finalText: string) => {
+    if (isLowKnowledge) {
+      logUnansweredQuery(supabase, { userId, channel, queryText: userMessage, maxSimilarity, resultCount: knowledgeResults.length, escalated }).catch(console.error);
+    }
+    const quickReplies = generateQuickReplies(usedTools, escalated);
+    if (quickReplies.length > 0) callbacks.onQuickReplies(quickReplies);
+    callbacks.onDone(finalText || "申し訳ありません、お返事の生成に失敗しました。");
+    return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies };
+  };
+
+  // ツールループ
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    const tLlm = Date.now();
+    console.log(`[agent-stream] turn=${turn}, elapsed=${tLlm - t0}ms`);
+
+    // 2回目以降（ツール使用後の応答）は Claude streaming API を使用
+    if (turn > 0) {
+      console.log(`[agent-stream] streaming turn=${turn}`);
+      const stream = await client.messages.create({ ...apiParams, messages, stream: true });
+
+      let fullText = "";
+      let hasToolUse = false;
+      const streamTools: Array<{ id: string; name: string; json: string }> = [];
+      let curTool: { id: string; name: string; json: string } | null = null;
+
+      for await (const event of stream) {
+        if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
+          hasToolUse = true;
+          curTool = { id: event.content_block.id, name: event.content_block.name, json: "" };
+        } else if (event.type === "content_block_delta") {
+          if (event.delta.type === "text_delta") {
+            callbacks.onTextDelta(event.delta.text);
+            fullText += event.delta.text;
+          } else if (event.delta.type === "input_json_delta" && curTool) {
+            curTool.json += (event.delta as unknown as { partial_json: string }).partial_json;
+          }
+        } else if (event.type === "content_block_stop" && curTool) {
+          streamTools.push(curTool);
+          curTool = null;
+        } else if (event.type === "message_delta") {
+          console.log(`[agent-stream] streaming turn=${turn} done, llm=${Date.now() - tLlm}ms, stop=${event.delta.stop_reason}`);
+        }
+      }
+
+      if (!hasToolUse) return finalize(fullText);
+
+      // ツール呼び出しをストリーミング中に検出（稀なケース）
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      const assistantContent: Anthropic.ContentBlockParam[] = [];
+      if (fullText) assistantContent.push({ type: "text" as const, text: fullText });
+      for (const tb of streamTools) {
+        let parsed: Record<string, unknown> = {};
+        try { parsed = JSON.parse(tb.json); } catch { /* empty */ }
+        const block: Anthropic.ToolUseBlock = { type: "tool_use", id: tb.id, name: tb.name, input: parsed };
+        assistantContent.push({ type: "tool_use" as const, id: tb.id, name: tb.name, input: parsed });
+        const execResult = await executeTool(block, userId, channel, env);
+        usedTools.push(tb.name);
+        handleToolResult(block, execResult);
+        toolResults.push({ type: "tool_result" as const, tool_use_id: tb.id, content: execResult.text });
+      }
+      messages.push({ role: "assistant", content: assistantContent });
+      messages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    // 初回ターン: 非ストリーミングでツール呼び出しの有無を確認
+    const response = await withTimeout(
+      client.messages.create({ ...apiParams, messages }), TIMEOUT_LLM_CALL_MS, `anthropic turn=${turn}`,
+    );
+    console.log(`[agent-stream] turn=${turn} done, llm=${Date.now() - tLlm}ms`);
+    console.log(JSON.stringify({
+      type: "usage", input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens,
+      cache_creation_input_tokens: (response.usage as any).cache_creation_input_tokens || 0,
+      cache_read_input_tokens: (response.usage as any).cache_read_input_tokens || 0,
+    }));
+
+    const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
+    const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+
+    if (toolUseBlocks.length === 0) {
+      // ツール不使用: テキストをチャンク送信（既に生成済みのため擬似ストリーミング）
+      const finalText = textBlocks.map((b) => b.text).join("");
+      for (let i = 0; i < finalText.length; i += 8) {
+        callbacks.onTextDelta(finalText.slice(i, i + 8));
+      }
+      return finalize(finalText);
+    }
+
+    // ツール実行
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    for (const toolUse of toolUseBlocks) {
+      const execResult = await executeTool(toolUse, userId, channel, env);
+      usedTools.push(toolUse.name);
+      handleToolResult(toolUse, execResult);
+      toolResults.push({ type: "tool_result" as const, tool_use_id: toolUse.id, content: execResult.text });
+    }
+    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "user", content: toolResults });
+  }
+
+  // ツールループ上限到達
+  const fallback = productCards.length > 0
+    ? "こちらの商品情報をご参考になさってください。他にもご質問がございましたら、お気軽にどうぞ。"
+    : "申し訳ございません、ただいま情報の取得に少しお時間をいただいております。具体的なご質問をいただければ、改めてお調べいたしますね。";
+  for (let i = 0; i < fallback.length; i += 8) callbacks.onTextDelta(fallback.slice(i, i + 8));
+  callbacks.onDone(fallback);
+  return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies: [] };
+}
+
+/**
+ * 顧客プロファイルからコンテキスト文字列を構築する。
+ */
+function buildCustomerContext(customerProfile: CustomerProfile | null, isLinked: boolean): string {
+  if (customerProfile) {
+    const parts: string[] = [];
+    if (isLinked) parts.push("紐付け状態: LINE・Web アカウント連携済み（リピーターとして対応）");
+    if (customerProfile.displayName) parts.push(`顧客名: ${customerProfile.displayName}`);
+    if (customerProfile.membershipTier && customerProfile.membershipTier !== "none") parts.push(`会員ランク: ${customerProfile.membershipTier}`);
+    if (customerProfile.depthLevel) parts.push(`茶の経験レベル: ${customerProfile.depthLevel}`);
+    if (customerProfile.tasteProfile) {
+      const tp = customerProfile.tasteProfile;
+      if (tp.preferredCategories?.length) parts.push(`好みのカテゴリ: ${tp.preferredCategories.join(", ")}`);
+      if (tp.flavorPreferences?.length) parts.push(`好みのフレーバー: ${tp.flavorPreferences.join(", ")}`);
+      if (tp.scenePref) parts.push(`好みのシーン: ${tp.scenePref}`);
+    }
+    if (isLinked && customerProfile.persona) {
+      const ps = customerProfile.persona;
+      if (ps.scores) parts.push(`ペルソナスコア: serenity=${ps.scores.serenity}, explorer=${ps.scores.explorer}, sensory=${ps.scores.sensory}`);
+      if (ps.lastUpdated) parts.push(`ペルソナ最終更新: ${ps.lastUpdated}`);
+    }
+    if (parts.length > 0) {
+      let ctx = `\n\n## 顧客データ\n${parts.join("\n")}`;
+      if (isLinked) {
+        ctx += "\n\n**注意**: この顧客はアカウント連携済みです。過去の好みや購入履歴を踏まえたパーソナライズされた提案をしてください。名前で呼びかけ、以前の会話内容を自然に参照してください。\n\n**プロファイル活用ルール**:\n- 好みのカテゴリやフレーバーが記録されている場合、「前回、〇〇がお好みとのことでしたね」のように自然に参照する\n- プロファイルが空の場合は無理に参照せず、通常通り対応する\n- 好みの情報は押し付けではなく、提案の精度向上に使う";
+      }
+      return ctx;
+    }
+  } else if (isLinked) {
+    return "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
+  }
+  return "";
 }
 
 /**

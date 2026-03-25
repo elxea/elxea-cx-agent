@@ -1,13 +1,13 @@
 /**
  * Web Chat Route — POST /api/chat + GET /api/chat/history
  *
- * SSE でストリーミングレスポンスを返す。
- * 現時点では runAgent() は同期的に全応答を取得するため、
- * SSE は runAgent() 完了後にレスポンスをチャンクに分割して送信する。
+ * POST /api/chat は SSE で真のストリーミングレスポンスを返す。
+ * Claude API のストリーミングレスポンスのチャンクをリアルタイムで
+ * SSE イベントとしてクライアントに転送する。
  */
 import type { Context } from "hono";
 import type { Env } from "../index";
-import { runAgent } from "../agent/core";
+import { runAgent, runAgentStreaming, type StreamCallbacks } from "../agent/core";
 import { createEmbedding } from "../lib/embedding";
 import {
   createSupabaseClient,
@@ -33,20 +33,21 @@ import { runPreferencePipeline } from "../lib/preference-pipeline";
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
 
-/** SSE text_delta のチャンクサイズ（文字数） */
-const TEXT_CHUNK_SIZE = 20;
-
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
 const TIMEOUT_PRE_PARALLEL_MS = 10_000;
 
-/** エージェント実行のタイムアウト（ミリ秒 -- Workers 30秒制限内に収める） */
+/** エージェント実行のタイムアウト（ミリ秒 -- webChatImageHandler で使用） */
 const TIMEOUT_RUN_AGENT_MS = 25_000;
 
 /**
  * POST /api/chat
  *
  * リクエストボディ: { "message": string, "session_id": string }
- * レスポンス: SSE ストリーミング
+ * レスポンス: SSE 真のストリーミング
+ *
+ * Claude API のストリーミングレスポンスをリアルタイムで SSE イベントとして
+ * クライアントに転送する。ReadableStream を使用し、各チャンクが到着次第
+ * 即座にクライアントに送信される。
  */
 export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   // レートリミット
@@ -91,25 +92,23 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
 
   const supabase = createSupabaseClient(c.env);
   const tStart = Date.now();
+  const encoder = new TextEncoder();
 
-  // メイン処理を try-catch で包む（unhandled rejection によるハングを防止）
-  let result: Awaited<ReturnType<typeof runAgent>>;
+  // 前処理: Identity 解決 + メッセージ保存 + 履歴取得 + Embedding 生成
   let effectiveUserId = sessionId;
   let history: Array<{ role: "user" | "assistant"; content: string }> = [];
+  let embedding: number[];
+  let identityIsLinked = false;
+
   try {
-    // Identity Resolver: unified_user_id を解決
-    // ログイン済み（shopify_customer_id あり）→ Shopify Customer ID ベースで解決
-    // 未ログイン → 従来の session_id ベースで解決
     const identity = shopify_customer_id
       ? await resolveWithShopifyCustomerId(supabase, shopify_customer_id, sessionId)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
+    identityIsLinked = identity.isLinked;
 
     console.log("[web] step=pre-parallel");
-    // メッセージ保存・履歴取得・Embedding 生成を並列実行（各 8 秒タイムアウト）
-    // 保存は元の sessionId で行い、取得は effectiveUserId で行う
-    // 紐付け済みユーザーはクロスチャネルで会話を取得
-    const [, fetchedHistory, embedding] = await withTimeout(
+    const [, fetchedHistory, emb] = await withTimeout(
       Promise.all([
         saveMessage(supabase, {
           userId: sessionId,
@@ -126,6 +125,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       "pre-parallel (saveMessage+history+embedding)",
     );
     history = fetchedHistory;
+    embedding = emb;
 
     // 初回メッセージの場合、chat_started イベントを記録（fire-and-forget）
     if (fetchedHistory.length === 0) {
@@ -135,114 +135,95 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
         supabase,
       ).catch((err) => console.warn("[web] chat_started event failed:", err instanceof Error ? err.message : err));
     }
+  } catch (err) {
+    console.error("webChatHandler pre-parallel error:", err);
+    recordApiError(c.env, err instanceof Error ? err.message : String(err));
+    return c.json({ error: "Internal server error" }, 500);
+  }
 
-    console.log("[web] step=runAgent");
-    // エージェント実行（20 秒タイムアウト — Workers の 30 秒制限内に収める）
-    result = await withTimeout(
-      runAgent(
+  // SSE ストリーミングレスポンスを TransformStream で構築
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+
+  /** SSE イベントをストリームに書き込む */
+  function writeSSE(data: Record<string, unknown>) {
+    writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+  }
+
+  // ストリーミングエージェント実行（バックグラウンドで実行し、チャンクを即時送信）
+  const streamingPromise = (async () => {
+    // meta を onDone コールバック内で参照するために外側で宣言
+    let meta: Awaited<ReturnType<typeof runAgentStreaming>> | null = null;
+    try {
+      console.log("[web] step=runAgentStreaming");
+
+      const callbacks: StreamCallbacks = {
+        onTextDelta: (text) => writeSSE({ type: "text_delta", content: text }),
+        onProductCards: (products) => writeSSE({ type: "product_card", products }),
+        onCartLink: (checkoutUrl) => writeSSE({ type: "cart_link", checkout_url: checkoutUrl }),
+        onQuickReplies: (items) => writeSSE({ type: "quick_replies", items }),
+        onDone: (fullResponse) => {
+          const elapsed = Date.now() - tStart;
+          console.log(`[web] step=runAgentStreaming done, total_elapsed=${elapsed}ms`);
+          recordResponseTime(c.env, elapsed);
+
+          // done イベント送信
+          writeSSE({ type: "done", session_id: sessionId });
+
+          // アシスタント応答を保存（メタデータ付き）
+          const metadata: Record<string, unknown> = {};
+          if (meta && meta.productCards.length > 0) metadata.product_cards = meta.productCards;
+          if (meta && meta.quickReplies.length > 0) metadata.quick_replies = meta.quickReplies;
+
+          c.executionCtx.waitUntil(
+            saveMessage(supabase, {
+              userId: sessionId,
+              channel: "web",
+              role: "assistant",
+              content: fullResponse,
+              ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+            }),
+          );
+
+          // 嗜好抽出パイプライン（fire-and-forget）
+          const fullHistory = [
+            ...history,
+            { role: "user", content: processedMessage },
+            { role: "assistant", content: fullResponse },
+          ];
+          c.executionCtx.waitUntil(
+            runPreferencePipeline(fullHistory, effectiveUserId, "web", c.env, supabase),
+          );
+        },
+        onError: (error) => writeSSE({ type: "error", message: error }),
+      };
+
+      meta = await runAgentStreaming(
         processedMessage,
         history,
         embedding,
         effectiveUserId,
         "web",
         c.env,
-        { isLinked: identity.isLinked },
-      ),
-      TIMEOUT_RUN_AGENT_MS,
-      "runAgent",
-    );
-    const elapsed = Date.now() - tStart;
-    console.log(`[web] step=runAgent done, total_elapsed=${elapsed}ms`);
-    // レスポンスタイム計測（アラート用）
-    recordResponseTime(c.env, elapsed);
-  } catch (err) {
-    console.error("webChatHandler fatal error:", err);
-    // API エラー記録（アラート用）
-    recordApiError(c.env, err instanceof Error ? err.message : String(err));
-    return c.json(
-      { error: "Internal server error" },
-      500,
-    );
-  }
+        callbacks,
+        { isLinked: identityIsLinked },
+      );
+    } catch (err) {
+      console.error("webChatHandler streaming error:", err);
+      recordApiError(c.env, err instanceof Error ? err.message : String(err));
+      try {
+        writeSSE({ type: "error", message: "Internal server error" });
+        writeSSE({ type: "done", session_id: sessionId });
+      } catch { /* writer may already be closed */ }
+    } finally {
+      try { await writer.close(); } catch { /* ignore */ }
+    }
+  })();
 
-  // アシスタント応答を保存（メタデータ付き）
-  const metadata: Record<string, unknown> = {};
-  if (result.productCards && result.productCards.length > 0) {
-    metadata.product_cards = result.productCards;
-  }
-  if (result.quickReplies && result.quickReplies.length > 0) {
-    metadata.quick_replies = result.quickReplies;
-  }
+  // waitUntil でストリーミング完了を保証（Workers がレスポンス送信後も実行を継続）
+  c.executionCtx.waitUntil(streamingPromise);
 
-  c.executionCtx.waitUntil(
-    saveMessage(supabase, {
-      userId: sessionId,
-      channel: "web",
-      role: "assistant",
-      content: result.response,
-      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-    }),
-  );
-
-  // 嗜好抽出パイプライン（fire-and-forget）
-  const fullHistory = [
-    ...history,
-    { role: "user", content: processedMessage },
-    { role: "assistant", content: result.response },
-  ];
-  c.executionCtx.waitUntil(
-    runPreferencePipeline(fullHistory, effectiveUserId, "web", c.env, supabase),
-  );
-
-  // SSE レスポンスを文字列として構築し、一括返却
-  // （ReadableStream は Cloudflare Workers 本番でハングするため回避）
-  const events: string[] = [];
-
-  function pushEvent(data: Record<string, unknown>) {
-    events.push(`data: ${JSON.stringify(data)}\n\n`);
-  }
-
-  // テキストをチャンクに分割して text_delta イベントとして送信
-  const text = result.response;
-  for (let i = 0; i < text.length; i += TEXT_CHUNK_SIZE) {
-    const chunk = text.slice(i, i + TEXT_CHUNK_SIZE);
-    pushEvent({ type: "text_delta", content: chunk });
-  }
-
-  // 商品カード
-  if (result.productCards && result.productCards.length > 0) {
-    pushEvent({
-      type: "product_card",
-      products: result.productCards.map((p) => ({
-        name: p.name,
-        price: p.price,
-        url: p.productUrl,
-        image: p.imageUrl ?? null,
-        description: p.description,
-      })),
-    });
-  }
-
-  // カートリンク
-  if (result.cartLink?.checkoutUrl) {
-    pushEvent({
-      type: "cart_link",
-      checkout_url: result.cartLink.checkoutUrl,
-    });
-  }
-
-  // クイックリプライ
-  if (result.quickReplies && result.quickReplies.length > 0) {
-    pushEvent({
-      type: "quick_replies",
-      items: result.quickReplies,
-    });
-  }
-
-  // 完了
-  pushEvent({ type: "done", session_id: sessionId });
-
-  return new Response(events.join(""), {
+  return new Response(readable, {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
