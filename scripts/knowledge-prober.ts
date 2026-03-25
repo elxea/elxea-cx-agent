@@ -247,6 +247,64 @@ async function saveProbeResult(
 }
 
 // ---------------------------------------------------------------------------
+// Notion: Knowledge Prober Results DB
+// ---------------------------------------------------------------------------
+
+const NOTION_PROBER_DB_ID = "ec16d9df0312482187da4a251ee656a1";
+
+async function saveProbeToNotion(result: ProbeResult): Promise<void> {
+  const score = result.evaluation?.quality_score ?? 0;
+  const status = result.error
+    ? "fail"
+    : score >= 4
+      ? "pass"
+      : result.evaluation?.gap_category && result.evaluation.gap_category !== "none"
+        ? "gap_detected"
+        : "fail";
+
+  const properties: Record<string, unknown> = {
+    Question: { title: [{ text: { content: result.question.substring(0, 200) } }] },
+    Persona: { select: { name: `${result.persona}_${result.depth}` } },
+    Score: { number: score },
+    "Gap Category": result.evaluation?.gap_category
+      ? { select: { name: result.evaluation.gap_category } }
+      : { select: null },
+    "Response Summary": {
+      rich_text: [
+        {
+          text: {
+            content: (result.response || result.error || "No response").substring(0, 200),
+          },
+        },
+      ],
+    },
+    "Article Generated": { checkbox: result.articleGenerated ?? false },
+    "Run Date": { date: { start: new Date().toISOString().split("T")[0] } },
+    Status: { select: { name: status } },
+  };
+
+  const res = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      parent: { database_id: NOTION_PROBER_DB_ID },
+      properties,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`[notion] Write failed (${res.status}):`, err.substring(0, 200));
+  } else {
+    console.log(`[notion] Probe result saved to Knowledge Prober Results DB`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Slack notification
 // ---------------------------------------------------------------------------
 
@@ -533,6 +591,13 @@ async function main(): Promise<void> {
     // Save to DB and capture row ID
     if (!isDryRun && result.question) {
       result.probeHistoryId = await saveProbeResult(supabase, result);
+
+      // Write to Notion Knowledge Prober Results DB
+      try {
+        await saveProbeToNotion(result);
+      } catch (e) {
+        console.error(`[notion] Failed to write probe result:`, e);
+      }
     }
 
     // Phase 3: Save high-quality probes as regression test cases (score 4-5)
