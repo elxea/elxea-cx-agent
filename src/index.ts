@@ -200,7 +200,6 @@ app.post("/api/sync/shopify-metafields", async (c) => {
  * - scheduled: Cron Trigger による定期処理
  *   - 毎日 18:00 UTC (03:00 JST): ナレッジ同期 + Shopify Metafield 同期
  *   - 1日・15日 21:00 UTC (06:00 JST): セグメント別自動配信（月2回）
- *     NOTE: セグメント配信 cron は disabled 状態でデプロイ。Setaka が有効化する。
  */
 export default {
   fetch: app.fetch,

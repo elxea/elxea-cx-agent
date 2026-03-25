@@ -13,10 +13,8 @@ enabled = true
 
 # 定期同期（毎日 AM3:00 JST = PM6:00 UTC）
 # セグメント配信（1日・15日 AM6:00 JST = PM9:00 UTC 前日）
-# NOTE: セグメント配信 cron は Setaka が有効化するまでコメントアウト
 [triggers]
-crons = ["0 18 * * *"]
-# crons = ["0 18 * * *", "0 21 1,15 * *"]
+crons = ["0 18 * * *", "0 21 1,15 * *"]
 
 # ── Staging 環境 ──
 [env.staging]
