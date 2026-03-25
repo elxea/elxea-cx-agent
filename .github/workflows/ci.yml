@@ -47,9 +47,9 @@ jobs:
     timeout-minutes: 15
     if: github.event_name != 'pull_request'
     env:
-      LINE_CHANNEL_SECRET_TEST: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
+      LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -68,7 +68,7 @@ jobs:
     if: github.event_name != 'pull_request'
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
