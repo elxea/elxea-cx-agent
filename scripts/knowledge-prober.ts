@@ -44,6 +44,10 @@ import {
   type EvaluationResult,
   type ArticleContext,
 } from "../src/prober/types";
+import {
+  analyzeAndCreateProposals,
+  type CreatedTask,
+} from "../src/prober/improvement-analyzer";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -669,6 +673,29 @@ async function main(): Promise<void> {
   // Slack notification
   if (!isDryRun) {
     await sendSlackSummary(summary);
+  }
+
+  // Phase 4: Improvement proposal analysis + Review task creation
+  let phase4Tasks: CreatedTask[] = [];
+  if (!isDryRun && NOTION_TOKEN) {
+    try {
+      phase4Tasks = await analyzeAndCreateProposals(
+        supabase,
+        NOTION_TOKEN,
+        allResults,
+      );
+      if (phase4Tasks.length > 0) {
+        console.log(`\n[phase4] Review tasks created:`);
+        for (const task of phase4Tasks) {
+          console.log(`  - [${task.pattern}] ${task.summary}`);
+        }
+      }
+    } catch (err) {
+      console.error(
+        "[phase4] Improvement analysis failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
   }
 
   console.log("\nDone.");
