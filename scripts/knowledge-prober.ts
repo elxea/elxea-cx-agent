@@ -33,6 +33,7 @@ import {
   writeToContentHub,
   markArticleGenerated,
 } from "../src/prober/content-hub-writer";
+import { saveRegressionTest } from "../src/prober/regression-runner";
 import {
   PERSONA_DEPTH_MATRIX,
   SKIP_GAP_CATEGORIES,
@@ -532,6 +533,30 @@ async function main(): Promise<void> {
     // Save to DB and capture row ID
     if (!isDryRun && result.question) {
       result.probeHistoryId = await saveProbeResult(supabase, result);
+    }
+
+    // Phase 3: Save high-quality probes as regression test cases (score 4-5)
+    if (
+      !isDryRun &&
+      result.probeHistoryId &&
+      result.evaluation &&
+      result.evaluation.quality_score >= 4 &&
+      result.response
+    ) {
+      console.log(`[phase3] High-quality response (score ${result.evaluation.quality_score}), saving regression test case...`);
+      try {
+        await saveRegressionTest(
+          client,
+          supabase,
+          result.question,
+          result.response,
+          result.persona,
+          result.depth,
+          result.probeHistoryId,
+        );
+      } catch (err) {
+        console.error("[phase3] Failed to save regression test:", err instanceof Error ? err.message : String(err));
+      }
     }
 
     allResults.push(result);

@@ -24,7 +24,9 @@
     "test:load:staging": "npx tsx tests/load/run-load-test.ts --base-url https://elxea-agent-staging.setaka1103.workers.dev",
     "eval:quality": "npx tsx scripts/eval-quality.ts",
     "eval:quality:json": "npx tsx scripts/eval-quality.ts --json",
-    "smoke-test": "npx tsx scripts/smoke-test.ts"
+    "smoke-test": "npx tsx scripts/smoke-test.ts",
+    "prober": "npx tsx scripts/knowledge-prober.ts",
+    "regression": "npx tsx scripts/knowledge-regression.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
