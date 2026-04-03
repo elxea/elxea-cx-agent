@@ -1,0 +1,71 @@
+# gitleaks 設定ファイル
+# シークレット検知ルール（CIRCL エージェントリポ共通）
+#
+# デフォルトルールに加えて、固有のトークンパターンを追加検知する。
+# .env ファイルはローカル専用のため除外。
+# .env.example はダミー値のため除外。
+# node_modules は依存パッケージのため除外。
+
+title = "circl gitleaks config"
+
+# --- 固有の検知ルール ---
+
+[[rules]]
+id = "notion-internal-integration-token"
+description = "Notion Internal Integration Token"
+regex = 'ntn_[A-Za-z0-9]{40,}'
+tags = ["notion", "token"]
+
+[[rules]]
+id = "notion-secret"
+description = "Notion API Secret (legacy)"
+regex = 'secret_[A-Za-z0-9]{40,}'
+tags = ["notion", "token"]
+
+[[rules]]
+id = "shopify-access-token"
+description = "Shopify Admin API Access Token"
+regex = 'shpat_[A-Fa-f0-9]{32,}'
+tags = ["shopify", "token"]
+
+[[rules]]
+id = "shopify-shared-secret"
+description = "Shopify Shared Secret"
+regex = 'shpss_[A-Fa-f0-9]{32,}'
+tags = ["shopify", "secret"]
+
+[[rules]]
+id = "shopify-custom-app-token"
+description = "Shopify Custom App Access Token"
+regex = 'shpca_[A-Fa-f0-9]{32,}'
+tags = ["shopify", "token"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API Key"
+regex = 'sk-[A-Za-z0-9_-]{20,}'
+tags = ["openai", "api-key"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API Key"
+regex = 'sk-ant-[A-Za-z0-9_-]{20,}'
+tags = ["anthropic", "api-key"]
+
+[[rules]]
+id = "together-api-key"
+description = "Together AI API Key"
+regex = '[0-9a-f]{64}'
+tags = ["together", "api-key"]
+[rules.allowlist]
+paths = ["package-lock\\.json", ".*\\.lock"]
+
+# --- 除外設定 ---
+
+[allowlist]
+paths = [
+  "(^|/)\\.env$",
+  "(^|/)\\.env\\..+$",
+  "(^|/)\\.env\\.example$",
+  "(^|/)node_modules/",
+]

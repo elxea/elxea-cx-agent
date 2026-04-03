@@ -1,0 +1,46 @@
+# .pre-commit-config.yaml --- QA Pipeline Local Gate Template
+# Usage: Copy to each repo root. Runs on every commit (local).
+# CI (qa-gate.yml) is the remote gate; this is the local gate.
+repos:
+  # --- Secret Scan (HARD - same as CI) ---
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        args: ['--config=.gitleaks.toml']
+
+  # --- Shell Lint (HARD - same as CI) ---
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: ['--severity=error']
+
+  # --- Trailing whitespace / EOF ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        exclude: 'package-lock\.json'
+      - id: check-merge-conflict
+
+  # --- JS/TS Lint (uncomment when eslint is configured) ---
+  # - repo: https://github.com/pre-commit/mirrors-eslint
+  #   rev: v9.0.0
+  #   hooks:
+  #     - id: eslint
+  #       args: ['--max-warnings=0']
+  #       additional_dependencies:
+  #         - eslint@9
+
+  # --- Type Check (uncomment when TypeScript is configured) ---
+  # - repo: local
+  #   hooks:
+  #     - id: typecheck
+  #       name: TypeScript check
+  #       entry: npx tsc --noEmit
+  #       language: system
+  #       types: [ts, tsx]
