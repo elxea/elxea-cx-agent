@@ -69,3 +69,6 @@ paths = [
   "(^|/)\\.env\\.example$",
   "(^|/)node_modules/",
 ]
+
+[extend]
+useDefault = true
