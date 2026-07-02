@@ -11,10 +11,12 @@ binding = "AI"
 [observability]
 enabled = true
 
-# 定期同期（毎日 AM3:00 JST = PM6:00 UTC）は 2026-07-02 休止 — LINE AI チャネル休止のため日次 cron を除去（再開時は "0 18 * * *" を crons 先頭に戻す）
-# セグメント配信（1日・15日 AM6:00 JST = PM9:00 UTC 前日）
+# ── Cron Triggers: 全休止中 (2026-07-02 Setaka 判断) ──
+# LINE AI チャネル休止に伴い定期実行ゼロで確定。再開手順は deliverable 参照。
+#   - 定期同期（毎日 AM3:00 JST = PM6:00 UTC）: 再開は crons に "0 18 * * *"
+#   - セグメント配信（1日・15日 AM6:00 JST = PM9:00 UTC 前日）: 再開は "0 21 1,15 * *"
 [triggers]
-crons = ["0 21 1,15 * *"]
+crons = []
 
 # ── Staging 環境 ──
 [env.staging]
