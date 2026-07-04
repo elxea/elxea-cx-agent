@@ -236,16 +236,33 @@ async function sendAlert(
   severity: AlertSeverity,
   details: string,
 ): Promise<void> {
-  // 1. Notion に記録
-  await sendNotionAlert(env, type, severity, details).catch((err) => {
-    console.error(`[alert] Notion alert failed for ${type}:`, err instanceof Error ? err.message : err);
-  });
+  // 1. Notion に記録（FIX-2 #4: 送信可否を握りつぶさず受け取る）
+  const notionDelivered = await sendNotionAlert(env, type, severity, details).catch(
+    (err) => {
+      console.error(
+        `[alert] Notion alert failed for ${type}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    },
+  );
 
-  // 2. 緊急アラートのみ Slack にも送信
-  if (CRITICAL_ALERT_TYPES.includes(type) && severity === "critical") {
+  const isCriticalSlack =
+    CRITICAL_ALERT_TYPES.includes(type) && severity === "critical";
+
+  // 2. 緊急アラートは Slack にも送信
+  if (isCriticalSlack) {
     const slackText = `*[Alert] ${type.replace(/_/g, " ").toUpperCase()}* (${severity})\n${details}`;
     await sendSlackAlert(env, type, slackText).catch((err) => {
       console.error(`[alert] Slack alert failed for ${type}:`, err instanceof Error ? err.message : err);
+    });
+  } else if (!notionDelivered) {
+    // FIX-2 #4: Notion への配信が「設定済みなのに失敗」した非緊急アラートを
+    // 握りつぶさず Slack にフォールバック（監視の監視の穴を塞ぐ）。
+    // 未設定スキップ時は notionDelivered=true のためここには来ない（ノイズ回避）。
+    const fallbackText = `*[Alert:Notion配信失敗] ${type.replace(/_/g, " ").toUpperCase()}* (${severity})\n${details}\n(Notion Alerts DB への記録に失敗したため Slack に転送)`;
+    await sendSlackAlert(env, type, fallbackText).catch((err) => {
+      console.error(`[alert] Slack fallback failed for ${type}:`, err instanceof Error ? err.message : err);
     });
   }
 }
@@ -269,12 +286,13 @@ async function sendNotionAlert(
   type: AlertType,
   severity: AlertSeverity,
   details: string,
-): Promise<void> {
+): Promise<boolean> {
+  // 返り値: 配信成功 or 未設定スキップ = true / 設定済みだが送信失敗 = false（呼び出し側でフォールバック）
   if (!env.NOTION_TOKEN || !env.NOTION_ALERTS_DB_ID) {
     console.warn(
       `[alert] NOTION_TOKEN or NOTION_ALERTS_DB_ID is not set, skipping Notion alert for ${type}`,
     );
-    return;
+    return true;
   }
 
   const typeLabels: Record<AlertType, string> = {
@@ -328,14 +346,16 @@ async function sendNotionAlert(
     if (!res.ok) {
       const errText = await res.text().catch(() => "unknown error");
       console.error(`[alert] Notion API error (${res.status}) for ${type}:`, errText);
-    } else {
-      console.log(`[alert] Notion alert created: ${type} (${severity})`);
+      return false;
     }
+    console.log(`[alert] Notion alert created: ${type} (${severity})`);
+    return true;
   } catch (err) {
     console.error(
       `[alert] Failed to send Notion alert for ${type}:`,
       err instanceof Error ? err.message : err,
     );
+    return false;
   }
 }
 

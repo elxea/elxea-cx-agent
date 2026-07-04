@@ -67,15 +67,54 @@ type DBConfig = {
 };
 
 // -------------------------------------------------------------------
+// FIX-2 (Spec v3 OPS-1/OPS-5): 同期台帳の失敗を握りつぶさない
+// -------------------------------------------------------------------
+
+/** 同期台帳（sync_logs）の記録失敗・必須テーブル不在を表す明示エラー。 */
+export class SyncLedgerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SyncLedgerError";
+  }
+}
+
+/** 同期に必須のテーブル。preflight で存在を確認する。 */
+const REQUIRED_SYNC_TABLES = ["sync_logs", "knowledge_chunks"] as const;
+
+/**
+ * 起動時 preflight: 必須テーブルの存在をチェックする。
+ * 不在なら理由（テーブル名・エラーメッセージ）を返す。存在すれば null。
+ * Supabase JS は不在テーブルへの select を throw せず error オブジェクトで返すため、
+ * head select で軽量に存在を確認する。
+ */
+async function checkRequiredTables(
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  for (const table of REQUIRED_SYNC_TABLES) {
+    const { error } = await supabase
+      .from(table)
+      .select("*", { head: true, count: "exact" });
+    if (error) {
+      return `required table "${table}" is not accessible: ${error.message}${error.code ? ` (code: ${error.code})` : ""}`;
+    }
+  }
+  return null;
+}
+
+// -------------------------------------------------------------------
 // Main Entry
 // -------------------------------------------------------------------
 
 export async function runKnowledgeSync(
   env: Env,
   mode: "full" | "incremental" = "incremental",
+  supabaseClient?: SupabaseClient,
 ): Promise<SyncResult> {
   const startTime = Date.now();
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  // FIX-2: テスト時はモッククライアントを注入可能にする（本番は createClient）
+  const supabase =
+    supabaseClient ??
+    createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 
   const result: SyncResult = {
     status: "success",
@@ -89,8 +128,26 @@ export async function runKnowledgeSync(
     durationMs: 0,
   };
 
-  // 同期ログの開始を記録
-  const { data: syncLog } = await supabase
+  // FIX-2: 台帳/必須テーブルの失敗を「失敗として終了 + 通知」する共通ハンドラ。
+  const failLoud = async (reason: string): Promise<never> => {
+    result.status = "failure";
+    result.durationMs = Date.now() - startTime;
+    result.errorCount++;
+    result.errorDetails.push({ source: "sync_ledger", error: reason });
+    console.error(`[sync] Ledger failure, aborting sync: ${reason}`);
+    // 失敗時のみ通知（OPS-2）
+    await notifySyncFailure(result, env).catch((err) =>
+      console.error("Sync failure notification failed:", err),
+    );
+    throw new SyncLedgerError(reason);
+  };
+
+  // FIX-2: 起動時 preflight — 必須テーブルが無ければ即失敗
+  const preflightError = await checkRequiredTables(supabase);
+  if (preflightError) await failLoud(preflightError);
+
+  // 同期ログの開始を記録（FIX-2: insert エラーを握りつぶさず失敗終了）
+  const { data: syncLog, error: insertError } = await supabase
     .from("sync_logs")
     .insert({
       started_at: new Date().toISOString(),
@@ -99,7 +156,12 @@ export async function runKnowledgeSync(
     })
     .select("id")
     .single();
-  const syncLogId = syncLog?.id;
+  if (insertError || !syncLog?.id) {
+    await failLoud(
+      `sync_logs insert failed: ${insertError?.message ?? "no row id returned"}`,
+    );
+  }
+  const syncLogId = syncLog!.id;
 
   // 最後の成功同期時刻を取得（増分同期用）
   let lastSyncedAt: string | undefined;
@@ -152,32 +214,35 @@ export async function runKnowledgeSync(
         : "partial_failure"
       : "success";
 
-  // 同期ログの更新
-  if (syncLogId) {
-    await supabase
-      .from("sync_logs")
-      .update({
-        completed_at: new Date().toISOString(),
-        status: result.status,
-        total_pages: result.totalPages,
-        added_chunks: result.addedChunks,
-        updated_chunks: result.updatedChunks,
-        deleted_chunks: result.deletedChunks,
-        error_count: result.errorCount,
-        error_details: result.errorDetails,
-        duration_ms: result.durationMs,
-      })
-      .eq("id", syncLogId);
+  // 同期ログの更新（FIX-2: 更新失敗も台帳の破綻として失敗終了）
+  const { error: updateError } = await supabase
+    .from("sync_logs")
+    .update({
+      completed_at: new Date().toISOString(),
+      status: result.status,
+      total_pages: result.totalPages,
+      added_chunks: result.addedChunks,
+      updated_chunks: result.updatedChunks,
+      deleted_chunks: result.deletedChunks,
+      error_count: result.errorCount,
+      error_details: result.errorDetails,
+      duration_ms: result.durationMs,
+    })
+    .eq("id", syncLogId);
+  if (updateError) {
+    await failLoud(`sync_logs completion update failed: ${updateError.message}`);
   }
 
   console.log(
     `Sync completed: ${result.status} (${result.totalPages} pages, ${result.addedChunks + result.updatedChunks} chunks, ${result.durationMs}ms)`,
   );
 
-  // Slack 通知（MS4 4.9）
-  await notifySyncResult(result, env).catch((err) =>
-    console.error("Sync Slack notification failed:", err),
-  );
+  // FIX-2 (OPS-2): 失敗時のみ通知。成功は sync_logs 記録のみ（定常通知は廃止）。
+  if (result.status !== "success") {
+    await notifySyncFailure(result, env).catch((err) =>
+      console.error("Sync failure notification failed:", err),
+    );
+  }
 
   return result;
 }
@@ -693,35 +758,32 @@ function getDBConfigs(env: Env): DBConfig[] {
 }
 
 // -------------------------------------------------------------------
-// Slack 通知（MS4 4.9）
+// Slack 通知（FIX-2 / OPS-2: 失敗時のみ発報。成功の定常通知は廃止）
 // -------------------------------------------------------------------
 
-/** 同期結果を Slack に通知 */
-async function notifySyncResult(
+/**
+ * 同期の「失敗」を Slack に通知する（呼び出し側で status !== "success" のときのみ呼ぶ）。
+ * 成否を絵文字で表さず、見出しで「ナレッジ同期失敗」と明示する。
+ */
+async function notifySyncFailure(
   result: SyncResult,
   env: Env,
 ): Promise<void> {
   if (!env.SLACK_WEBHOOK_URL) return;
 
-  const statusEmoji =
-    result.status === "success"
-      ? "✅"
-      : result.status === "partial_failure"
-        ? "⚠️"
-        : "❌";
-
   const durationSec = (result.durationMs / 1000).toFixed(1);
+  const label =
+    result.status === "partial_failure"
+      ? "ナレッジ同期 部分失敗"
+      : "ナレッジ同期失敗";
 
-  let text = `${statusEmoji} *ナレッジ同期完了* [${result.syncType}]\n`;
+  let text = `[${label}] status=${result.status} [${result.syncType}]\n`;
   text += `- ページ数: ${result.totalPages}\n`;
   text += `- 追加: ${result.addedChunks} / 更新: ${result.updatedChunks} / 削除: ${result.deletedChunks}\n`;
-  text += `- 所要時間: ${durationSec}秒`;
-
-  if (result.errorCount > 0) {
-    text += `\n- エラー: ${result.errorCount}件`;
-    for (const err of result.errorDetails.slice(0, 3)) {
-      text += `\n  - ${err.source}: ${err.error.slice(0, 100)}`;
-    }
+  text += `- 所要時間: ${durationSec}秒\n`;
+  text += `- エラー: ${result.errorCount}件`;
+  for (const err of result.errorDetails.slice(0, 5)) {
+    text += `\n  - ${err.source}: ${err.error.slice(0, 150)}`;
   }
 
   await fetch(env.SLACK_WEBHOOK_URL, {
