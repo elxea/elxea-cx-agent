@@ -22,6 +22,9 @@ export const DELIVERY_PROPS = {
   audience: "配信対象",
   format: "形式",
   body: "本文",
+  /** files 型「画像」。運用者が Notion に直接ドラッグ&ドロップする（URL 手入力は廃止）。 */
+  image: "画像",
+  /** 旧・url 型「画像URL」。廃止（view 非表示で残置）。コードは読むが運用者は触らない。 */
   imageUrl: "画像URL",
   estimate: "通数見積",
   consumed: "消費実績",
@@ -43,9 +46,26 @@ export interface DeliveryPage {
   title: string;
   status: string;
   audienceRaw: string | null;
+  /**
+   * 形式。files「画像」が 1 件以上あれば "image"、無ければ "text"（コード自動判定）。
+   * Notion「形式」select は読まない（view 非表示・自動判定化）。
+   */
   format: "text" | "image" | null;
   body: string | null;
+  /** 旧・単一 url「画像URL」の値（後方互換で読むが運用者は触らない）。 */
   imageUrl: string | null;
+  /**
+   * files「画像」の Notion 一時URL（署名・約1時間失効）。順序保持。
+   * 承認 pin 時に R2 取込のソースとして使う（送信時は使わない）。
+   */
+  imageSourceUrls: string[];
+  /** files「画像」の枚数（送信時の恒久R2 URL 再構成に使う）。 */
+  imageCount: number;
+  /**
+   * 恒久 R2 公開URL 群（送信・ハッシュ照合で使用）。normalize では埋めず、
+   * runtime（R2 公開ベースを知る層）が imageCount から決定的に再構成して埋める。
+   */
+  imageUrls?: string[];
   scheduledStart: string | null;
   sent: boolean;
   contentHash: string | null;
@@ -104,7 +124,8 @@ function selectName(p: RawProp | undefined): string | null {
   return sel?.name ?? null;
 }
 function statusName(p: RawProp | undefined): string {
-  const s = p?.status as { name?: string } | null | undefined;
+  // 配信DB の Status は Notion「select」型（status 型ではない）。select.name を読む。
+  const s = p?.select as { name?: string } | null | undefined;
   return s?.name ?? "";
 }
 function richText(p: RawProp | undefined): string | null {
@@ -135,6 +156,20 @@ function peopleIds(p: RawProp | undefined): string[] {
   const arr = p?.people as Array<{ id?: string }> | undefined;
   return (arr ?? []).map((x) => x.id ?? "").filter((x) => x.length > 0);
 }
+/**
+ * files 型プロパティの URL 群を順序保持で取り出す（純粋）。
+ * Notion のアップロードファイルは type="file"（file.url = 一時署名URL）、
+ * 外部リンクは type="external"（external.url）。両対応で順に返す。
+ */
+function filesUrls(p: RawProp | undefined): string[] {
+  const arr = p?.files as
+    | Array<{ type?: string; file?: { url?: string }; external?: { url?: string } }>
+    | undefined;
+  if (!arr) return [];
+  return arr
+    .map((f) => f?.file?.url ?? f?.external?.url ?? "")
+    .filter((u) => typeof u === "string" && u.length > 0);
+}
 
 /** Notion page オブジェクトを DeliveryPage に正規化する（純粋）。 */
 export function normalizeDeliveryPage(page: {
@@ -144,15 +179,20 @@ export function normalizeDeliveryPage(page: {
 }): DeliveryPage {
   const p = page.properties;
   const P = DELIVERY_PROPS;
-  const fmt = selectName(p[P.format]);
+  // 形式は自動判定: files「画像」が 1 件以上あれば image、無ければ text。
+  // Notion「形式」select は読まない（廃止・view 非表示）。
+  const imageSourceUrls = filesUrls(p[P.image]);
+  const imageCount = imageSourceUrls.length;
   return {
     id: page.id,
     title: titleText(p[P.title]),
     status: statusName(p[P.status]),
     audienceRaw: selectName(p[P.audience]),
-    format: fmt === "text" || fmt === "image" ? fmt : null,
+    format: imageCount > 0 ? "image" : "text",
     body: richText(p[P.body]),
     imageUrl: urlVal(p[P.imageUrl]),
+    imageSourceUrls,
+    imageCount,
     scheduledStart: dateStart(p[P.scheduled]),
     sent: checkboxVal(p[P.sent]),
     contentHash: richText(p[P.contentHash]),
@@ -185,7 +225,7 @@ export async function queryDueDeliveries(
       page_size: 100,
       filter: {
         and: [
-          { property: P.status, status: { equals: "Approved" } },
+          { property: P.status, select: { equals: "Approved" } },
           { property: P.sent, checkbox: { equals: false } },
           { property: P.scheduled, date: { on_or_before: nowIso } },
         ],
@@ -218,7 +258,7 @@ export async function querySendingDeliveries(
   const P = DELIVERY_PROPS;
   const body: Record<string, unknown> = {
     page_size: 100,
-    filter: { property: P.status, status: { equals: "Sending" } },
+    filter: { property: P.status, select: { equals: "Sending" } },
   };
   const data = (await request(`/databases/${dbId}/query`, "POST", body)) as {
     results: Array<{
@@ -237,7 +277,7 @@ export async function setStatus(
   status: string,
 ): Promise<void> {
   await request(`/pages/${pageId}`, "PATCH", {
-    properties: { [DELIVERY_PROPS.status]: { status: { name: status } } },
+    properties: { [DELIVERY_PROPS.status]: { select: { name: status } } },
   });
 }
 
@@ -249,7 +289,7 @@ export async function writeDeliveryResult(
 ): Promise<void> {
   const P = DELIVERY_PROPS;
   const props: Record<string, unknown> = {
-    [P.status]: { status: { name: result.status } },
+    [P.status]: { select: { name: result.status } },
     [P.sent]: { checkbox: true },
     [P.sentAt]: { date: { start: result.sentAtUtc } },
     [P.sendResult]: {
@@ -285,7 +325,7 @@ export async function pinApproval(
   await request(`/pages/${pageId}`, "PATCH", {
     properties: {
       [P.contentHash]: { rich_text: [{ text: { content: contentHash } }] },
-      [P.status]: { status: { name: "Approved" } },
+      [P.status]: { select: { name: "Approved" } },
     },
   });
 }
@@ -304,6 +344,22 @@ export async function fetchDeliveryPage(
 }
 
 /**
+ * エラー詳細をクリアする（承認 pin 成功時の後始末）。
+ * 直前の失敗（HEIC 等）で書かれた赤字が、修正後の承認済み行に残って
+ * 運用者を混乱させないように空にする。Status は触らない（pin 側が設定済み）。
+ */
+export async function clearDeliveryError(
+  request: NotionRequest,
+  pageId: string,
+): Promise<void> {
+  await request(`/pages/${pageId}`, "PATCH", {
+    properties: {
+      [DELIVERY_PROPS.errorDetail]: { rich_text: [] },
+    },
+  });
+}
+
+/**
  * 承認を自動リセットする（コンテンツ pinning 不一致時）。
  * Status を Draft に戻し、エラー詳細に理由を残す（送信はしない）。
  */
@@ -315,7 +371,7 @@ export async function resetApproval(
   const P = DELIVERY_PROPS;
   await request(`/pages/${pageId}`, "PATCH", {
     properties: {
-      [P.status]: { status: { name: "Draft" } },
+      [P.status]: { select: { name: "Draft" } },
       [P.errorDetail]: {
         rich_text: [{ text: { content: reason.slice(0, 1900) } }],
       },

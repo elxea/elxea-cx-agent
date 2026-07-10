@@ -29,11 +29,25 @@ export const MULTICAST_MAX_RECIPIENTS = 500;
 /** LINE テキスト上限（5000 字）。超過は切り詰める（line.ts と同一方針）。 */
 const TEXT_MAX = 5000;
 
+/**
+ * 1 リクエストで送れる message オブジェクトの上限（LINE API 制限 = 5）。
+ * text 1 + image N を組むとき合計がこれを超えたら fail-closed。
+ * 受信者から見れば「1 通のまとまり」として届く（画像枚数で通数は増えない）。
+ */
+export const LINE_MAX_MESSAGES = 5;
+
 /** 配信コンテンツ（形式別）。 */
 export interface DeliveryContent {
   format: "text" | "image";
   body: string | null;
   imageUrl: string | null;
+  /**
+   * 順序付きの画像 URL 群（text + 複数画像モード）。
+   * 1 件以上あればこちらが優先され、text(任意) + image N を送信順に組む。
+   * 各 URL は恒久 HTTPS（Notion 署名 URL 不可）。合計は LINE_MAX_MESSAGES 以内。
+   * 未指定/空のときは従来の単一形式（format=text|image）で動く（後方互換）。
+   */
+  imageUrls?: string[] | null;
 }
 
 /** https:// の恒久 URL か（Notion 署名 URL / http は拒否）。 */
@@ -59,6 +73,14 @@ export type BuildMessagesResult =
  * - image: 恒久 HTTPS URL 必須（Notion 署名 URL 不可）
  */
 export function buildMessages(content: DeliveryContent): BuildMessagesResult {
+  // 複数画像モード: imageUrls が 1 件以上 → text(任意) + image N を送信順に組む。
+  const extraImages = (content.imageUrls ?? []).filter(
+    (u): u is string => typeof u === "string" && u.length > 0,
+  );
+  if (extraImages.length > 0) {
+    return buildTextPlusImages(content, extraImages);
+  }
+
   if (content.format === "text") {
     const body = (content.body ?? "").trim();
     if (body.length === 0) {
@@ -83,6 +105,52 @@ export function buildMessages(content: DeliveryContent): BuildMessagesResult {
   }
 
   return { ok: false, reason: `未知の形式: ${String(content.format)}` };
+}
+
+/**
+ * text(任意) + image N を送信順に 1 リクエスト分の message 配列へ組む（純粋・fail-closed）。
+ *
+ * 順序: text（本文があれば先頭 1 件）→ image を imageUrls の順で。
+ * 検証:
+ *   - format=text なら本文必須（空は不可）。format=image で本文空なら text は付けず画像のみ。
+ *   - 各画像 URL は恒久 HTTPS（Notion 署名 URL / http は拒否）。1 件でも不正なら全体を不可に倒す。
+ *   - 合計メッセージ数は LINE_MAX_MESSAGES（=5）以内（超過は不可）。
+ */
+function buildTextPlusImages(
+  content: DeliveryContent,
+  imageUrls: string[],
+): BuildMessagesResult {
+  const messages: LineMessage[] = [];
+
+  const body = (content.body ?? "").trim();
+  if (content.format === "text" && body.length === 0) {
+    return { ok: false, reason: "text 形式だが本文が空" };
+  }
+  if (body.length > 0) {
+    const text = body.length > TEXT_MAX ? body.slice(0, TEXT_MAX - 3) + "..." : body;
+    messages.push({ type: "text", text });
+  }
+
+  for (const url of imageUrls) {
+    if (!isPermanentHttpsUrl(url)) {
+      return {
+        ok: false,
+        reason: "画像URLが恒久HTTPSでない（Notion署名URL不可）",
+      };
+    }
+    messages.push({ type: "image", originalContentUrl: url, previewImageUrl: url });
+  }
+
+  if (messages.length === 0) {
+    return { ok: false, reason: "送信メッセージが空（本文も画像も無い）" };
+  }
+  if (messages.length > LINE_MAX_MESSAGES) {
+    return {
+      ok: false,
+      reason: `メッセージ数が LINE 上限(${LINE_MAX_MESSAGES})超過: ${messages.length}`,
+    };
+  }
+  return { ok: true, messages };
 }
 
 /** userIds を multicast バッチ（最大 500）に分割する（純粋）。 */

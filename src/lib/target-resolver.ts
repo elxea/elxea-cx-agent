@@ -141,6 +141,24 @@ export interface TargetResolverDeps {
   loadPersonaUsers(): Promise<PersonaRow[]>;
   /** broadcast 時の想定受信者数（未設定・取得不能は null）。 */
   broadcastEstimate(): Promise<number | null>;
+  /**
+   * 社内 allowlist（LINE user ID 群）を供給する。SoT は env `LINE_INTERNAL_USER_IDS`。
+   * 空/未設定は空配列を返し、resolveTargets 側で fail-closed（対象0 → 送信不可）にする。
+   * PII をコードに書かないため、runtime のみが env を読んでここに注入する。
+   */
+  loadAllowlistUserIds(): Promise<string[]>;
+}
+
+/**
+ * env のカンマ区切り文字列を LINE user ID 配列に変換する（純粋・PII 非保持）。
+ * 空白トリム・空要素除去のみ。重複排除は resolveTargets が担う。
+ */
+export function parseAllowlist(raw: string | null | undefined): string[] {
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 /**
@@ -170,6 +188,43 @@ export async function resolveTargets(
       };
     }
     return { kind: "broadcast", estimatedRecipients: estimate };
+  }
+
+  if (audience.kind === "allowlist") {
+    // 社内テスト配信: env 供給の LINE user ID にだけ multicast。
+    // persona 結合も Firestore/Supabase も不要。除外(unfollow/opt-out)は通さないが
+    // 重複排除は行う。空/未設定は fail-closed（対象0 → 送信不可）。
+    let raw: string[];
+    try {
+      raw = await deps.loadAllowlistUserIds();
+    } catch (err) {
+      return {
+        kind: "error",
+        reason: `社内 allowlist 取得失敗: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    const seen = new Set<string>();
+    const userIds: string[] = [];
+    for (const id of raw) {
+      const t = typeof id === "string" ? id.trim() : "";
+      if (t.length === 0 || seen.has(t)) continue;
+      seen.add(t);
+      userIds.push(t);
+    }
+    if (userIds.length === 0) {
+      return {
+        kind: "error",
+        reason:
+          "社内 allowlist が空/未設定（fail-closed。LINE_INTERNAL_USER_IDS を設定）",
+      };
+    }
+    const batches = chunkForMulticast(userIds, MULTICAST_MAX_RECIPIENTS);
+    return {
+      kind: "multicast",
+      userIds,
+      batches,
+      estimatedRecipients: userIds.length,
+    };
   }
 
   // persona = multicast

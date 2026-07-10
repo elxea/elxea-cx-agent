@@ -24,7 +24,7 @@ import type { DeliveryPage, DeliveryResult } from "./delivery-repository";
 import type { AudienceSpec } from "./delivery-audience";
 import { parseAudience, audienceLabel } from "./delivery-audience";
 import { evaluateScheduledTime } from "./delivery-time";
-import { hasIndependentApprover } from "./delivery-approval";
+import { isApprovalAuthorized } from "./delivery-approval";
 import { computeContentHash, hashesMatch } from "./content-hash";
 import { buildMessages, type LineSender, type LineMessage } from "./line-messages";
 import type { ResolvedTargets } from "./target-resolver";
@@ -76,9 +76,22 @@ export interface OrchestratorDeps {
   now(): Date;
   /** true のときのみ実 sender を発火。false は dry-run（sender=noop 前提）。 */
   sendEnabled: boolean;
+  /**
+   * テスト環境限定の自己承認緩和（既定 false）。
+   * true のとき「承認者!=著者」の独立性チェックを免除する（承認者の存在は必須のまま）。
+   * runtime は selfApprovalRelaxed(env) を渡す（prod では常に false）。
+   */
+  allowSelfApproval?: boolean;
   guardOptions?: GuardOptions;
   /** Sending 滞留の回収閾値（ms）。既定 15 分。 */
   reaperTimeoutMs?: number;
+  /**
+   * 社内テスト配信限定の順序付き画像URL群（env 供給・恒久HTTPS）。
+   * audience=allowlist（社内）のときだけ本文(text)に続けて image N を組む簡易経路。
+   * Notion 複数画像UIの本実装（v2）までの暫定。prod/persona/all には一切適用しない。
+   * 空/未指定なら従来の単一形式（page.format）で動く。
+   */
+  testImageUrls?: string[];
 }
 
 const DEFAULT_REAPER_TIMEOUT_MS = 15 * 60 * 1000;
@@ -177,7 +190,14 @@ async function processPage(
   if (!sched.due) return skip(page, "配信予定日時がまだ未来");
 
   // (c) 自己承認検知（承認者 != 著者）。独立承認者ゼロは送信不可。
-  if (!hasIndependentApprover(page.assignees, page.approvers)) {
+  //     allowSelfApproval=true（test 緩和時のみ）は独立性を免除（承認者の存在は必須）。
+  if (
+    !isApprovalAuthorized(
+      page.assignees,
+      page.approvers,
+      deps.allowSelfApproval === true,
+    )
+  ) {
     return skip(page, "独立した承認者がいない（自己承認・fail-closed）");
   }
 
@@ -185,19 +205,40 @@ async function processPage(
   if (page.format !== "text" && page.format !== "image") {
     return skip(page, "形式が未設定/未知");
   }
+  // 画像 URL 群の解決（送信順・恒久HTTPS）:
+  //   1) Notion files「画像」→ R2 の恒久URL群（page.imageUrls）が最優先。全 audience に適用する
+  //      （運用者が Notion に画像をドラッグする本経路）。ハッシュ照合の対象もこの URL 群。
+  //   2) page.imageUrls が空のときのみ、旧 env 供給ブリッジ（DELIVERY_TEST_IMAGE_URLS）に
+  //      フォールバックする。ブリッジは社内テスト(allowlist)・全員(all) 限定・ペルソナには注入しない。
+  //      ブリッジ画像は「送信」には使うがハッシュには含めない（従来挙動の後方互換）。
+  // 安全ガード（承認・日時・通数・DELIVERY_SEND_ENABLED）はこの経路の前後で従来どおり維持される
+  // （buildMessages 側で合計 LINE_MAX_MESSAGES=5 以内・恒久HTTPS のみを fail-closed 検証）。
+  const notionImages = page.imageUrls ?? [];
+  const extraImageUrls =
+    notionImages.length > 0
+      ? notionImages
+      : (audience.kind === "allowlist" || audience.kind === "all") &&
+          deps.testImageUrls &&
+          deps.testImageUrls.length > 0
+        ? deps.testImageUrls
+        : undefined;
   const built = buildMessages({
     format: page.format,
     body: page.body,
     imageUrl: page.imageUrl,
+    imageUrls: extraImageUrls,
   });
   if (!built.ok) return skip(page, `メッセージ不正: ${built.reason}`);
   const messages: LineMessage[] = built.messages;
 
   // (e) コンテンツ pinning（TOCTOU）: 現在値のハッシュと承認時スナップショットを照合。
+  //   画像は「恒久R2 URL 群（notionImages）」でハッシュする（pin 時と同じ決定的URL群）。
+  //   承認後に画像の枚数/順序が変われば不一致 → 承認自動リセットで送信中止する。
   const currentHash = await computeContentHash({
     format: page.format,
     body: page.body,
     imageUrl: page.imageUrl,
+    imageUrls: notionImages,
   });
   if (!page.contentHash) {
     // 承認時スナップショット欠如 → 承認をリセット（送信不可）。

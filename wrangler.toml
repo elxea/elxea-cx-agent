@@ -11,15 +11,29 @@ binding = "AI"
 [observability]
 enabled = true
 
-# ── Cron Triggers: 全休止中 (2026-07-02 Setaka 判断) ──
-# LINE AI チャネル休止に伴い定期実行ゼロで確定。再開手順は deliverable 参照。
-#   - 定期同期（毎日 AM3:00 JST = PM6:00 UTC）: 再開は crons に "0 18 * * *"
-#   - セグメント配信（旧・T10 で退役）: "0 21 1,15 * *" は再登録しない
-#   - Notion駆動 LINE配信（新・T8）: 再開は crons に "*/15 * * * *"
-#       ⚠ 再開しても実送信は DELIVERY_SEND_ENABLED="true" のときのみ（既定 dry-run）。
-#       本タスクでは crons=[] を維持し自動発火ゼロ（scheduled ハンドラに分岐のみ用意）。
+# ── Cron Triggers ──
+# Notion駆動 LINE配信の「承認→自動配信トリガー」配線（QA 指摘① の配線欠落を解消）。
+#   - "*/15 * * * *": 15分毎に scheduled ハンドラ（DELIVERY_CRON_PATTERN 分岐）が
+#       runScheduledDelivery を実行する。運用者は Notion で Status=Approved にするだけで、
+#       cron が承認 pin（画像R2化・ハッシュ凍結）→ runDelivery まで代行する。
+#   ⚠ 実送信ガード（多層）:
+#       (1) runDelivery は DELIVERY_SEND_ENABLED="true" のときだけ実送信。既定 未設定=false で
+#           dry-run（非破壊プレビュー・LINE api.line.me 非接触）。cron が回っても送らない。
+#       (2) 本ブランチでは DELIVERY_SEND_ENABLED を "true" にしない（[vars] に置かない）。
+#       → 「cron 発火 × dry-run」で、承認 pin までは進むが実送信ゼロ（GA 時にフラグ ON）。
+#   - 旧・定期同期（毎日 AM3:00 JST = PM6:00 UTC）を戻すなら crons に "0 18 * * *" を追加。
+#   - 旧・セグメント配信（T10 退役）"0 21 1,15 * *" は再登録しない。
 [triggers]
-crons = []
+crons = ["*/15 * * * *"]
+
+# ── R2（配信画像ホスティング）──
+# Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する（画像 put は承認 pin 時のみ）。
+# 値はコミットしない。R2_API_TOKEN は secret（`wrangler secret put R2_API_TOKEN`）。
+# 非機密の R2_BUCKET_NAME / R2_PUBLIC_BASE / R2_ACCOUNT_ID は [vars] か secret で設定する。
+#   R2_ACCOUNT_ID   = "<Cloudflare account id>"   # 上部の account_id と同一
+#   R2_BUCKET_NAME  = "elxea-images"
+#   R2_PUBLIC_BASE  = "https://pub-xxxx.r2.dev"
+#   secret: R2_API_TOKEN                          # Workers R2 Storage: Edit 権限のトークン
 
 # ── Staging 環境 ──
 [env.staging]

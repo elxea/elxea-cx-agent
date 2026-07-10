@@ -13,15 +13,24 @@ import { surveyHandler } from "./routes/survey";
 import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
-import { runDelivery, pinDeliveryApproval } from "./lib/delivery-runtime";
+import {
+  runDelivery,
+  runScheduledDelivery,
+  pinDeliveryApproval,
+} from "./lib/delivery-runtime";
 import { getAlertStatus } from "./lib/alerts";
 
 /**
  * 配信用 cron パターン（誤発火防止のため明示分岐で判定）。
- * ⚠ wrangler.toml crons=[] のため実登録はしていない（本タスクでは自動発火ゼロ）。
- *   再開時にこのパターンを crons に追記する。
+ * wrangler.toml [triggers] crons に登録済み（15分毎）。scheduled ハンドラはこの
+ * パターンのときだけ runScheduledDelivery（承認 pin 前処理 → 配信）を実行する。
+ * ⚠ 実送信は runDelivery 内の DELIVERY_SEND_ENABLED!="true" ガードで既定 dry-run。
+ *   cron が回っても DELIVERY_SEND_ENABLED を "true" にしない限り LINE には送らない。
  */
-export const DELIVERY_CRON_PATTERN = "*/15 * * * *";
+// ⚠ 非 export（module-level const）。Workers ランタイムはエントリの named export を
+//   すべてハンドラとして解釈するため、文字列の named export は起動を壊す
+//   （"Incorrect type for map entry ... not of type 'function or ExportedHandler'"）。
+const DELIVERY_CRON_PATTERN = "*/15 * * * *";
 
 export type Env = {
   // LINE（本番 = @307tzhkw）
@@ -38,8 +47,29 @@ export type Env = {
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST?: string;
   /** Notion 配信コンテンツ DB の database_id（未設定は既定 ID）。 */
   NOTION_DELIVERY_DB_ID?: string;
+  /**
+   * 社内テスト配信(allowlist)の宛先 LINE user ID（カンマ区切り）。
+   * 未設定/空は allowlist 配信を fail-closed（対象0 → 送信不可）。PII のためコード非記載。
+   */
+  LINE_INTERNAL_USER_IDS?: string;
+  /**
+   * 社内テスト配信(allowlist)限定の順序付き画像URL群（カンマ区切り・恒久HTTPS）。
+   * audience=allowlist のときだけ本文(text)に続けて image N を組む簡易経路（v2 までの暫定）。
+   * Notion 複数画像UIの本実装までのブリッジ。prod/persona/all には適用しない。
+   */
+  DELIVERY_TEST_IMAGE_URLS?: string;
   /** 旧セグメント配信の再活性フラグ（既定 false = 退役）。 */
   LEGACY_SEGMENT_BROADCAST_ENABLED?: string;
+  // ── R2（配信画像ホスティング）──
+  // Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する。put は承認 pin 時のみ。
+  /** Cloudflare アカウント ID（R2 put 用）。承認 pin 時のみ必須。 */
+  R2_ACCOUNT_ID?: string;
+  /** Cloudflare API トークン（Workers R2 Storage: Edit）。secret。承認 pin 時のみ必須。 */
+  R2_API_TOKEN?: string;
+  /** R2 バケット名（既定 elxea-images）。 */
+  R2_BUCKET_NAME?: string;
+  /** R2 公開ベースURL（例 https://pub-xxxx.r2.dev）。送信時の URL 再構成に使う。 */
+  R2_PUBLIC_BASE?: string;
   // AI
   ANTHROPIC_API_KEY: string;
   AI: Ai;
@@ -259,14 +289,18 @@ app.post("/api/delivery/run", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
+  // 手動トリガも scheduled と同じ配線（承認 pin 前処理 → runDelivery）を通す。
+  // 運用者が Notion で Approved にした行を、手動でも「pin して拾う」ところまで再現する。
   c.executionCtx.waitUntil(
-    runDelivery(c.env).then((result) => {
+    runScheduledDelivery(c.env).then((result) => {
       console.log(
         "Manual LINE delivery completed:",
         JSON.stringify({
-          scanned: result.scanned,
-          processed: result.processed.length,
-          reaper: result.reaper.length,
+          pinned: result.pinPass.filter((p) => p.action === "pinned").length,
+          resetFailed: result.pinPass.filter((p) => p.action === "reset_failed").length,
+          scanned: result.run.scanned,
+          processed: result.run.processed.length,
+          reaper: result.run.reaper.length,
         }),
       );
     }),
@@ -295,16 +329,21 @@ export default {
     const cronPattern = event.cron;
 
     // Notion駆動 LINE配信 cron（誤発火防止のため else の前に明示分岐）。
-    // ⚠ crons=[] のため実発火しない。runDelivery は DELIVERY_SEND_ENABLED!="true" で dry-run。
+    // 承認 pin 前処理 → runDelivery の順（runScheduledDelivery）。運用者は Notion で
+    // Status=Approved にするだけでよい（承認 pin は cron が代行する）。
+    // ⚠ 実送信は runDelivery 内の DELIVERY_SEND_ENABLED!="true" で dry-run（既定 送らない）。
     if (cronPattern === DELIVERY_CRON_PATTERN) {
       ctx.waitUntil(
-        runDelivery(env).then((result) => {
+        runScheduledDelivery(env).then((result) => {
           console.log(
             "Scheduled LINE delivery completed:",
             JSON.stringify({
-              scanned: result.scanned,
-              processed: result.processed.length,
-              reaper: result.reaper.length,
+              pinned: result.pinPass.filter((p) => p.action === "pinned").length,
+              resetFailed: result.pinPass.filter((p) => p.action === "reset_failed")
+                .length,
+              scanned: result.run.scanned,
+              processed: result.run.processed.length,
+              reaper: result.run.reaper.length,
             }),
           );
         }),

@@ -49,19 +49,25 @@ function assertFalse(value: boolean, label = "") {
 import { parseAudience, audienceLabel } from "../../src/lib/delivery-audience";
 import { evaluateScheduledTime } from "../../src/lib/delivery-time";
 import { computeContentHash, hashesMatch } from "../../src/lib/content-hash";
-import { hasIndependentApprover } from "../../src/lib/delivery-approval";
+import {
+  hasIndependentApprover,
+  isApprovalAuthorized,
+  selfApprovalRelaxed,
+} from "../../src/lib/delivery-approval";
 import {
   buildMessages,
   chunkForMulticast,
   isPermanentHttpsUrl,
   createRecordingSender,
   noopSender,
+  LINE_MAX_MESSAGES,
 } from "../../src/lib/line-messages";
 import {
   joinCandidates,
   filterEligible,
   collectAllPages,
   resolveTargets,
+  parseAllowlist,
   type LinkageRow,
   type PersonaRow,
   type TargetResolverDeps,
@@ -72,6 +78,23 @@ import {
   type OrchestratorDeps,
   type DeliveryRepoPort,
 } from "../../src/lib/delivery-orchestrator";
+import {
+  r2KeyForImage,
+  r2PublicUrl,
+  r2UrlsForPage,
+  resolveR2PublicBase,
+  resolveR2Config,
+  putToR2,
+  ingestPageImages,
+  describeBlockingImages,
+  type R2Config,
+} from "../../src/lib/image-ingest";
+import {
+  pinDueApprovals,
+  runScheduledDeliveryWith,
+  type PinApprovalResult,
+  type ScheduledDeliveryDeps,
+} from "../../src/lib/delivery-runtime";
 import type { DeliveryPage } from "../../src/lib/delivery-repository";
 import type {
   LedgerStore,
@@ -96,6 +119,11 @@ describe("parseAudience（配信対象 日本語↔enum）", () => {
     const s = parseAudience("味覚");
     assertTrue(!!e && e.kind === "persona" && e.persona === "explorer", "explorer");
     assertTrue(!!s && s.kind === "persona" && s.persona === "sensory", "sensory");
+  });
+  it("社内 → allowlist（userIds は空プレースホルダ・env で解決）", () => {
+    const a = parseAudience("社内");
+    assertTrue(a?.kind === "allowlist", "allowlist");
+    if (a?.kind === "allowlist") assertEqual(a.userIds.length, 0, "parse 時点は空");
   });
   it("空・未知・null は null（fail-closed）", () => {
     assertEqual(parseAudience(""), null, "空");
@@ -173,6 +201,22 @@ describe("computeContentHash / hashesMatch（TOCTOU pinning）", () => {
     assertFalse(hashesMatch(null, cur), "null snapshot");
     assertFalse(hashesMatch("", cur), "empty snapshot");
   });
+  it("imageUrls 未指定/空は従来の {format,body,imageUrl} と同一ハッシュ（後方互換）", async () => {
+    const legacy = await computeContentHash({ format: "text", body: "本文", imageUrl: null });
+    const empty = await computeContentHash({ format: "text", body: "本文", imageUrl: null, imageUrls: [] });
+    assertEqual(legacy, empty, "undefined と [] は同一");
+    assertTrue(hashesMatch(legacy, empty), "match");
+  });
+  it("恒久R2 URL 群の枚数/順序が変わるとハッシュ不一致（TOCTOU: 画像追加/並替検知）", async () => {
+    const base = "https://pub-x.r2.dev/broadcast/pg";
+    const one = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`] });
+    const two = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
+    assertFalse(hashesMatch(one, two), "枚数変化で不一致");
+    const swapped = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/1.jpg`, `${base}/0.jpg`] });
+    assertFalse(hashesMatch(two, swapped), "順序変化で不一致");
+    const same = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
+    assertTrue(hashesMatch(two, same), "同一 URL 群は一致");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -191,6 +235,75 @@ describe("hasIndependentApprover（承認者!=著者）", () => {
   });
   it("担当者に無関係な承認者が 1 人でもいれば true", () => {
     assertTrue(hasIndependentApprover(["u-a"], ["u-a", "u-c"]), "one independent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 自己承認緩和ポリシー（テスト環境限定・prod では緩和不可）
+// ---------------------------------------------------------------------------
+describe("selfApprovalRelaxed（prod では絶対に緩まない）", () => {
+  it("test + フラグ true → 緩和 true", () => {
+    assertTrue(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "test",
+        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
+      }),
+      "test relaxed",
+    );
+  });
+  it("prod + フラグ true → 緩和されない（false・最重要ガード）", () => {
+    assertFalse(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "prod",
+        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
+      }),
+      "prod never relaxes",
+    );
+  });
+  it("test + フラグ未設定/非true → 緩和されない", () => {
+    assertFalse(
+      selfApprovalRelaxed({ DELIVERY_TARGET_ENV: "test" }),
+      "no flag",
+    );
+    assertFalse(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "test",
+        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "1",
+      }),
+      "flag must be exactly 'true'",
+    );
+  });
+  it("TARGET_ENV 未設定/不正 は test 扱い（フラグ true で緩和）", () => {
+    assertTrue(
+      selfApprovalRelaxed({ DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true" }),
+      "undefined→test",
+    );
+    assertTrue(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "PRODUCTION",
+        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
+      }),
+      "invalid→test",
+    );
+  });
+});
+
+describe("isApprovalAuthorized（承認者必須は常に維持・緩和は独立性のみ免除）", () => {
+  it("allowSelfApproval=false は hasIndependentApprover と同義", () => {
+    assertTrue(
+      isApprovalAuthorized(["u-a"], ["u-b"], false),
+      "independent ok",
+    );
+    assertFalse(
+      isApprovalAuthorized(["u-a"], ["u-a"], false),
+      "self approval blocked",
+    );
+  });
+  it("allowSelfApproval=true でも承認者ゼロは false（fail-closed 維持）", () => {
+    assertFalse(isApprovalAuthorized(["u-a"], [], true), "no approver even when relaxed");
+  });
+  it("allowSelfApproval=true なら自己承認（担当者=承認者）を許容", () => {
+    assertTrue(isApprovalAuthorized(["u-a"], ["u-a"], true), "self approval allowed in test");
   });
 });
 
@@ -226,8 +339,14 @@ describe("buildMessages（text/image 可変化）", () => {
       "notion host",
     );
   });
-  it("isPermanentHttpsUrl の判定", () => {
+  it("isPermanentHttpsUrl の判定（R2 公開URL を通す）", () => {
     assertTrue(isPermanentHttpsUrl("https://cdn.shopify.com/x.jpg"), "cdn https");
+    assertTrue(
+      isPermanentHttpsUrl(
+        "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/broadcast/pg/0.jpg",
+      ),
+      "R2 pub-*.r2.dev を通す",
+    );
     assertFalse(isPermanentHttpsUrl("https://x.notion.site/a.jpg"), "notion.site");
     assertFalse(isPermanentHttpsUrl(null), "null");
   });
@@ -237,6 +356,108 @@ describe("buildMessages（text/image 可変化）", () => {
     assertEqual(batches.length, 3, "3 バッチ");
     assertEqual(batches[0].length, 500, "batch0=500");
     assertEqual(batches[2].length, 250, "batch2=250");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildMessages: text + 複数画像モード（今回の最小実装 A）
+// ---------------------------------------------------------------------------
+describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
+  const img = (n: string) => `https://cdn.example.com/${n}.jpg`;
+
+  it("text 本文 + image 3 枚を [text, image, image, image] の順で組む", () => {
+    const r = buildMessages({
+      format: "text",
+      body: "本文です",
+      imageUrl: null,
+      imageUrls: [img("a"), img("b"), img("c")],
+    });
+    assertTrue(r.ok, "ok");
+    if (r.ok) {
+      assertEqual(r.messages.length, 4, "text1 + image3 = 4 件");
+      assertEqual(r.messages[0].type, "text", "先頭は text");
+      assertEqual(r.messages[1].type, "image", "2件目 image");
+      assertEqual(r.messages[2].type, "image", "3件目 image");
+      assertEqual(r.messages[3].type, "image", "4件目 image");
+      // 送信順（imageUrls の順）を厳密に保持
+      if (r.messages[1].type === "image") assertEqual(r.messages[1].originalContentUrl, img("a"), "1枚目=a");
+      if (r.messages[2].type === "image") assertEqual(r.messages[2].originalContentUrl, img("b"), "2枚目=b");
+      if (r.messages[3].type === "image") assertEqual(r.messages[3].originalContentUrl, img("c"), "3枚目=c");
+      // previewImageUrl は originalContentUrl と同一（最小版）
+      if (r.messages[1].type === "image") {
+        assertEqual(r.messages[1].previewImageUrl, r.messages[1].originalContentUrl, "preview=original");
+      }
+    }
+  });
+
+  it("image のみ（本文なし）は image N のみを順序通り組む", () => {
+    const r = buildMessages({
+      format: "image",
+      body: null,
+      imageUrl: null,
+      imageUrls: [img("a"), img("b")],
+    });
+    assertTrue(r.ok, "ok");
+    if (r.ok) {
+      assertEqual(r.messages.length, 2, "image 2 件（text なし）");
+      assertEqual(r.messages[0].type, "image", "先頭も image");
+    }
+  });
+
+  it("text 形式で本文が空なら不可（fail-closed）", () => {
+    const r = buildMessages({
+      format: "text",
+      body: "   ",
+      imageUrl: null,
+      imageUrls: [img("a")],
+    });
+    assertFalse(r.ok, "空本文は不可");
+  });
+
+  it("画像URLに恒久HTTPSでないもの（Notion署名/http）が 1 件でもあれば全体不可", () => {
+    const r1 = buildMessages({
+      format: "text",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: [img("a"), "http://cdn.example.com/b.jpg"],
+    });
+    assertFalse(r1.ok, "http 混入で不可");
+    const r2 = buildMessages({
+      format: "text",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: [img("a"), "https://file.notion.so/f/x.jpg"],
+    });
+    assertFalse(r2.ok, "Notion署名URL 混入で不可");
+  });
+
+  it(`合計メッセージ数が LINE 上限(${LINE_MAX_MESSAGES})以内なら OK・超過は不可`, () => {
+    // text1 + image4 = 5（上限ちょうど）→ OK
+    const ok = buildMessages({
+      format: "text",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: [img("a"), img("b"), img("c"), img("d")],
+    });
+    assertTrue(ok.ok, "text1+image4=5 は OK");
+    if (ok.ok) assertEqual(ok.messages.length, 5, "5 件");
+    // text1 + image5 = 6（上限超過）→ 不可
+    const over = buildMessages({
+      format: "text",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: [img("a"), img("b"), img("c"), img("d"), img("e")],
+    });
+    assertFalse(over.ok, "6 件は上限超過で不可");
+  });
+
+  it("imageUrls 未指定/空なら従来の単一形式で動く（後方互換）", () => {
+    const t = buildMessages({ format: "text", body: "本文", imageUrl: null, imageUrls: [] });
+    assertTrue(t.ok, "空配列は単一形式にフォールバック");
+    if (t.ok) assertEqual(t.messages.length, 1, "text 1 件");
+    const i = buildMessages({ format: "image", body: null, imageUrl: img("z") });
+    assertTrue(i.ok, "imageUrls 未指定は単一 image");
+    if (i.ok) assertEqual(i.messages.length, 1, "image 1 件");
   });
 });
 
@@ -300,6 +521,7 @@ describe("resolveTargets", () => {
     loadLinkages: async () => [],
     loadPersonaUsers: async () => [],
     broadcastEstimate: async () => null,
+    loadAllowlistUserIds: async () => [],
     ...over,
   });
 
@@ -342,6 +564,190 @@ describe("resolveTargets", () => {
       assertEqual(r.batches.length, 1, "1 バッチ");
     }
   });
+
+  // --- 社内 allowlist ---
+  it("社内 allowlist: 指定 user ID にだけ multicast（人数一致）", async () => {
+    const r = await resolveTargets(
+      { kind: "allowlist", userIds: [] },
+      baseDeps({ loadAllowlistUserIds: async () => ["Uaaa", "Ubbb", "Uccc"] }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") {
+      assertEqual(r.userIds.join(","), "Uaaa,Ubbb,Uccc", "指定IDのみ");
+      assertEqual(r.estimatedRecipients, 3, "3 件");
+      assertEqual(r.batches.length, 1, "1 バッチ");
+    }
+  });
+  it("社内 allowlist: env 未設定/空は error（fail-closed）", async () => {
+    const empty = await resolveTargets(
+      { kind: "allowlist", userIds: [] },
+      baseDeps({ loadAllowlistUserIds: async () => [] }),
+    );
+    assertTrue(empty.kind === "error", "空は error");
+  });
+  it("社内 allowlist: 重複排除する", async () => {
+    const r = await resolveTargets(
+      { kind: "allowlist", userIds: [] },
+      baseDeps({ loadAllowlistUserIds: async () => ["Ux", "Ux", " Ux ", "Uy", ""] }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") {
+      assertEqual(r.userIds.join(","), "Ux,Uy", "重複/空を排除");
+      assertEqual(r.estimatedRecipients, 2, "2 件");
+    }
+  });
+  it("社内 allowlist: 500 超は複数バッチに分割", async () => {
+    const many = Array.from({ length: 501 }, (_, i) => `U${i}`);
+    const r = await resolveTargets(
+      { kind: "allowlist", userIds: [] },
+      baseDeps({ loadAllowlistUserIds: async () => many }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") {
+      assertEqual(r.estimatedRecipients, 501, "501 件");
+      assertEqual(r.batches.length, 2, "2 バッチ");
+    }
+  });
+});
+
+describe("parseAllowlist（env カンマ区切り → ID 配列）", () => {
+  it("トリム・空要素除去", () => {
+    assertEqual(parseAllowlist(" Ua , Ub ,,Uc ").join(","), "Ua,Ub,Uc", "整形");
+  });
+  it("未設定/空は空配列（fail-closed 起点）", () => {
+    assertEqual(parseAllowlist(undefined).length, 0, "undefined");
+    assertEqual(parseAllowlist("").length, 0, "空文字");
+    assertEqual(parseAllowlist("   ").length, 0, "空白のみ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// image-ingest（Notion files 一時URL → R2 恒久URL）— fetch 注入・ネットワーク非接触
+// ---------------------------------------------------------------------------
+describe("image-ingest: R2 キー/URL の決定性", () => {
+  it("r2KeyForImage は broadcast/<pageId>/<index>.jpg", () => {
+    assertEqual(r2KeyForImage("pg1", 0), "broadcast/pg1/0.jpg", "index0");
+    assertEqual(r2KeyForImage("pg1", 2), "broadcast/pg1/2.jpg", "index2");
+  });
+  it("r2UrlsForPage は枚数から恒久URLを順序通り決定的に生成（pin/送信で一致）", () => {
+    const urls = r2UrlsForPage("pg1", 3, "https://pub-x.r2.dev/");
+    assertEqual(urls.length, 3, "3 件");
+    assertEqual(urls[0], "https://pub-x.r2.dev/broadcast/pg1/0.jpg", "0");
+    assertEqual(urls[2], "https://pub-x.r2.dev/broadcast/pg1/2.jpg", "2（末尾スラッシュ正規化）");
+  });
+  it("resolveR2PublicBase は env 優先・既定フォールバック・末尾スラッシュ除去", () => {
+    assertEqual(resolveR2PublicBase({ R2_PUBLIC_BASE: "https://pub-y.r2.dev/" }), "https://pub-y.r2.dev", "env");
+    assertTrue(resolveR2PublicBase({}).startsWith("https://pub-"), "既定フォールバック");
+  });
+  it("r2PublicUrl は base + key を結合", () => {
+    assertEqual(
+      r2PublicUrl("https://pub-x.r2.dev", "broadcast/pg/0.jpg"),
+      "https://pub-x.r2.dev/broadcast/pg/0.jpg",
+      "join",
+    );
+  });
+});
+
+describe("image-ingest: resolveR2Config（資格情報 fail-closed）", () => {
+  it("account/token 未設定は throw（put 経路に載せない）", () => {
+    let threw = false;
+    try {
+      resolveR2Config({});
+    } catch {
+      threw = true;
+    }
+    assertTrue(threw, "資格情報なしは throw");
+  });
+  it("account/token ありは既定 bucket/base で解決", () => {
+    const cfg = resolveR2Config({ R2_ACCOUNT_ID: "acc", R2_API_TOKEN: "tok" });
+    assertEqual(cfg.bucket, "elxea-images", "既定 bucket");
+    assertTrue(cfg.publicBase.startsWith("https://pub-"), "既定 base");
+  });
+});
+
+describe("image-ingest: ingestPageImages（fetch 注入・実 R2/LINE 非接触）", () => {
+  const cfg: R2Config = {
+    accountId: "acc",
+    apiToken: "tok",
+    bucket: "elxea-images",
+    publicBase: "https://pub-x.r2.dev",
+  };
+  // Notion 一時URL の取得と R2 PUT を両方こなす擬似 fetch。
+  function makeFetch(opts?: { contentType?: string; bytes?: number }) {
+    const calls: Array<{ url: string; method: string }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ url, method });
+      if (url.includes("api.cloudflare.com")) {
+        // R2 PUT
+        return { ok: true, status: 200, async text() { return ""; } } as unknown as Response;
+      }
+      // Notion 一時URL の取得
+      const buf = new Uint8Array(opts?.bytes ?? 1024);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (k: string) => (k.toLowerCase() === "content-type" ? (opts?.contentType ?? "image/jpeg") : null) },
+        async arrayBuffer() { return buf.buffer; },
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  it("順序保持で R2 恒久URL を返し、PUT を枚数分だけ叩く（実送信なし）", async () => {
+    const { fetchImpl, calls } = makeFetch();
+    const res = await ingestPageImages(
+      cfg,
+      "pg1",
+      ["https://notion-temp/a?sig=1", "https://notion-temp/b?sig=2"],
+      { fetchImpl },
+    );
+    assertEqual(res.urls.length, 2, "2 件");
+    assertEqual(res.urls[0], "https://pub-x.r2.dev/broadcast/pg1/0.jpg", "0 番");
+    assertEqual(res.urls[1], "https://pub-x.r2.dev/broadcast/pg1/1.jpg", "1 番");
+    const puts = calls.filter((c) => c.method === "PUT");
+    assertEqual(puts.length, 2, "PUT 2 回");
+    assertTrue(puts[0].url.includes("/broadcast/pg1/0.jpg"), "PUT 先キー");
+    // LINE API を叩いていないこと（実送信ゼロの根拠）。
+    assertFalse(calls.some((c) => c.url.includes("api.line.me")), "LINE 非接触");
+  });
+  it("恒久R2 URL は isPermanentHttpsUrl を通る（送信可）", async () => {
+    const { fetchImpl } = makeFetch();
+    const res = await ingestPageImages(cfg, "pg1", ["https://notion-temp/a"], { fetchImpl });
+    assertTrue(isPermanentHttpsUrl(res.urls[0]), "R2 URL は恒久扱い");
+  });
+  it("10MB 超過・LINE 非対応形式は warning に積む（put はする・正規化は次段）", async () => {
+    const { fetchImpl } = makeFetch({ contentType: "image/heic", bytes: 11 * 1024 * 1024 });
+    const res = await ingestPageImages(cfg, "pg1", ["https://notion-temp/big"], { fetchImpl });
+    assertEqual(res.urls.length, 1, "URL は返す");
+    assertTrue(res.warnings.some((w) => w.includes("サイズ超過")), "サイズ警告");
+    assertTrue(res.warnings.some((w) => w.includes("LINE 非対応形式")), "形式警告");
+  });
+  it("空配列は put せず空 URL 群（text 配信・画像なし）", async () => {
+    const { fetchImpl, calls } = makeFetch();
+    const res = await ingestPageImages(cfg, "pg1", [], { fetchImpl });
+    assertEqual(res.urls.length, 0, "0 件");
+    assertEqual(calls.length, 0, "fetch 呼び出しゼロ");
+  });
+  it("putToR2 は Cloudflare API v4 の PUT を叩き、失敗は throw", async () => {
+    const okCalls: string[] = [];
+    const okFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      okCalls.push(String(input));
+      assertEqual((init?.method ?? "").toUpperCase(), "PUT", "PUT");
+      return { ok: true, status: 200, async text() { return ""; } } as unknown as Response;
+    }) as unknown as typeof fetch;
+    await putToR2(cfg, "broadcast/pg/0.jpg", new Uint8Array(4), "image/jpeg", okFetch);
+    assertTrue(okCalls[0].includes("/r2/buckets/elxea-images/objects/"), "R2 objects エンドポイント");
+    let threw = false;
+    const badFetch = (async () => ({ ok: false, status: 500, async text() { return "err"; } } as unknown as Response)) as unknown as typeof fetch;
+    try {
+      await putToR2(cfg, "broadcast/pg/0.jpg", new Uint8Array(4), "image/jpeg", badFetch);
+    } catch {
+      threw = true;
+    }
+    assertTrue(threw, "非2xx は throw");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -358,18 +764,26 @@ import {
 } from "../../src/lib/delivery-repository";
 
 describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
-  it("日本語プロパティを正しく抽出する", () => {
+  it("日本語プロパティを正しく抽出する（files 画像あり → 形式 image 自動判定）", () => {
     const P = DELIVERY_PROPS;
     const raw = {
       id: "pg1",
       last_edited_time: "2026-07-10T04:00:00Z",
       properties: {
         [P.title]: { title: [{ plain_text: "夏の配信" }] },
-        [P.status]: { status: { name: "Approved" } },
+        [P.status]: { select: { name: "Approved" } },
         [P.audience]: { select: { name: "癒し" } },
-        [P.format]: { select: { name: "image" } },
+        // 「形式」select は読まない（自動判定）。ここでは text にしても files があれば image になる。
+        [P.format]: { select: { name: "text" } },
         [P.body]: { rich_text: [] },
-        [P.imageUrl]: { url: "https://cdn.example.com/x.jpg" },
+        // files 型「画像」: Notion アップロード(file)と外部(external)の両対応・順序保持。
+        [P.image]: {
+          files: [
+            { type: "file", file: { url: "https://notion-temp/a.jpg?sig=1" } },
+            { type: "external", external: { url: "https://cdn.example.com/b.jpg" } },
+          ],
+        },
+        [P.imageUrl]: { url: "https://cdn.example.com/legacy.jpg" },
         [P.scheduled]: { date: { start: "2026-07-10T06:00:00+09:00" } },
         [P.sent]: { checkbox: false },
         [P.contentHash]: { rich_text: [{ plain_text: "abc123" }] },
@@ -382,14 +796,38 @@ describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
     assertEqual(page.title, "夏の配信", "title");
     assertEqual(page.status, "Approved", "status");
     assertEqual(page.audienceRaw, "癒し", "audience");
-    assertEqual(page.format, "image", "format");
-    assertEqual(page.imageUrl, "https://cdn.example.com/x.jpg", "imageUrl");
+    assertEqual(page.format, "image", "画像ありで image 自動判定（形式 select は無視）");
+    assertEqual(page.imageCount, 2, "画像枚数");
+    assertEqual(
+      page.imageSourceUrls.join(","),
+      "https://notion-temp/a.jpg?sig=1,https://cdn.example.com/b.jpg",
+      "files の一時URLを順序保持で抽出",
+    );
+    assertEqual(page.imageUrl, "https://cdn.example.com/legacy.jpg", "旧 imageUrl も読む（後方互換）");
     assertEqual(page.body, null, "empty body → null");
     assertEqual(page.contentHash, "abc123", "hash");
     assertEqual(page.estimate, 38, "estimate");
     assertEqual(page.assignees.join(","), "u-author", "assignees");
     assertEqual(page.approvers.join(","), "u-approver", "approvers");
     assertFalse(page.sent, "not sent");
+  });
+
+  it("files 画像なし → 形式 text 自動判定・imageCount 0", () => {
+    const P = DELIVERY_PROPS;
+    const page = normalizeDeliveryPage({
+      id: "pg2",
+      properties: {
+        [P.title]: { title: [{ plain_text: "お知らせ" }] },
+        [P.status]: { select: { name: "Draft" } },
+        [P.audience]: { select: { name: "全員" } },
+        [P.body]: { rich_text: [{ plain_text: "本文だけ" }] },
+        // 「画像」プロパティ自体が無い / 空。
+      },
+    });
+    assertEqual(page.format, "text", "画像なしで text 自動判定");
+    assertEqual(page.imageCount, 0, "0 枚");
+    assertEqual(page.imageSourceUrls.length, 0, "一時URL なし");
+    assertEqual(page.body, "本文だけ", "本文");
   });
 });
 
@@ -405,6 +843,13 @@ describe("queryDueDeliveries（フィルタ組み立て）", () => {
     await queryDueDeliveries(req, "2026-07-10T05:00:00Z", "db-1");
     const filter = (captured as { filter: { and: Array<Record<string, unknown>> } }).filter;
     assertEqual(filter.and.length, 3, "3 条件");
+    // Status は Notion select 型（status 型では 400 になる）。select フィルタであることを固定。
+    const statusCond = filter.and.find(
+      (c) => (c as { property?: string }).property === DELIVERY_PROPS.status,
+    ) as { select?: { equals?: string }; status?: unknown } | undefined;
+    assertTrue(!!statusCond?.select, "Status は select フィルタ");
+    assertEqual(statusCond?.select?.equals, "Approved", "Approved");
+    assertTrue(statusCond?.status === undefined, "status 型フィルタは使わない");
   });
 });
 
@@ -432,8 +877,8 @@ describe("writeDeliveryResult / pinApproval / resetApproval（PATCH 整形）", 
       return {};
     };
     await pinApproval(req, "pg1", "hash-xyz");
-    const props = (captured as { properties: Record<string, { status?: { name: string }; rich_text?: Array<{ text: { content: string } }> }> }).properties;
-    assertEqual(props[DELIVERY_PROPS.status].status?.name, "Approved", "Approved");
+    const props = (captured as { properties: Record<string, { select?: { name: string }; rich_text?: Array<{ text: { content: string } }> }> }).properties;
+    assertEqual(props[DELIVERY_PROPS.status].select?.name, "Approved", "Approved");
     assertEqual(props[DELIVERY_PROPS.contentHash].rich_text?.[0].text.content, "hash-xyz", "hash 保存");
   });
   it("resetApproval は Draft に戻す", async () => {
@@ -443,8 +888,8 @@ describe("writeDeliveryResult / pinApproval / resetApproval（PATCH 整形）", 
       return {};
     };
     await repoResetApproval(req, "pg1", "編集検知");
-    const props = (captured as { properties: Record<string, { status?: { name: string } }> }).properties;
-    assertEqual(props[DELIVERY_PROPS.status].status?.name, "Draft", "Draft");
+    const props = (captured as { properties: Record<string, { select?: { name: string } }> }).properties;
+    assertEqual(props[DELIVERY_PROPS.status].select?.name, "Draft", "Draft");
   });
 });
 
@@ -722,6 +1167,176 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
   });
 });
 
+describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線）", () => {
+  const allowlistDeps = (ids: string[]): TargetResolverDeps => ({
+    loadLinkages: async () => [],
+    loadPersonaUsers: async () => [],
+    broadcastEstimate: async () => null,
+    loadAllowlistUserIds: async () => ids,
+  });
+
+  it("社内: dry-run（sendEnabled=false）は allowlist 人数を見積り・送信noop・claim ゼロ", async () => {
+    const page = await makePage({ audienceRaw: "社内" });
+    const repo = makeFakeRepo([page]);
+    const ledger = makeFakeLedger();
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(
+      baseDeps({
+        repo,
+        ledger,
+        sender,
+        sendEnabled: false,
+        resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Ua", "Ub"])),
+      }),
+    );
+    assertEqual(sender.calls.length, 0, "無送信（noop）");
+    assertEqual(ledger.rows.length, 0, "claim ゼロ（非破壊）");
+    assertEqual(res.processed[0].recipients, 2, "allowlist 2 人と一致");
+    assertTrue(res.processed[0].reason.includes("社内"), "社内ラベル");
+  });
+
+  it("社内: env 未設定は fail-closed（skip・送信なし）", async () => {
+    const page = await makePage({ audienceRaw: "社内" });
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(
+      baseDeps({
+        repo: makeFakeRepo([page]),
+        sender,
+        sendEnabled: false,
+        resolveTargets: (a) => resolveTargets(a, allowlistDeps([])),
+      }),
+    );
+    assertEqual(sender.calls.length, 0, "無送信");
+    assertEqual(res.processed[0].disposition, "skipped", "skipped");
+    assertTrue(res.processed[0].reason.includes("fail-closed"), "fail-closed 理由");
+  });
+
+  it("社内: testImageUrls があると本文(text)に続けて image N を送信順に組む（allowlist 限定）", async () => {
+    const page = await makePage({ audienceRaw: "社内", format: "text", body: "配信本文" });
+    // messages を捕捉する sender（recordingSender は messages を保持しないため専用）。
+    const captured: import("../../src/lib/line-messages").LineMessage[][] = [];
+    const capSender = {
+      async multicast(_b: string[][], messages: import("../../src/lib/line-messages").LineMessage[]) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: 1, partial: false };
+      },
+      async broadcast(messages: import("../../src/lib/line-messages").LineMessage[], est: number) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: est, partial: false };
+      },
+    };
+    const imgs = [
+      "https://cdn.example.com/1.jpg",
+      "https://cdn.example.com/2.jpg",
+      "https://cdn.example.com/3.jpg",
+    ];
+    await runDeliveryOnce(
+      baseDeps({
+        repo: makeFakeRepo([page]),
+        sender: capSender,
+        sendEnabled: true,
+        testImageUrls: imgs,
+        resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Uonly"])),
+      }),
+    );
+    assertEqual(captured.length, 1, "1 回送信");
+    const msgs = captured[0];
+    assertEqual(msgs.length, 4, "text1 + image3 = 4 件");
+    assertEqual(msgs[0].type, "text", "先頭 text（Notion 本文）");
+    assertEqual(msgs[1].type, "image", "続いて image");
+    if (msgs[1].type === "image") assertEqual(msgs[1].originalContentUrl, imgs[0], "画像順序 1");
+    if (msgs[3].type === "image") assertEqual(msgs[3].originalContentUrl, imgs[2], "画像順序 3");
+  });
+
+  it("全員(broadcast=all): testImageUrls があると本文(text)に続けて image N を broadcast で送信順に組む", async () => {
+    const page = await makePage({ audienceRaw: "全員", format: "text", body: "配信本文" });
+    const captured: import("../../src/lib/line-messages").LineMessage[][] = [];
+    let broadcastCalls = 0;
+    const capSender = {
+      async multicast(_b: string[][], messages: import("../../src/lib/line-messages").LineMessage[]) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: 1, partial: false };
+      },
+      async broadcast(messages: import("../../src/lib/line-messages").LineMessage[], est: number) {
+        broadcastCalls++;
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: est, partial: false };
+      },
+    };
+    const imgs = [
+      "https://cdn.example.com/1.jpg",
+      "https://cdn.example.com/2.jpg",
+      "https://cdn.example.com/3.jpg",
+    ];
+    await runDeliveryOnce(
+      baseDeps({
+        repo: makeFakeRepo([page]),
+        sender: capSender,
+        sendEnabled: true,
+        testImageUrls: imgs,
+        resolveTargets: async () => ({ kind: "broadcast", estimatedRecipients: 38 }),
+      }),
+    );
+    assertEqual(broadcastCalls, 1, "broadcast で送信（全員）");
+    assertEqual(captured.length, 1, "1 回送信");
+    const msgs = captured[0];
+    assertEqual(msgs.length, 4, "text1 + image3 = 4 件");
+    assertEqual(msgs[0].type, "text", "先頭 text（Notion 本文）");
+    if (msgs[1].type === "image") assertEqual(msgs[1].originalContentUrl, imgs[0], "画像順序 1");
+    if (msgs[3].type === "image") assertEqual(msgs[3].originalContentUrl, imgs[2], "画像順序 3");
+  });
+
+  it("非 allowlist（ペルソナ）には testImageUrls を注入しない（本文のみ）", async () => {
+    const page = await makePage({ audienceRaw: "癒し", format: "text", body: "本文のみ" });
+    const captured: import("../../src/lib/line-messages").LineMessage[][] = [];
+    const capSender = {
+      async multicast(_b: string[][], messages: import("../../src/lib/line-messages").LineMessage[]) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: 2, partial: false };
+      },
+      async broadcast(messages: import("../../src/lib/line-messages").LineMessage[], est: number) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: est, partial: false };
+      },
+    };
+    await runDeliveryOnce(
+      baseDeps({
+        repo: makeFakeRepo([page]),
+        sender: capSender,
+        sendEnabled: true,
+        testImageUrls: ["https://cdn.example.com/x.jpg"],
+        resolveTargets: async () => ({
+          kind: "multicast",
+          userIds: ["L1", "L2"],
+          batches: [["L1", "L2"]],
+          estimatedRecipients: 2,
+        }),
+      }),
+    );
+    const msgs = captured[0];
+    assertEqual(msgs.length, 1, "text のみ（画像注入なし）");
+    assertEqual(msgs[0].type, "text", "text");
+  });
+
+  it("社内: sendEnabled=true でも multicast 経路（指定IDのみ・実送信数一致）", async () => {
+    const page = await makePage({ audienceRaw: "社内" });
+    const repo = makeFakeRepo([page]);
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(
+      baseDeps({
+        repo,
+        sender,
+        sendEnabled: true,
+        resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Ua", "Ub", "Uc"])),
+      }),
+    );
+    assertEqual(sender.calls.length, 1, "送信 1 回");
+    assertEqual(sender.calls[0].kind, "multicast", "multicast（broadcast ではない）");
+    assertEqual(sender.calls[0].recipients, 3, "3 人");
+    assertEqual(res.processed[0].recipients, 3, "実送信 3");
+  });
+});
+
 describe("runDeliveryOnce: multicast 経路", () => {
   it("ペルソナは multicast で送信し実送信数を消費計上", async () => {
     const page = await makePage({ audienceRaw: "癒し" });
@@ -743,6 +1358,79 @@ describe("runDeliveryOnce: multicast 経路", () => {
     assertEqual(res.processed[0].recipients, 2, "2 件送信");
     const result = repo.results[page.id] as { consumed: number };
     assertEqual(result.consumed, 2, "消費実績 2");
+  });
+});
+
+describe("runDeliveryOnce: Notion files 画像（R2 恒久URL・全 audience 適用 / TOCTOU）", () => {
+  const R2 = "https://pub-x.r2.dev/broadcast/page-1";
+  it("ペルソナでも page.imageUrls があれば 本文 + 画像 を送信（env ブリッジ非依存）", async () => {
+    const imgs = [`${R2}/0.jpg`, `${R2}/1.jpg`];
+    const contentHash = await computeContentHash({
+      format: "image",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: imgs,
+    });
+    const page = await makePage({
+      audienceRaw: "癒し",
+      format: "image",
+      body: "本文",
+      imageUrls: imgs,
+      contentHash,
+    });
+    const captured: import("../../src/lib/line-messages").LineMessage[][] = [];
+    const capSender = {
+      async multicast(_b: string[][], messages: import("../../src/lib/line-messages").LineMessage[]) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: 1, partial: false };
+      },
+      async broadcast(messages: import("../../src/lib/line-messages").LineMessage[], est: number) {
+        captured.push(messages);
+        return { ok: true, deliveredRecipients: est, partial: false };
+      },
+    };
+    const res = await runDeliveryOnce(
+      baseDeps({
+        repo: makeFakeRepo([page]),
+        sender: capSender,
+        sendEnabled: true,
+        // env ブリッジは渡さない（Notion files 経路のみで画像が乗ることを確認）。
+        resolveTargets: async () => ({
+          kind: "multicast",
+          userIds: ["L1"],
+          batches: [["L1"]],
+          estimatedRecipients: 1,
+        }),
+      }),
+    );
+    assertEqual(res.processed[0].disposition, "sent", "sent");
+    assertEqual(captured.length, 1, "1 回送信");
+    const msgs = captured[0];
+    assertEqual(msgs.length, 3, "text1 + image2 = 3 件（ペルソナでも画像適用）");
+    assertEqual(msgs[0].type, "text", "先頭 text");
+    if (msgs[1].type === "image") assertEqual(msgs[1].originalContentUrl, imgs[0], "画像順序 0");
+    if (msgs[2].type === "image") assertEqual(msgs[2].originalContentUrl, imgs[1], "画像順序 1");
+  });
+
+  it("承認後に画像枚数が増えるとハッシュ不一致 → 承認リセット（送信しない）", async () => {
+    const pinned = await computeContentHash({
+      format: "image",
+      body: "本文",
+      imageUrl: null,
+      imageUrls: [`${R2}/0.jpg`], // 承認時は 1 枚
+    });
+    const page = await makePage({
+      format: "image",
+      body: "本文",
+      imageUrls: [`${R2}/0.jpg`, `${R2}/1.jpg`], // 送信時は 2 枚（編集で増加）
+      contentHash: pinned,
+    });
+    const repo = makeFakeRepo([page]);
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(baseDeps({ repo, sender }));
+    assertEqual(sender.calls.length, 0, "無送信");
+    assertEqual(res.processed[0].disposition, "reset", "reset");
+    assertTrue(repo.calls.includes("resetApproval"), "resetApproval 呼ばれた");
   });
 });
 
@@ -775,6 +1463,209 @@ describe("noopSender（dry-run 送信ポート）", () => {
     assertEqual(m.deliveredRecipients, 2, "multicast 2");
     const b = await noopSender.broadcast([{ type: "text", text: "x" }], 38);
     assertEqual(b.deliveredRecipients, 38, "broadcast 38");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// image-ingest: blocking 分類 + describeBlockingImages（T2・HEIC fail-closed）
+// ---------------------------------------------------------------------------
+describe("image-ingest: blocking 分類（HEIC/非画像/10MB超は配信ブロック対象）", () => {
+  const cfg: R2Config = {
+    accountId: "acc",
+    apiToken: "tok",
+    bucket: "elxea-images",
+    publicBase: "https://pub-x.r2.dev",
+  };
+  function ingestFetch(opts?: { contentType?: string; bytes?: number }) {
+    return (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("api.cloudflare.com")) {
+        return { ok: true, status: 200, async text() { return ""; } } as unknown as Response;
+      }
+      const buf = new Uint8Array(opts?.bytes ?? 1024);
+      return {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (k: string) =>
+            k.toLowerCase() === "content-type" ? (opts?.contentType ?? "image/jpeg") : null,
+        },
+        async arrayBuffer() { return buf.buffer; },
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+  }
+  it("JPEG は blocking なし（送信可）", async () => {
+    const res = await ingestPageImages(cfg, "pg", ["https://n/a"], {
+      fetchImpl: ingestFetch({ contentType: "image/jpeg" }),
+    });
+    assertEqual(res.blocking.length, 0, "blocking 0");
+  });
+  it("HEIC は unsupported_format を blocking に積む（index 0始まり）", async () => {
+    const res = await ingestPageImages(cfg, "pg", ["https://n/a"], {
+      fetchImpl: ingestFetch({ contentType: "image/heic" }),
+    });
+    assertEqual(res.blocking.length, 1, "blocking 1");
+    assertEqual(res.blocking[0].kind, "unsupported_format", "形式ブロック");
+    assertEqual(res.blocking[0].index, 0, "index 0");
+  });
+  it("非画像(pdf)は not_image を blocking に積む", async () => {
+    const res = await ingestPageImages(cfg, "pg", ["https://n/a"], {
+      fetchImpl: ingestFetch({ contentType: "application/pdf" }),
+    });
+    assertEqual(res.blocking[0].kind, "not_image", "非画像ブロック");
+  });
+  it("10MB超は oversize を blocking に積む", async () => {
+    const res = await ingestPageImages(cfg, "pg", ["https://n/a"], {
+      fetchImpl: ingestFetch({ contentType: "image/png", bytes: 11 * 1024 * 1024 }),
+    });
+    assertTrue(res.blocking.some((b) => b.kind === "oversize"), "oversize ブロック");
+  });
+});
+
+describe("describeBlockingImages（平易な日本語・画像番号1始まり）", () => {
+  it("HEIC は「画像2」(index1→2) と JPEG/PNG 指示を出す", () => {
+    const msg = describeBlockingImages([
+      { index: 1, kind: "unsupported_format", detail: "image/heic" },
+    ]);
+    assertTrue(msg.includes("画像2"), "1始まり表示");
+    assertTrue(msg.includes("JPEG") && msg.includes("PNG"), "変換指示");
+  });
+  it("空配列は空文字", () => {
+    assertEqual(describeBlockingImages([]), "", "空");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cron ポーリング phase1: pinDueApprovals（承認pin 前処理・fail-closed）
+// ---------------------------------------------------------------------------
+describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fail-closed）", () => {
+  function makeDeps(
+    pages: Array<{ id: string; contentHash: string | null }>,
+    pinResults: Record<string, PinApprovalResult>,
+  ) {
+    const log: string[] = [];
+    const resets: Array<{ id: string; reason: string }> = [];
+    const cleared: string[] = [];
+    const deps = {
+      queryDue: async (_iso: string) => {
+        log.push("queryDue");
+        return pages;
+      },
+      pin: async (id: string): Promise<PinApprovalResult> => {
+        log.push(`pin:${id}`);
+        return pinResults[id] ?? { ok: true, contentHash: "h" };
+      },
+      resetApproval: async (id: string, reason: string) => {
+        log.push(`reset:${id}`);
+        resets.push({ id, reason });
+      },
+      clearError: async (id: string) => {
+        log.push(`clear:${id}`);
+        cleared.push(id);
+      },
+      now: () => new Date("2026-07-10T05:00:00Z"),
+    };
+    return { deps, log, resets, cleared };
+  }
+
+  it("Approved & 未pin（ハッシュなし）を拾って pin し、成功でエラー詳細を消す", async () => {
+    const { deps, log, cleared } = makeDeps([{ id: "p1", contentHash: null }], {
+      p1: { ok: true, contentHash: "h" },
+    });
+    const out = await pinDueApprovals(deps);
+    assertEqual(out[0].action, "pinned", "pinned");
+    assertTrue(log.includes("pin:p1"), "pin を呼ぶ");
+    assertTrue(cleared.includes("p1"), "成功でエラー詳細クリア");
+  });
+
+  it("既に pin 済み（ハッシュあり）は pin を呼ばない（二重pinしない・冪等）", async () => {
+    const { deps, log } = makeDeps([{ id: "p1", contentHash: "already" }], {});
+    const out = await pinDueApprovals(deps);
+    assertEqual(out[0].action, "already_pinned", "skip");
+    assertFalse(log.includes("pin:p1"), "pin 未呼び出し");
+  });
+
+  it("pin 失敗(HEIC)は承認を通さず resetApproval に平易な理由を記録（fail-closed）", async () => {
+    const reason =
+      "画像2がLINEで表示できない形式です（image/heic）。JPEG か PNG にしてください。";
+    const { deps, resets } = makeDeps([{ id: "p1", contentHash: null }], {
+      p1: { ok: false, reason },
+    });
+    const out = await pinDueApprovals(deps);
+    assertEqual(out[0].action, "reset_failed", "fail-closed");
+    assertEqual(resets[0].id, "p1", "reset 対象");
+    assertEqual(resets[0].reason, reason, "エラー詳細に平易な理由");
+  });
+
+  it("queryDue 失敗は空を返す（fail-closed・本処理側に委ねる）", async () => {
+    const out = await pinDueApprovals({
+      queryDue: async () => {
+        throw new Error("notion down");
+      },
+      pin: async () => ({ ok: true as const, contentHash: "h" }),
+      resetApproval: async () => {},
+      clearError: async () => {},
+      now: () => new Date("2026-07-10T05:00:00Z"),
+    });
+    assertEqual(out.length, 0, "空");
+  });
+});
+
+describe("runScheduledDeliveryWith（承認pin前処理 → runDelivery の順・cronポーリング配線）", () => {
+  it("pin フェーズ完了後に run を呼ぶ（pin→run 順）", async () => {
+    const log: string[] = [];
+    const deps: ScheduledDeliveryDeps = {
+      queryDue: async () => {
+        log.push("queryDue");
+        return [{ id: "p1", contentHash: null }];
+      },
+      pin: async (id) => {
+        log.push(`pin:${id}`);
+        return { ok: true, contentHash: "h" };
+      },
+      resetApproval: async () => {
+        log.push("reset");
+      },
+      clearError: async (id) => {
+        log.push(`clear:${id}`);
+      },
+      now: () => new Date("2026-07-10T05:00:00Z"),
+      run: async () => {
+        log.push("run");
+        return { scanned: 1, processed: [], reaper: [] };
+      },
+    };
+    const res = await runScheduledDeliveryWith(deps);
+    assertTrue(
+      log.indexOf("pin:p1") >= 0 && log.indexOf("run") > log.indexOf("pin:p1"),
+      "pin→run 順",
+    );
+    assertEqual(res.pinPass[0].action, "pinned", "pin 結果を返す");
+    assertEqual(res.run.scanned, 1, "run 結果を返す");
+  });
+
+  it("HEIC で pin 失敗しても run は走る（他行のため）・実送信は run 実装のガードに委ねる", async () => {
+    const log: string[] = [];
+    const deps: ScheduledDeliveryDeps = {
+      queryDue: async () => [{ id: "bad", contentHash: null }],
+      pin: async () => ({
+        ok: false,
+        reason: "画像1がLINEで表示できない形式です（image/heic）。JPEG か PNG にしてください。",
+      }),
+      resetApproval: async (id) => {
+        log.push(`reset:${id}`);
+      },
+      clearError: async () => {},
+      now: () => new Date("2026-07-10T05:00:00Z"),
+      run: async () => {
+        log.push("run");
+        return { scanned: 0, processed: [], reaper: [] };
+      },
+    };
+    const res = await runScheduledDeliveryWith(deps);
+    assertEqual(res.pinPass[0].action, "reset_failed", "HEIC は承認通さず fail-closed");
+    assertTrue(log.includes("reset:bad"), "エラー詳細記録（reset）");
+    assertTrue(log.includes("run"), "pin失敗でも run は継続");
   });
 });
 

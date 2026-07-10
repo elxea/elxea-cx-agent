@@ -14,13 +14,25 @@
 
 import type { PersonaType } from "./firestore";
 
-/** 送信の対象種別。all=全友だち broadcast / persona=ペルソナ multicast。 */
+/**
+ * 送信の対象種別。
+ * - all       = 全友だち broadcast
+ * - persona   = ペルソナ multicast（Firestore/Supabase 結合で解決）
+ * - allowlist = 社内テスト配信。指定 LINE user ID にだけ multicast する。
+ *   userIds は Notion select には持たせず（PII をコンテンツDBに書かない）、
+ *   env `LINE_INTERNAL_USER_IDS` を供給元として resolveTargets が deps 経由で読む。
+ *   したがって parseAudience が返す時点の userIds は空配列プレースホルダ。
+ */
 export type AudienceSpec =
   | { kind: "all" }
-  | { kind: "persona"; persona: PersonaType };
+  | { kind: "persona"; persona: PersonaType }
+  | { kind: "allowlist"; userIds: string[] };
 
 /** Notion「配信対象」select の日本語ラベル。 */
 export const AUDIENCE_LABEL_ALL = "全員";
+
+/** Notion「配信対象」select の社内テスト配信ラベル（allowlist）。 */
+export const AUDIENCE_LABEL_INTERNAL = "社内";
 
 /** 日本語ラベル → ペルソナ enum の対応表（全員は persona を持たない）。 */
 const JP_PERSONA_MAP: Record<string, PersonaType> = {
@@ -47,6 +59,9 @@ export function parseAudience(
   const trimmed = jp.trim();
   if (trimmed.length === 0) return null;
   if (trimmed === AUDIENCE_LABEL_ALL) return { kind: "all" };
+  // 社内テスト配信: userIds は env 供給（resolveTargets が deps 経由で解決）。
+  // ここでは空プレースホルダを返す（Notion select に PII を持たせない）。
+  if (trimmed === AUDIENCE_LABEL_INTERNAL) return { kind: "allowlist", userIds: [] };
   const persona = JP_PERSONA_MAP[trimmed];
   if (!persona) return null;
   return { kind: "persona", persona };
@@ -59,5 +74,7 @@ export function personaToJp(persona: PersonaType): string {
 
 /** AudienceSpec を人間可読ラベルに（結果書戻し・ログ用）。 */
 export function audienceLabel(spec: AudienceSpec): string {
-  return spec.kind === "all" ? AUDIENCE_LABEL_ALL : personaToJp(spec.persona);
+  if (spec.kind === "all") return AUDIENCE_LABEL_ALL;
+  if (spec.kind === "allowlist") return AUDIENCE_LABEL_INTERNAL;
+  return personaToJp(spec.persona);
 }
