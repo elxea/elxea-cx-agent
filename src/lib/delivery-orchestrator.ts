@@ -233,6 +233,26 @@ async function processPage(
   }
   const estimated = targets.estimatedRecipients;
 
+  // ── dry-run（sendEnabled=false）は「非破壊プレビュー」で早期 return（QA Finding 1 修正）──
+  // ⚠ 台帳 claim / setStatus(Sending) / writeResult より **前** で返し、副作用をゼロにする。
+  //   ここより後（step g 以降）で claim・Notion 状態変更が起きるため、dry-run でそれらを
+  //   通してはならない（通すと台帳を汚し、reaper が Failed 化し、後の本番実送信を弾く）。
+  //   プレビューは「対象種別・通数見積」だけを返す（送信も予約も状態遷移もしない）。
+  if (!deps.sendEnabled) {
+    return {
+      pageId: page.id,
+      title: page.title,
+      audience: page.audienceRaw,
+      disposition: "sent",
+      reason:
+        `dry-run preview（sendEnabled=false・非破壊）: ${audienceLabel(audience)}・` +
+        `見積${estimated}・claim/Sending/送信すべて未実行`,
+      recipients: estimated,
+    };
+  }
+
+  // ==== 以降は sendEnabled=true（実送信モード）のみ到達する ====
+
   // (g) 通数ガード + 台帳 claim（真の排他 + 会計）。送信より前に必ず実施。
   const decision = await guardAndClaim(
     deps.ledger,
@@ -247,45 +267,30 @@ async function processPage(
   // (h) Sending マーク（reaper のための中間状態）。
   await deps.repo.setStatus(page.id, "Sending");
 
-  // (i) 送信（sendEnabled のときのみ実 sender。dry-run は noopSender）。
-  let delivered = 0;
-  let partial = false;
-  let sendError: string | undefined;
-  if (deps.sendEnabled) {
-    const outcome =
-      targets.kind === "broadcast"
-        ? await deps.sender.broadcast(messages, estimated)
-        : await deps.sender.multicast(targets.batches, messages);
-    delivered = outcome.deliveredRecipients;
-    partial = outcome.partial;
-    sendError = outcome.error;
-    if (!outcome.ok && delivered === 0) {
-      // 全失敗。Failed 書戻し。台帳 claim は済みだが実送信ゼロ。
-      await deps.repo.writeResult(page.id, {
-        status: "Failed",
-        sentAtUtc: now.toISOString(),
-        summary: `送信失敗（${audienceLabel(audience)}・見積${estimated}）`,
-        consumed: 0,
-        errorDetail: sendError ?? "unknown",
-      });
-      return {
-        pageId: page.id,
-        title: page.title,
-        audience: page.audienceRaw,
-        disposition: "failed",
-        reason: `送信失敗: ${sendError ?? "unknown"}`,
-        recipients: 0,
-      };
-    }
-  } else {
-    // dry-run: 送らない。見積を delivered として扱い、書戻しもしない（preview）。
+  // (i) 送信（実 sender）。
+  const outcome =
+    targets.kind === "broadcast"
+      ? await deps.sender.broadcast(messages, estimated)
+      : await deps.sender.multicast(targets.batches, messages);
+  const delivered = outcome.deliveredRecipients;
+  const partial = outcome.partial;
+  const sendError = outcome.error;
+  if (!outcome.ok && delivered === 0) {
+    // 全失敗。Failed 書戻し。台帳 claim は済みだが実送信ゼロ。
+    await deps.repo.writeResult(page.id, {
+      status: "Failed",
+      sentAtUtc: now.toISOString(),
+      summary: `送信失敗（${audienceLabel(audience)}・見積${estimated}）`,
+      consumed: 0,
+      errorDetail: sendError ?? "unknown",
+    });
     return {
       pageId: page.id,
       title: page.title,
       audience: page.audienceRaw,
-      disposition: "sent",
-      reason: `dry-run（sendEnabled=false）: ${audienceLabel(audience)}・見積${estimated}・送信せず`,
-      recipients: estimated,
+      disposition: "failed",
+      reason: `送信失敗: ${sendError ?? "unknown"}`,
+      recipients: 0,
     };
   }
 
@@ -346,6 +351,10 @@ async function runReaper(
   deps: OrchestratorDeps,
   now: Date,
 ): Promise<ReaperOutcome[]> {
+  // dry-run（sendEnabled=false）は非破壊プレビュー。reaper は Notion 状態を書き換える
+  // 回収処理（Failed 化 / Approved 戻し）なので dry-run では実行しない（QA Finding 1 の一貫性）。
+  if (!deps.sendEnabled) return [];
+
   const timeoutMs = deps.reaperTimeoutMs ?? DEFAULT_REAPER_TIMEOUT_MS;
   const month = currentLineMonth(now);
   const sending = await deps.repo.querySending();

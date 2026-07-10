@@ -6,7 +6,9 @@
  *
  * ⚠ 実送信の絶対制約:
  *   - sendEnabled = (DELIVERY_SEND_ENABLED === "true")。既定 false。
- *   - false のときは sender=noopSender（実送信なし）で dry-run（結果書戻しもしない preview）。
+ *   - false のときは orchestrator が step(g) の前で「非破壊プレビュー」early-return し、
+ *     台帳 claim も setStatus(Sending) も writeResult も送信も一切行わない（QA Finding 1 修正）。
+ *     sender=noopSender も併せて注入するが、そもそも送信点に到達しない。
  *   - cron からの自動発火は wrangler.toml crons=[] のため発生しない（本タスクでは実発火ゼロ）。
  */
 

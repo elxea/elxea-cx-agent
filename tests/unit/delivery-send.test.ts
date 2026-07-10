@@ -583,6 +583,95 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
     assertEqual(res.processed[0].disposition, "sent", "dry-run 完走扱い");
     assertTrue(res.processed[0].reason.includes("dry-run"), "dry-run 明記");
   });
+  it("【QA Finding 1】dry-run は台帳 claim を挿入しない（非破壊）", async () => {
+    const page = await makePage({});
+    const ledger = makeFakeLedger();
+    const repo = makeFakeRepo([page]);
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(
+      baseDeps({ repo, ledger, sender, sendEnabled: false }),
+    );
+    // 台帳に 1 行も claim されていない（=後の本番実送信を弾かない）。
+    assertEqual(ledger.rows.length, 0, "台帳 claim ゼロ");
+    // プレビュー結果（対象・見積）は返る。
+    assertEqual(res.processed[0].recipients, 4, "見積プレビュー返却");
+    assertTrue(res.processed[0].reason.includes("非破壊"), "非破壊プレビュー明記");
+  });
+  it("【QA Finding 1】dry-run は Notion を Sending に遷移させない", async () => {
+    const page = await makePage({});
+    const repo = makeFakeRepo([page]);
+    const res = await runDeliveryOnce(
+      baseDeps({ repo, sender: createRecordingSender(), sendEnabled: false }),
+    );
+    // setStatus / writeResult / resetApproval を一切呼ばない（queryDue と reaper の querySending のみ）。
+    assertFalse(repo.calls.includes("setStatus:Sending"), "Sending 遷移なし");
+    assertFalse(repo.calls.some((c) => c.startsWith("writeResult")), "書戻しなし");
+    assertFalse(repo.calls.includes("resetApproval"), "reset なし");
+    assertEqual(repo.statuses[page.id], undefined, "status 未変更");
+  });
+  it("【QA Finding 1】dry-run は reaper も走らせない（Sending 滞留を書き換えない）", async () => {
+    // 15 分超の滞留 Sending ページを querySending が返す repo。
+    const stale: DeliveryPage = {
+      id: "stale-1",
+      title: "滞留",
+      status: "Sending",
+      audienceRaw: "全員",
+      format: "text",
+      body: "x",
+      imageUrl: null,
+      scheduledStart: "2026-07-10T04:00:00Z",
+      sent: false,
+      contentHash: "h",
+      estimate: null,
+      assignees: ["a"],
+      approvers: ["b"],
+      lastEditedTime: "2026-07-10T04:40:00Z", // now(05:00) から 20 分前 = タイムアウト
+    };
+    const calls: string[] = [];
+    const repo: DeliveryRepoPort = {
+      async queryDue() {
+        return [];
+      },
+      async querySending() {
+        calls.push("querySending");
+        return [stale];
+      },
+      async setStatus(_id, s) {
+        calls.push(`setStatus:${s}`);
+      },
+      async writeResult(_id, r) {
+        calls.push(`writeResult:${r.status}`);
+      },
+      async resetApproval() {
+        calls.push("resetApproval");
+      },
+    };
+    const res = await runDeliveryOnce(
+      baseDeps({ repo, ledgerHasClaim: async () => true, sendEnabled: false }),
+    );
+    // dry-run では reaper 自体を起動しない → querySending も回収書換も無し。
+    assertFalse(calls.includes("querySending"), "reaper 未起動");
+    assertFalse(calls.some((c) => c.startsWith("writeResult")), "回収書換なし");
+    assertEqual(res.reaper.length, 0, "reaper 結果ゼロ");
+  });
+  it("【QA Finding 1】dry-run 後に本番実送信すると claim も送信も正常に通る", async () => {
+    // dry-run が台帳を汚さないことの結合的確認: 同一 ledger で dry-run → 本番の順に実行。
+    const page = await makePage({});
+    const ledger = makeFakeLedger();
+    const sender = createRecordingSender();
+    // 1) dry-run（副作用ゼロ）
+    await runDeliveryOnce(
+      baseDeps({ repo: makeFakeRepo([page]), ledger, sender: createRecordingSender(), sendEnabled: false }),
+    );
+    assertEqual(ledger.rows.length, 0, "dry-run 後も台帳空");
+    // 2) 本番実送信（同一 ledger）→ claim 1 行 + 送信 1 回
+    const res = await runDeliveryOnce(
+      baseDeps({ repo: makeFakeRepo([page]), ledger, sender, sendEnabled: true }),
+    );
+    assertEqual(ledger.rows.length, 1, "本番で claim 1 行");
+    assertEqual(sender.calls.length, 1, "本番で送信 1 回");
+    assertEqual(res.processed[0].disposition, "sent", "Sent");
+  });
   it("通数ガード超過なら送信しない（claim 前に弾く）", async () => {
     const page = await makePage({});
     const sender = createRecordingSender();
