@@ -509,6 +509,18 @@ export async function runSegmentBroadcast(env: Env): Promise<BroadcastResult> {
     totalDelivered: 0,
   };
 
+  // ── T10 退役（設計 §9）───────────────────────────────────────────────
+  // コード直書きテンプレート配信は Notion駆動 配信（delivery-orchestrator）へ移行済み。
+  // cron-off だけでは再活性フットガンが残るため、コードレベルで no-op 化する。
+  // 明示的に LEGACY_SEGMENT_BROADCAST_ENABLED="true" が設定された場合のみ旧経路を通す。
+  if (env.LEGACY_SEGMENT_BROADCAST_ENABLED !== "true") {
+    console.warn(
+      "[broadcast] runSegmentBroadcast is retired (T10). " +
+        "Notion駆動配信(delivery-orchestrator)へ移行済み。実行せず即 return。",
+    );
+    return result;
+  }
+
   // Firebase credentials チェック
   let fsEnv: FirestoreEnv;
   try {

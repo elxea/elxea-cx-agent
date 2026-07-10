@@ -327,9 +327,26 @@ async function processEvents(
       }
     }
 
-    // アンフォローイベントは現時点ではログのみ
+    // アンフォロー（退会/ブロック相当）は配信対象から除外するため記録する（migration 020）。
     if (event.type === "unfollow") {
       console.log(`User unfollowed: ${lineUserId}`);
+      try {
+        const supabase = createSupabaseClient(env);
+        const { error } = await supabase
+          .from("customer_linkages")
+          .update({ unfollowed_at: new Date().toISOString() })
+          .eq("line_user_id", lineUserId);
+        if (error) {
+          console.warn(
+            `[unfollow] Failed to mark unfollowed_at for ${lineUserId}: ${error.message}`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          "[unfollow] unfollowed_at 記録に失敗:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
   }
 }

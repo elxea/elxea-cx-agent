@@ -13,13 +13,33 @@ import { surveyHandler } from "./routes/survey";
 import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
-import { runSegmentBroadcast } from "./lib/segment-broadcast";
+import { runDelivery, pinDeliveryApproval } from "./lib/delivery-runtime";
 import { getAlertStatus } from "./lib/alerts";
 
+/**
+ * 配信用 cron パターン（誤発火防止のため明示分岐で判定）。
+ * ⚠ wrangler.toml crons=[] のため実登録はしていない（本タスクでは自動発火ゼロ）。
+ *   再開時にこのパターンを crons に追記する。
+ */
+export const DELIVERY_CRON_PATTERN = "*/15 * * * *";
+
 export type Env = {
-  // LINE
+  // LINE（本番 = @307tzhkw）
   LINE_CHANNEL_SECRET: string;
   LINE_CHANNEL_ACCESS_TOKEN: string;
+  // LINE 配信 2 環境対応（テスト = @426vlcyb）
+  LINE_CHANNEL_ACCESS_TOKEN_TEST?: string;
+  /** 配信の対象環境。"prod" | "test"（未設定・不正は "test" に倒す）。 */
+  DELIVERY_TARGET_ENV?: string;
+  /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
+  DELIVERY_SEND_ENABLED?: string;
+  /** broadcast(全員配信) の想定受信者数（無料枠ガード見積用）。 */
+  LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD?: string;
+  LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST?: string;
+  /** Notion 配信コンテンツ DB の database_id（未設定は既定 ID）。 */
+  NOTION_DELIVERY_DB_ID?: string;
+  /** 旧セグメント配信の再活性フラグ（既定 false = 退役）。 */
+  LEGACY_SEGMENT_BROADCAST_ENABLED?: string;
   // AI
   ANTHROPIC_API_KEY: string;
   AI: Ai;
@@ -195,6 +215,70 @@ app.post("/api/sync/shopify-metafields", async (c) => {
 });
 
 /**
+ * 配信 承認 pin API（T12）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。指定ページの現在値をハッシュして
+ * 「コンテンツハッシュ」に保存し Status=Approved にする（TOCTOU スナップショット）。
+ * 実送信はしない。承認者!=著者もここで検証する。
+ */
+app.post("/api/delivery/approve", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const body = await c.req.json<{ pageId?: string }>().catch(() => ({}) as { pageId?: string });
+  if (!body.pageId || typeof body.pageId !== "string") {
+    return c.json({ error: "pageId is required" }, 400);
+  }
+
+  const result = await pinDeliveryApproval(c.env, body.pageId).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+  }));
+
+  if (!result.ok) {
+    return c.json({ status: "rejected", reason: result.reason }, 422);
+  }
+  return c.json({ status: "approved", pinned: true });
+});
+
+/**
+ * 配信 手動トリガ API（T8）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。冪等性は台帳 claim 経路で担保。
+ * 実送信は DELIVERY_SEND_ENABLED="true" のときのみ（既定 dry-run）。cron とは独立。
+ */
+app.post("/api/delivery/run", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  c.executionCtx.waitUntil(
+    runDelivery(c.env).then((result) => {
+      console.log(
+        "Manual LINE delivery completed:",
+        JSON.stringify({
+          scanned: result.scanned,
+          processed: result.processed.length,
+          reaper: result.reaper.length,
+        }),
+      );
+    }),
+  );
+
+  return c.json({
+    status: "delivery_started",
+    sendEnabled: c.env.DELIVERY_SEND_ENABLED === "true",
+  });
+});
+
+/**
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
  * - scheduled: Cron Trigger による定期処理
@@ -210,26 +294,27 @@ export default {
   ) => {
     const cronPattern = event.cron;
 
-    // セグメント配信 cron（1日・15日 21:00 UTC = 06:00 JST）
-    if (cronPattern === "0 21 1,15 * *") {
+    // Notion駆動 LINE配信 cron（誤発火防止のため else の前に明示分岐）。
+    // ⚠ crons=[] のため実発火しない。runDelivery は DELIVERY_SEND_ENABLED!="true" で dry-run。
+    if (cronPattern === DELIVERY_CRON_PATTERN) {
       ctx.waitUntil(
-        runSegmentBroadcast(env).then((result) => {
+        runDelivery(env).then((result) => {
           console.log(
-            "Scheduled segment broadcast completed:",
+            "Scheduled LINE delivery completed:",
             JSON.stringify({
-              totalDelivered: result.totalDelivered,
-              skippedCount: result.skippedCount,
-              segments: result.segments.map((s) => ({
-                persona: s.persona,
-                userCount: s.userCount,
-                success: s.success,
-              })),
+              scanned: result.scanned,
+              processed: result.processed.length,
+              reaper: result.reaper.length,
             }),
           );
         }),
       );
       return;
     }
+
+    // 旧セグメント配信 cron（"0 21 1,15 * *"）は退役（T10）。
+    // 明示分岐を削除し、パターンが来ても default（日次同期）には落ちるが実害なし
+    // （crons=[] で発火しない。runSegmentBroadcast はコードレベルで no-op 化済み）。
 
     // デフォルト: 日次同期処理
     ctx.waitUntil(

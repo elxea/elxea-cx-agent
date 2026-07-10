@@ -14,7 +14,10 @@ enabled = true
 # ── Cron Triggers: 全休止中 (2026-07-02 Setaka 判断) ──
 # LINE AI チャネル休止に伴い定期実行ゼロで確定。再開手順は deliverable 参照。
 #   - 定期同期（毎日 AM3:00 JST = PM6:00 UTC）: 再開は crons に "0 18 * * *"
-#   - セグメント配信（1日・15日 AM6:00 JST = PM9:00 UTC 前日）: 再開は "0 21 1,15 * *"
+#   - セグメント配信（旧・T10 で退役）: "0 21 1,15 * *" は再登録しない
+#   - Notion駆動 LINE配信（新・T8）: 再開は crons に "*/15 * * * *"
+#       ⚠ 再開しても実送信は DELIVERY_SEND_ENABLED="true" のときのみ（既定 dry-run）。
+#       本タスクでは crons=[] を維持し自動発火ゼロ（scheduled ハンドラに分岐のみ用意）。
 [triggers]
 crons = []
 
