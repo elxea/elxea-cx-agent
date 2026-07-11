@@ -21,10 +21,14 @@ enabled = true
 #           dry-run（非破壊プレビュー・LINE api.line.me 非接触）。cron が回っても送らない。
 #       (2) 本ブランチでは DELIVERY_SEND_ENABLED を "true" にしない（[vars] に置かない）。
 #       → 「cron 発火 × dry-run」で、承認 pin までは進むが実送信ゼロ（GA 時にフラグ ON）。
-#   - 旧・定期同期（毎日 AM3:00 JST = PM6:00 UTC）を戻すなら crons に "0 18 * * *" を追加。
+#   - 日次同期（毎日 AM3:00 JST = PM6:00 UTC）: "0 18 * * *"。
+#       T3 修正: 以前は配信パターン（*/15）しか crons に無く、scheduled の配信分岐が return
+#       するため同期（runBatchMetafieldSync 含む）が「登録 cron から一度も発火しない」死蔵
+#       だった。同期パターンを登録し、SYNC_CRON_PATTERN 明示分岐で配信 cron と両立させる。
+#       同期は非破壊（ナレッジ同期 + metafield 書き込み）。実発火は本番デプロイ後。
 #   - 旧・セグメント配信（T10 退役）"0 21 1,15 * *" は再登録しない。
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "0 18 * * *"]
 
 # ── R2（配信画像ホスティング）──
 # Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する（画像 put は承認 pin 時のみ）。

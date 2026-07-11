@@ -62,6 +62,13 @@ export type CustomerProfile = {
   lastActiveAt?: string;
   /** 最終購入日時 (ISO 8601) — 注文 webhook で更新されるデノーマライズフィールド */
   lastPurchaseAt?: string | null;
+  /**
+   * 定期便（サブスク）会員フラグ — 注文 webhook の定期便判定で更新されるデノーマライズフィールド。
+   * 出し分け・配信の入力に使う（実際の描画は web-app 側）。true=定期便あり / false or 未設定=通常。
+   */
+  isSubscriber?: boolean;
+  /** isSubscriber を最後に更新した日時 (ISO 8601)。 */
+  subscriberUpdatedAt?: string | null;
   /** 今月の配信受信回数 — broadcastHistory 書き込み時にインクリメント */
   broadcastCountThisMonth?: number;
   /** broadcastCountThisMonth のリセット対象月 (YYYY-MM) */
@@ -547,6 +554,46 @@ export async function recordBehaviorEvent(
 }
 
 // ---------------------------------------------------------------------------
+// PersonaScore マージ（純粋関数 — I/O なし・完全にユニットテスト可能）
+// ---------------------------------------------------------------------------
+
+/**
+ * ペルソナシグナルを既存スコアに「加算」してマージする（純粋）。
+ *
+ * 重要（属性整合の要）: これは「上書き」ではなく「別軸への累積加算」である。
+ * - 各ペルソナ軸（serenity / explorer / sensory）は独立に累積する。
+ * - 会話由来（weight=1）と購入由来（weight=3）は同じ軸に足し込まれるだけで、
+ *   一方が他方を消すことはない（例: 会話で serenity+1 済みのユーザーが explorer 商品を
+ *   購入しても serenity は保持され、explorer に +3 されるだけ）。
+ * - primary は「最大スコアの軸」を再計算するだけ（tie は先勝ち = Object.entries 順）。
+ *
+ * この不変条件により「購入判定が会話シグナルを上書きする」事故を構造的に防ぐ。
+ *
+ * @param existingScores 既存のペルソナスコア
+ * @param personaSignals 今回のシグナル（重複含みうる。含まれた回数だけ加算する）
+ * @param weight シグナル 1 件あたりの加算値（会話=1 / 購入=3）
+ */
+export function mergePersonaScores(
+  existingScores: PersonaScores,
+  personaSignals: PersonaType[],
+  weight: number,
+): { scores: PersonaScores; primary: PersonaType } {
+  const scores: PersonaScores = { ...existingScores };
+
+  // 各シグナルに +weight（既存軸は保持したまま加算 = 上書きしない）
+  for (const signal of personaSignals) {
+    scores[signal] = (scores[signal] ?? 0) + weight;
+  }
+
+  // primary を再計算（最大スコアの軸）。
+  const primary = (
+    Object.entries(scores) as Array<[PersonaType, number]>
+  ).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+
+  return { scores, primary };
+}
+
+// ---------------------------------------------------------------------------
 // TasteProfile / PersonaProfile 更新（嗜好抽出パイプライン用）
 // ---------------------------------------------------------------------------
 
@@ -619,17 +666,12 @@ export async function updateTasteProfile(
       lastUpdated: new Date().toISOString(),
     };
 
-    const scores = { ...existingPersona.scores };
-
-    // 各シグナルに +weight（会話: +1, 購入: +3）
-    for (const signal of signals.persona_signals) {
-      scores[signal] = (scores[signal] ?? 0) + weight;
-    }
-
-    // primary を再計算（最大スコアのペルソナ）
-    const primary = (
-      Object.entries(scores) as Array<[PersonaType, number]>
-    ).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+    // 純粋関数で「上書きせず別軸に累積加算」する（属性整合の要）。
+    const { scores, primary } = mergePersonaScores(
+      existingPersona.scores,
+      signals.persona_signals,
+      weight,
+    );
 
     updates.persona = {
       primary,

@@ -87,6 +87,77 @@ async function shopifyAdminQuery(
 }
 
 // -------------------------------------------------------------------
+// 商品タグ解決（注文 webhook → ペルソナパイプライン用）
+// -------------------------------------------------------------------
+
+/**
+ * 商品 ID（数値 or GID）配列から、各商品のタグ配列を解決する。
+ *
+ * Shopify の注文 webhook の line_items にはタグが含まれないため、
+ * 購入ペルソナパイプライン（タグ → ペルソナシグナル）に渡す前にここで補完する。
+ * 重複 ID は 1 回だけ問い合わせる。取得失敗・未設定時は空 Map を返す（呼び出し側は
+ * タグ無し = マッピング対象なし として安全にスキップできる）。
+ *
+ * @returns Map<数値商品ID文字列, タグ配列>
+ */
+export async function fetchProductTagsByIds(
+  productIds: string[],
+  env: Env,
+  deps?: {
+    adminQuery?: (
+      query: string,
+      variables: Record<string, unknown>,
+      env: Env,
+    ) => Promise<Record<string, unknown>>;
+  },
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  const adminQuery = deps?.adminQuery ?? shopifyAdminQuery;
+
+  // 数値 ID に正規化して重複排除
+  const numericIds = Array.from(
+    new Set(
+      productIds
+        .map((id) => String(id).replace(/^gid:\/\/shopify\/Product\//, ""))
+        .filter((id) => /^\d+$/.test(id)),
+    ),
+  );
+  if (numericIds.length === 0) return result;
+
+  const gids = numericIds.map((id) => `gid://shopify/Product/${id}`);
+  const query = `
+    query getProductTags($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Product {
+          id
+          tags
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await adminQuery(query, { ids: gids }, env);
+    const nodes = (data.nodes ?? []) as Array<
+      { id: string; tags: string[] } | null
+    >;
+    for (const node of nodes) {
+      if (!node?.id) continue;
+      const numeric = node.id.replace(/^gid:\/\/shopify\/Product\//, "");
+      result.set(numeric, Array.isArray(node.tags) ? node.tags : []);
+    }
+  } catch (error) {
+    // 取得失敗は空 Map（fire-and-forget パイプラインを止めない）。
+    console.warn(
+      "[fetchProductTagsByIds] failed:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+
+  return result;
+}
+
+// -------------------------------------------------------------------
 // 顧客注文照会（lookup_my_orders）
 // -------------------------------------------------------------------
 

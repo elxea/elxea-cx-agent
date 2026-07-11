@@ -11,6 +11,8 @@ import {
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
 import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
+import { shopifyOrderWebhook } from "./routes/shopify-webhook";
+import { classifyCron } from "./lib/cron-routing";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
 import {
@@ -30,7 +32,11 @@ import { getAlertStatus } from "./lib/alerts";
 // ⚠ 非 export（module-level const）。Workers ランタイムはエントリの named export を
 //   すべてハンドラとして解釈するため、文字列の named export は起動を壊す
 //   （"Incorrect type for map entry ... not of type 'function or ExportedHandler'"）。
-const DELIVERY_CRON_PATTERN = "*/15 * * * *";
+// 分類は純粋関数 classifyCron（cron-routing.ts）に集約。
+// ⚠ 到達性（T3 修正）: 以前は crons に配信パターン（15分毎）しか無く、scheduled の配信分岐が
+//   return するため、同期（runBatchMetafieldSync 含む）が「登録された cron から一度も発火
+//   しない」死蔵だった。wrangler.toml の crons に同期パターンを追加し、classifyCron で
+//   配信/同期を両立させる（配信パターン以外は必ず同期へ到達）。実発火は本番デプロイ後。
 
 export type Env = {
   // LINE（本番 = @307tzhkw）
@@ -86,6 +92,12 @@ export type Env = {
   SHOPIFY_STORE_DOMAIN?: string;
   SHOPIFY_ADMIN_ACCESS_TOKEN?: string;
   SHOPIFY_STOREFRONT_ACCESS_TOKEN?: string;
+  /**
+   * Shopify webhook の署名検証用 secret（HMAC-SHA256）。
+   * 注文 webhook 受信の必須条件。未設定は fail-closed（全受信を 401 拒否）。
+   * 値はコミットしない（`wrangler secret put SHOPIFY_WEBHOOK_SECRET`）。
+   */
+  SHOPIFY_WEBHOOK_SECRET?: string;
   // Notifications
   SLACK_WEBHOOK_URL?: string;
   // Notion Alerts DB
@@ -123,6 +135,10 @@ app.use("/api/*", async (c, next) => {
 });
 
 app.post("/webhook/line", lineWebhook);
+
+// Shopify 注文 webhook（受け口を作って待つ・稼働で即通電）。
+// HMAC 署名検証（fail-closed）→ 注文 ID 冪等 claim → 背景処理（ペルソナ通電＋lastPurchaseAt＋定期便）。
+app.post("/webhooks/shopify/orders", shopifyOrderWebhook);
 
 // Web Chat routes
 app.post("/api/chat", webChatHandler);
@@ -326,13 +342,13 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ) => {
-    const cronPattern = event.cron;
+    const cronKind = classifyCron(event.cron);
 
     // Notion駆動 LINE配信 cron（誤発火防止のため else の前に明示分岐）。
     // 承認 pin 前処理 → runDelivery の順（runScheduledDelivery）。運用者は Notion で
     // Status=Approved にするだけでよい（承認 pin は cron が代行する）。
     // ⚠ 実送信は runDelivery 内の DELIVERY_SEND_ENABLED!="true" で dry-run（既定 送らない）。
-    if (cronPattern === DELIVERY_CRON_PATTERN) {
+    if (cronKind === "delivery") {
       ctx.waitUntil(
         runScheduledDelivery(env).then((result) => {
           console.log(
@@ -353,10 +369,13 @@ export default {
 
     // 旧セグメント配信 cron（"0 21 1,15 * *"）は退役（T10）。
     // 明示分岐を削除し、パターンが来ても default（日次同期）には落ちるが実害なし
-    // （crons=[] で発火しない。runSegmentBroadcast はコードレベルで no-op 化済み）。
+    // （runSegmentBroadcast はコードレベルで no-op 化済み）。
 
-    // デフォルト: 日次同期処理
-    ctx.waitUntil(
+    // 日次同期（ナレッジ同期 + Shopify Metafield バッチ同期）。
+    // ⚠ T3: SYNC_CRON_PATTERN を明示分岐で拾う。以前は配信分岐の return により
+    //   ここへ到達できず同期が死蔵していた（crons に同期パターンが無かった）。
+    //   SYNC_CRON_PATTERN と、未知パターン（安全網）の両方でこの同期を回す。
+    const runDailySync = () =>
       Promise.all([
         runKnowledgeSync(env, "incremental").then((result) => {
           console.log("Scheduled knowledge sync completed:", JSON.stringify(result));
@@ -372,7 +391,10 @@ export default {
             }),
           );
         }),
-      ]),
-    );
+      ]);
+
+    // classifyCron は配信パターン以外（同期パターン + 想定外の安全網）を "sync" に倒すため、
+    // ここに到達した時点で cronKind === "sync"。配信分岐は上で return 済み。
+    ctx.waitUntil(runDailySync());
   },
 } satisfies ExportedHandler<Env>;
