@@ -43,5 +43,22 @@ crons = ["*/15 * * * *", "0 18 * * *"]
 [env.staging]
 name = "elxea-agent-staging"
 
+# ── 非機密 vars のみ ──
+# Cloudflare は env ごとに vars が独立（top-level [vars] は staging に継承されない）ため、
+# staging で必要な非機密 var はここに明示する。
+#   DELIVERY_TARGET_ENV = "test": staging は必ず「テスト OA（@426vlcyb）」に固定する。
+#     src/lib/delivery-channel.ts が targetEnv=test のとき LINE_CHANNEL_ACCESS_TOKEN_TEST を選ぶ。
+#     → staging から本番 OA（@307tzhkw / 友だち 38）へ誤送信しないための固定。
+#   DELIVERY_SEND_ENABLED は「置かない」。未設定=dry-run 維持（runDelivery が実送信しない）。
+#     実送信は GA 時に `wrangler secret put`/vars で "true" を手動投入する（本ブランチでは入れない）。
+# ⚠ 秘密（値はコミットしない・[vars] に書かない）は全て secret として別途投入する:
+#     wrangler secret put LINE_CHANNEL_ACCESS_TOKEN_TEST --env staging
+#     wrangler secret put LINE_CHANNEL_SECRET_TEST       --env staging
+#     wrangler secret put SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / ANTHROPIC_API_KEY 等 --env staging
+#     wrangler secret put FIREBASE_* / R2_API_TOKEN 等                                   --env staging
+#   （必要な secret 一覧・投入順は docs/deploy-runbook.md の「Staging Bring-Up」を参照）
+[env.staging.vars]
+DELIVERY_TARGET_ENV = "test"
+
 [env.staging.ai]
 binding = "AI"

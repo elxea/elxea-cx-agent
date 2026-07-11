@@ -20,9 +20,17 @@
  * 実行: pnpm setup-rich-menu
  *
  * 注意:
- * - LINE_CHANNEL_ACCESS_TOKEN が環境変数に必要
+ * - チャネルアクセストークンが環境変数に必要（下記「チャネル選択」参照）
  * - リッチメニュー画像は LINE Official Account Manager で別途設定
  *   （このスクリプトはメニュー構造のみ作成）
+ *
+ * チャネル選択（取り違え防止・テスト優先の fail-safe）:
+ * - リッチメニューは「渡したトークンのチャネル」に載る。staging 検証では必ず
+ *   テスト OA（@426vlcyb）に載せたいので、LINE_CHANNEL_ACCESS_TOKEN_TEST があれば
+ *   それを優先する（src/lib/delivery-channel.ts の test 既定と整合）。
+ * - 本番 OA（@307tzhkw）に載せたいときは *_TEST を unset し、
+ *   LINE_CHANNEL_ACCESS_TOKEN を export して実行する。
+ * - どちらのチャネルに載せるかを起動時にラベル表示する（トークン値は絶対に出さない）。
  */
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
@@ -30,14 +38,21 @@ const LINE_API_BASE = "https://api.line.me/v2/bot";
 /** 正規サイト（web-app の SoT）— ドメイン + ロケール */
 const SITE_URL = "https://elxea.com/ja";
 
-const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+// テスト優先: *_TEST があればテスト OA に載せる（staging 既定）。無ければ本番トークンにフォールバック。
+const testToken = process.env.LINE_CHANNEL_ACCESS_TOKEN_TEST;
+const prodToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const token = testToken ?? prodToken;
+const channelLabel = testToken ? "test(@426vlcyb)" : "prod(@307tzhkw)";
 if (!token) {
   console.error(
-    "❌ LINE_CHANNEL_ACCESS_TOKEN が未設定です。\n" +
-      "   export LINE_CHANNEL_ACCESS_TOKEN=xxxx してから実行してください。",
+    "❌ チャネルアクセストークンが未設定です。\n" +
+      "   staging（テスト OA）: export LINE_CHANNEL_ACCESS_TOKEN_TEST=xxxx\n" +
+      "   本番 OA:              export LINE_CHANNEL_ACCESS_TOKEN=xxxx\n" +
+      "   いずれかを設定してから実行してください。",
   );
   process.exit(1);
 }
+console.log(`🎯 対象チャネル: ${channelLabel}（トークンは表示しません）`);
 
 const headers = {
   "Content-Type": "application/json",
