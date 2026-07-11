@@ -110,10 +110,42 @@ export function validateShopifyCustomerId(
 
 /**
  * Cloudflare Workers のリクエストからクライアント IP を取得する。
- * cf オブジェクトの connectingIp、または CF-Connecting-IP ヘッダーにフォールバック。
+ *
+ * 既定 (直叩き) では cf.connectingIp / CF-Connecting-IP を使う。これは Cloudflare が
+ * 自身で上書きする「接続元 (直接ピア) の IP」で、クライアントからは詐称できない。
+ *
+ * [B2 転送元 IP レート制限] elxea-web-app のチャットを Next.js サーバ経由 (proxy) に
+ * 変更したため、cx-agent から見た接続元 IP は Vercel の egress IP に集約される。
+ * その IP をレートリミットのキーにすると全ユーザーが 1 バケットに束ねられ、
+ * 正規ユーザーが誤ってブロックされる / 逆に効かない。
+ *
+ * [なりすまし防止 = fail-closed] X-Forwarded-For / X-Real-Client-IP は誰でも詐称できる
+ * ため、無条件では絶対に信用しない。信頼済み proxy 由来 (trustedProxy=true = 呼び出し側で
+ * X-API-Key が SYNC_API_SECRET と一致検証済み。isTrustedServerCaller と同一の信頼境界)
+ * のときだけ、proxy が付与した実クライアント IP を採用する。ブラウザ直叩き (trustedProxy=false)
+ * では転送ヘッダを一切読まず cf.connectingIp にフォールバックするので、攻撃者が
+ * ヘッダを詐称してもレートリミットのキーを操作できない (SEC-B と同じ設計)。
+ *
+ * proxy 契約 (elxea-web-app lib/chat/proxy.ts): trusted=true のときだけ
+ * X-Real-Client-IP と X-Forwarded-For に「実クライアント IP 単体」を付与する。
+ * X-Real-Client-IP は proxy 専用の単値ヘッダ (Cloudflare は触らない) なので最優先。
+ * X-Forwarded-For は Cloudflare が接続元 (Vercel egress) を追記しうるため、
+ * proxy が先頭に置く実クライアント IP = 最左要素を採用する。
+ *
+ * @param trustedProxy 呼び出し側で X-API-Key を検証済みの信頼済み proxy 呼び出しか。
  */
-export function getClientIp(req: Request): string {
-  // Cloudflare Workers の cf プロパティ
+export function getClientIp(req: Request, trustedProxy = false): string {
+  // 信頼済み proxy 由来のときだけ、転送された実クライアント IP を採用する (fail-closed)。
+  if (trustedProxy) {
+    // proxy 専用の単値ヘッダ (Cloudflare 非改変) を最優先。
+    const realClientIp = firstIp(req.headers.get("x-real-client-ip"));
+    if (realClientIp) return realClientIp;
+    // フォールバック: X-Forwarded-For の最左 (proxy が置いた実クライアント IP)。
+    const forwardedIp = firstIp(req.headers.get("x-forwarded-for"));
+    if (forwardedIp) return forwardedIp;
+  }
+
+  // 直叩き or 転送ヘッダ不在: Cloudflare が上書きする詐称不能な接続元 IP を使う。
   const cf = (req as unknown as { cf?: { connectingIp?: string } }).cf;
   if (cf?.connectingIp) {
     return cf.connectingIp;
@@ -121,4 +153,11 @@ export function getClientIp(req: Request): string {
 
   // フォールバック: CF-Connecting-IP ヘッダー
   return req.headers.get("cf-connecting-ip") ?? "unknown";
+}
+
+/** カンマ区切りヘッダの最左要素をトリムして返す。空なら null。 */
+function firstIp(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const ip = headerValue.split(",")[0]?.trim();
+  return ip ? ip : null;
 }

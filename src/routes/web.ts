@@ -85,8 +85,8 @@ const TIMEOUT_RUN_AGENT_MS = 25_000;
  * 即座にクライアントに送信される。
  */
 export async function webChatHandler(c: Context<{ Bindings: Env }>) {
-  // レートリミット
-  const clientIp = getClientIp(c.req.raw);
+  // レートリミット: 信頼済み proxy (X-API-Key 検証済み) 由来のときだけ転送された実 IP を採用
+  const clientIp = getClientIp(c.req.raw, isTrustedServerCaller(c));
   const rateLimitError = checkRateLimit(clientIp);
   if (rateLimitError) {
     return c.json({ error: rateLimitError }, 429);
@@ -615,8 +615,8 @@ export async function webChatFeedbackHandler(c: Context<{ Bindings: Env }>) {
  * レスポンス: JSON { response: string, ... }
  */
 export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
-  // レートリミット
-  const clientIp = getClientIp(c.req.raw);
+  // レートリミット: 信頼済み proxy (X-API-Key 検証済み) 由来のときだけ転送された実 IP を採用
+  const clientIp = getClientIp(c.req.raw, isTrustedServerCaller(c));
   const rateLimitError = checkRateLimit(clientIp);
   if (rateLimitError) {
     return c.json({ error: rateLimitError }, 429);

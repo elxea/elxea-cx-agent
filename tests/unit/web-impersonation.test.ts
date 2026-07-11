@@ -16,6 +16,7 @@ import type { Context } from "hono";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../../src/index";
 import { isTrustedServerCaller, effectiveEventUserId } from "../../src/routes/web";
+import { getClientIp } from "../../src/lib/web-auth";
 import {
   resolveWithShopifyCustomerId,
   resolveUnifiedUserId,
@@ -138,6 +139,71 @@ describe("[SEC-B] effectiveEventUserId", () => {
   });
   it("サーバ経由でも customer_id 無し → session_id", () => {
     assertEqual(effectiveEventUserId(true, undefined, session), session);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getClientIp: 転送ヘッダは信頼済み proxy 由来のときだけ採用（なりすまし防止）
+// ---------------------------------------------------------------------------
+/** cf.connectingIp と任意ヘッダを持つ mock Request を作る。 */
+function makeReq(opts: {
+  cfIp?: string;
+  headers?: Record<string, string>;
+}): Request {
+  const headers = opts.headers ?? {};
+  return {
+    cf: opts.cfIp ? { connectingIp: opts.cfIp } : undefined,
+    headers: {
+      get: (name: string) => headers[name.toLowerCase()] ?? null,
+    },
+  } as unknown as Request;
+}
+
+describe("[B2] getClientIp 転送元 IP レート制限 (なりすまし防止)", () => {
+  const CF_IP = "203.0.113.9"; // Vercel egress (proxy 化後の接続元) 相当
+  const REAL_IP = "198.51.100.7"; // ブラウザの実クライアント IP
+
+  it("直叩き (trustedProxy=false) は転送ヘッダを無視し cf.connectingIp を使う", () => {
+    const req = makeReq({
+      cfIp: CF_IP,
+      headers: {
+        "x-forwarded-for": `${REAL_IP}, ${CF_IP}`,
+        "x-real-client-ip": REAL_IP,
+      },
+    });
+    assertEqual(getClientIp(req, false), CF_IP, "詐称ヘッダを採用してはいけない");
+  });
+
+  it("引数省略 (既定 false) でも転送ヘッダを無視する", () => {
+    const req = makeReq({ cfIp: CF_IP, headers: { "x-real-client-ip": REAL_IP } });
+    assertEqual(getClientIp(req), CF_IP);
+  });
+
+  it("信頼済み proxy (trustedProxy=true) は X-Real-Client-IP の実 IP を採用", () => {
+    const req = makeReq({ cfIp: CF_IP, headers: { "x-real-client-ip": REAL_IP } });
+    assertEqual(getClientIp(req, true), REAL_IP);
+  });
+
+  it("信頼済み proxy: X-Real-Client-IP 不在なら X-Forwarded-For 最左を採用", () => {
+    const req = makeReq({
+      cfIp: CF_IP,
+      headers: { "x-forwarded-for": `${REAL_IP}, ${CF_IP}` },
+    });
+    assertEqual(getClientIp(req, true), REAL_IP, "XFF 最左 = proxy が置いた実 IP");
+  });
+
+  it("信頼済み proxy でも転送ヘッダ不在なら cf.connectingIp にフォールバック", () => {
+    const req = makeReq({ cfIp: CF_IP });
+    assertEqual(getClientIp(req, true), CF_IP);
+  });
+
+  it("cf 不在時は CF-Connecting-IP ヘッダにフォールバック (直叩き)", () => {
+    const req = makeReq({ headers: { "cf-connecting-ip": CF_IP } });
+    assertEqual(getClientIp(req, false), CF_IP);
+  });
+
+  it("全て不在なら unknown", () => {
+    assertEqual(getClientIp(makeReq({}), true), "unknown");
   });
 });
 
