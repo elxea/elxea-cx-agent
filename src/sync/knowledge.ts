@@ -627,6 +627,7 @@ function extractTeaMenuText(page: NotionPage): string {
   add("短い説明", "Menu Description(Short ver.) ");
   add("公式説明", "Menu Description(Formalized ver.)");
   add("テイスティングノート", "Tasting Notes");
+  add("楽しみ方", "楽しみ方");
   add("総合スコア", "Overall Score", "/5");
   add("味わい(すっきり↔しっかり)", "味わい：すっきり / しっかり", "/5");
   add("香り(甘い↔爽やか)", "香り：甘い、熟した / 青い、爽やかな", "/5");
