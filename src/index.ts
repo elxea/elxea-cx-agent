@@ -78,6 +78,12 @@ export type Env = {
   R2_PUBLIC_BASE?: string;
   // AI
   ANTHROPIC_API_KEY: string;
+  /**
+   * チャット返信で使う Anthropic モデル ID（任意）。
+   * 未設定時は core.ts の DEFAULT_REPLY_MODEL（最安クラス Haiku 4.5）にフォールバック。
+   * モデル名は機密でないため wrangler の [env.*.vars] で設定してよい。
+   */
+  ANTHROPIC_MODEL?: string;
   AI: Ai;
   // Database
   SUPABASE_URL: string;

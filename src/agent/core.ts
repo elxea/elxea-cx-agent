@@ -89,6 +89,13 @@ const LOW_SIMILARITY_THRESHOLD = 0.4;
 /** ツールループの最大回数（無限ループ防止） */
 const MAX_TOOL_TURNS = 3;
 
+/**
+ * チャット返信で使う Anthropic モデル。
+ * env.ANTHROPIC_MODEL で上書き可能。未設定時は現行モデル（最安クラス Haiku 4.5）にフォールバック。
+ */
+const DEFAULT_REPLY_MODEL = "claude-haiku-4-5-20251001";
+const replyModel = (env: Env): string => env.ANTHROPIC_MODEL || DEFAULT_REPLY_MODEL;
+
 /** タイムアウト設定（ミリ秒） */
 const TIMEOUT_CUSTOMER_LINKAGE_MS = 5_000;
 const TIMEOUT_CUSTOMER_PROFILE_MS = 5_000;
@@ -365,7 +372,7 @@ export async function runAgent(
     console.log(`[agent] step=anthropic turn=${turn}, total_elapsed=${tLlm - t0}ms`);
     const response = await withTimeout(
       client.messages.create({
-        model: "claude-haiku-4-5-20251001",
+        model: replyModel(env),
         max_tokens: 1024,
         system: [
           {
@@ -739,7 +746,7 @@ export async function runAgentStreaming(
   let accumulatedText = "";
 
   const apiParams = {
-    model: "claude-haiku-4-5-20251001" as const,
+    model: replyModel(env),
     max_tokens: 1024,
     system: [
       { type: "text" as const, text: SYSTEM_PROMPT + personaFragment, cache_control: { type: "ephemeral" as const } },

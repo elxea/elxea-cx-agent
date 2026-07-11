@@ -59,6 +59,9 @@ name = "elxea-agent-staging"
 #   （必要な secret 一覧・投入順は docs/deploy-runbook.md の「Staging Bring-Up」を参照）
 [env.staging.vars]
 DELIVERY_TARGET_ENV = "test"
+# チャット返信モデル（最安クラス Haiku 4.5）。モデル名は機密でないため vars で管理する。
+# 未設定でも core.ts の DEFAULT_REPLY_MODEL に同値でフォールバックするが、staging では明示する。
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 [env.staging.ai]
 binding = "AI"
