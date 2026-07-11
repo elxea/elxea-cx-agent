@@ -7,6 +7,7 @@
 import type { Context } from "hono";
 import type { Env } from "../index";
 import { createSupabaseClient } from "../lib/supabase";
+import { requireSyncApiKey } from "../lib/sync-auth";
 
 const VALID_WOULD_USE_AGAIN = ["yes", "not_sure"];
 const VALID_BEST_ASPECTS = [
@@ -18,6 +19,12 @@ const VALID_BEST_ASPECTS = [
 ];
 
 export async function surveyHandler(c: Context<{ Bindings: Env }>) {
+  // C: Verify shared secret (SYNC_API_SECRET) via X-API-Key header（fail-closed）。
+  // survey は elxea-web-app の Next.js API proxy（サーバ間）経由でのみ呼ばれる。
+  // ブラウザ → /api/survey(Next proxy) → cx-agent /api/survey。proxy が X-API-Key を付与する。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
   try {
     const body = await c.req.json<{
       session_id?: string;

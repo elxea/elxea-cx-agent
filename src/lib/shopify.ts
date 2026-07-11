@@ -5,10 +5,45 @@
  * Admin API Access Token が必要（Shopify Admin > Settings > Apps で Custom App を作成）。
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
 import { createSupabaseClient } from "./supabase";
 
 const SHOPIFY_API_VERSION = "2025-01";
+
+/**
+ * [SEC-A] 呼び出しユーザーに紐付いた Shopify Customer ID（数値文字列）を解決する。
+ *
+ * customer_linkages を参照し、LINE は line_user_id、Web はログイン済みの
+ * shopify_customer_id をキーに検索する（lookupMyOrders と同一の紐付け基盤）。
+ *
+ * @returns 紐付け済みなら shopify_customer_id（数値文字列）。未紐付け/エラーは null。
+ */
+export async function resolveCallerShopifyCustomerId(
+  userId: string,
+  channel: "line" | "web",
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  try {
+    const linkageQuery =
+      channel === "line"
+        ? supabase
+            .from("customer_linkages")
+            .select("shopify_customer_id")
+            .eq("line_user_id", userId)
+            .single()
+        : supabase
+            .from("customer_linkages")
+            .select("shopify_customer_id")
+            .eq("shopify_customer_id", userId)
+            .single();
+    const { data, error } = await linkageQuery;
+    if (error || !data?.shopify_customer_id) return null;
+    return String(data.shopify_customer_id);
+  } catch {
+    return null;
+  }
+}
 
 /** Shopify Admin GraphQL API を呼び出す */
 async function shopifyAdminQuery(
@@ -207,49 +242,105 @@ export type OrderDetailResult = {
   data?: OrderDetailData;
 };
 
+/** getOrderDetail の呼び出しユーザー（所有者チェック用）。 */
+export type OrderDetailCaller = {
+  userId: string;
+  channel: "line" | "web";
+};
+
+/** テスト用の依存注入（本番は未指定で実クライアントを使う）。 */
+export type OrderDetailDeps = {
+  supabase?: SupabaseClient;
+  adminQuery?: (
+    query: string,
+    variables: Record<string, unknown>,
+    env: Env,
+  ) => Promise<Record<string, unknown>>;
+  /** 呼び出しユーザーの Shopify Customer ID 解決（テスト差し替え用）。 */
+  resolveCustomerId?: (
+    userId: string,
+    channel: "line" | "web",
+    supabase: SupabaseClient,
+  ) => Promise<string | null>;
+};
+
+/** [SEC-A] 未連携ユーザー向けの注文照会不可メッセージ。 */
+function orderLinkRequiredMessage(channel: "line" | "web"): string {
+  if (channel === "line") {
+    return "ご注文内容の照会には、LINEアカウントとご購入時のShopifyアカウントの連携が必要です。マイページからアカウント連携をお願いします。連携後、ご自身の注文番号で照会いただけます。";
+  }
+  return "ご注文内容の照会には、ご購入時のアカウントでのログイン（連携）が必要です。ログインのうえ、再度お試しください。";
+}
+
 /**
  * 注文番号から特定の注文の詳細を取得。
  * テキスト（Claude ツール結果用）と構造化データ（Flex Message 用）を返す。
+ *
+ * [SEC-A] IDOR 対策: 注文番号だけでは他人の注文が見えてしまうため、
+ * 呼び出しユーザー（caller）に紐付いた Shopify Customer の注文だけを対象に照会する。
+ * - 未連携ユーザー: Shopify に問い合わせず、連携要求メッセージを返す（注文番号照会不可）。
+ * - 連携済みユーザー: customer(id).orders(query:"name:#N") でその顧客の注文のみを検索する。
+ *   他人の注文番号を指定しても、その顧客の注文集合に無ければ「見つかりません」を返す
+ *   （存在有無も他人には漏らさない fail-closed）。
  */
 export async function getOrderDetail(
   orderNumber: string,
   env: Env,
+  caller: OrderDetailCaller,
+  deps?: OrderDetailDeps,
 ): Promise<OrderDetailResult> {
+  const supabase = deps?.supabase ?? createSupabaseClient(env);
+  const adminQuery = deps?.adminQuery ?? shopifyAdminQuery;
+  const resolveCustomerId = deps?.resolveCustomerId ?? resolveCallerShopifyCustomerId;
+
+  // [SEC-A] 呼び出しユーザーに紐付く Shopify Customer ID を先に解決する。
+  const callerCustomerId = await resolveCustomerId(
+    caller.userId,
+    caller.channel,
+    supabase,
+  );
+  if (!callerCustomerId) {
+    // 未連携: 他人の注文を引けないよう、Shopify に問い合わせず案内のみ返す。
+    return { text: orderLinkRequiredMessage(caller.channel) };
+  }
+
   const query = `
-    query getOrder($query: String!) {
-      orders(first: 1, query: $query) {
-        edges {
-          node {
-            name
-            displayFinancialStatus
-            displayFulfillmentStatus
-            createdAt
-            totalPriceSet {
-              shopMoney { amount currencyCode }
-            }
-            lineItems(first: 10) {
-              edges {
-                node {
-                  title
-                  quantity
-                  variant {
+    query getCustomerOrder($customerId: ID!, $query: String!) {
+      customer(id: $customerId) {
+        orders(first: 1, query: $query) {
+          edges {
+            node {
+              name
+              displayFinancialStatus
+              displayFulfillmentStatus
+              createdAt
+              totalPriceSet {
+                shopMoney { amount currencyCode }
+              }
+              lineItems(first: 10) {
+                edges {
+                  node {
                     title
-                    price
+                    quantity
+                    variant {
+                      title
+                      price
+                    }
                   }
                 }
               }
-            }
-            fulfillments(first: 3) {
-              trackingInfo(first: 1) {
-                number
-                url
+              fulfillments(first: 3) {
+                trackingInfo(first: 1) {
+                  number
+                  url
+                }
+                status
+                createdAt
               }
-              status
-              createdAt
-            }
-            shippingAddress {
-              province
-              city
+              shippingAddress {
+                province
+                city
+              }
             }
           }
         }
@@ -260,14 +351,19 @@ export async function getOrderDetail(
   try {
     // 注文番号のフォーマット統一（#なしの数字のみに）
     const cleanNumber = orderNumber.replace(/^#/, "");
-    const data = await shopifyAdminQuery(
+    const data = await adminQuery(
       query,
-      { query: `name:#${cleanNumber}` },
+      {
+        customerId: `gid://shopify/Customer/${callerCustomerId}`,
+        query: `name:#${cleanNumber}`,
+      },
       env,
     );
 
-    const orders = data.orders as {
-      edges: Array<{
+    // [SEC-A] customer 配下の orders のみを対象にする（他顧客の注文は構造上取得され得ない）。
+    const customer = data.customer as {
+      orders: {
+        edges: Array<{
         node: {
           name: string;
           displayFinancialStatus: string;
@@ -293,13 +389,14 @@ export async function getOrderDetail(
           shippingAddress: { province: string; city: string } | null;
         };
       }>;
-    };
+      };
+    } | null;
 
-    if (!orders?.edges?.length) {
+    if (!customer?.orders?.edges?.length) {
       return { text: `注文番号 #${cleanNumber} は見つかりませんでした。番号をもう一度ご確認ください。` };
     }
 
-    const o = orders.edges[0].node;
+    const o = customer.orders.edges[0].node;
     const financialStatus = formatFinancialStatus(o.displayFinancialStatus);
     const fulfillmentStatus = formatFulfillmentStatus(o.displayFulfillmentStatus);
     const createdAt = new Date(o.createdAt).toLocaleDateString("ja-JP");

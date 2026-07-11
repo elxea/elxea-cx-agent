@@ -61,13 +61,13 @@ const LOOKUP_ORDERS_TOOL: Anthropic.Tool = {
 const ORDER_DETAIL_TOOL: Anthropic.Tool = {
   name: "get_order_detail",
   description:
-    "注文番号を指定して特定の注文の詳細情報（商品一覧、配送状況、追跡番号）を取得します。",
+    "お客様ご自身の注文番号を指定して、その注文（本人の注文のみ）の詳細情報（商品一覧、配送状況、追跡番号）を取得します。アカウント連携済みの本人の注文だけが対象で、他人の注文や未連携ユーザーの照会はできません（その場合は連携をご案内します）。",
   input_schema: {
     type: "object" as const,
     properties: {
       order_number: {
         type: "string",
-        description: "注文番号（例: '1234' または '#1234'）",
+        description: "お客様ご自身の注文番号（例: '1234' または '#1234'）",
       },
     },
     required: ["order_number"],

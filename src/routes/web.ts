@@ -25,6 +25,7 @@ import {
   resolveUnifiedUserId,
   resolveWithShopifyCustomerId,
 } from "../lib/identity";
+import { isValidSyncApiKey } from "../lib/sync-auth";
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
@@ -32,6 +33,40 @@ import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
 const MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * [SEC-B] リクエストが「サーバ経由（信頼済み）」かどうかを判定する。
+ *
+ * ブラウザは秘密値（SYNC_API_SECRET）を保持できないため、ブラウザから直接叩かれた
+ * リクエストは常に false になる。X-API-Key が SYNC_API_SECRET と一致する
+ * サーバ間呼び出し（認証済みの web-app サーバ等）だけが true になる。
+ *
+ * この判定を通ったときだけ、リクエストが自己申告する shopify_customer_id を
+ * 「認証済み identity」として信頼する。ブラウザ自己申告の customer_id は
+ * なりすまし（他人の customer_id を送るだけで他人になりすませる）を防ぐため無視し、
+ * 匿名 web セッション（session_id）として扱う（fail-closed）。
+ */
+export function isTrustedServerCaller(c: Context<{ Bindings: Env }>): boolean {
+  const apiKey = c.req.header("X-API-Key");
+  const secret = (c.env as { SYNC_API_SECRET?: string }).SYNC_API_SECRET;
+  return isValidSyncApiKey(apiKey, secret);
+}
+
+/**
+ * [SEC-B] 行動イベント等で使う「実効ユーザーID」を決める純粋関数。
+ *
+ * サーバ経由（trusted=true）で shopify_customer_id が付いているときだけ
+ * それを identity として採用し、それ以外は必ず session_id を使う。
+ * ブラウザ自己申告（trusted=false）の customer_id は他人へのなりすまし・
+ * 行動データ汚染を防ぐため一切採用しない。
+ */
+export function effectiveEventUserId(
+  trusted: boolean,
+  shopifyCustomerId: string | null | undefined,
+  sessionId: string,
+): string {
+  return trusted && shopifyCustomerId ? shopifyCustomerId : sessionId;
+}
 
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
 const TIMEOUT_PRE_PARALLEL_MS = 10_000;
@@ -100,9 +135,13 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   let embedding: number[];
   let identityIsLinked = false;
 
+  // [SEC-B] shopify_customer_id は「サーバ経由（X-API-Key 検証済み）」のときだけ信頼する。
+  // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 web セッション扱いにする。
+  const trustedCustomerId = isTrustedServerCaller(c) ? shopify_customer_id : undefined;
+
   try {
-    const identity = shopify_customer_id
-      ? await resolveWithShopifyCustomerId(supabase, shopify_customer_id, sessionId)
+    const identity = trustedCustomerId
+      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
     identityIsLinked = identity.isLinked;
@@ -293,6 +332,10 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
     userIds.push(sessionId as string);
   }
 
+  // [SEC-B] クロスチャネル（LINE 側・別 session）履歴を返してよいか。
+  // 既定は isLinked に従うが、所有関係が確認できない場合は下で false に落とす。
+  let crossChannelAllowed = identity.isLinked;
+
   if (identity.isLinked) {
     const { data: identityData } = await supabase
       .from("user_identity_map")
@@ -300,48 +343,66 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
       .eq("unified_user_id", identity.unifiedUserId)
       .single();
 
-    if (identityData?.line_user_id && !userIds.includes(identityData.line_user_id)) {
-      userIds.push(identityData.line_user_id);
-    }
-    if (identityData?.web_session_id && !userIds.includes(identityData.web_session_id)) {
-      userIds.push(identityData.web_session_id);
-    }
-    if (identityData?.shopify_customer_id && !userIds.includes(identityData.shopify_customer_id)) {
-      userIds.push(identityData.shopify_customer_id);
-    }
+    // [SEC-B] クロスチャネル履歴（LINE 側や別 session の履歴）を返す前に、
+    // 「この session_id が本当にこの unified_user の登録 web セッションか」を検証する。
+    // resolveUnifiedUserId は web_session_id === session_id でのみ isLinked を返すため
+    // 通常はここで一致するが、多層防御として明示的に確認し、
+    // 一致しない（=所有関係が確認できない）場合はクロスチャネル拡張を行わず、
+    // 自 session の web 履歴のみに限定する（未検証でクロスチャネルを返さない）。
+    const ownsIdentity =
+      isTrustedServerCaller(c) || identityData?.web_session_id === sessionId;
 
-    // 過去の異なる session_id で保存された Web メッセージも取得するため、
-    // conversations テーブルから該当 user_id の過去の web session を収集
-    const { data: pastSessions } = await supabase
-      .from("conversations")
-      .select("user_id")
-      .in("user_id", userIds)
-      .eq("channel", "web")
-      .limit(1);
-    // pastSessions が空 = 現在の userIds では web メッセージが見つからない場合、
-    // unified_user_id に紐づく全 conversations の user_id を幅広く取得
-    if (!pastSessions || pastSessions.length === 0) {
-      const { data: allWebMessages } = await supabase
+    // 所有関係が確認できないときはクロスチャネル拡張を一切行わず、
+    // userIds は自 session（sessionId）のみに保つ（= 自 session の web 履歴だけを返す）。
+    if (ownsIdentity) {
+      if (identityData?.line_user_id && !userIds.includes(identityData.line_user_id)) {
+        userIds.push(identityData.line_user_id);
+      }
+      if (identityData?.web_session_id && !userIds.includes(identityData.web_session_id)) {
+        userIds.push(identityData.web_session_id);
+      }
+      if (identityData?.shopify_customer_id && !userIds.includes(identityData.shopify_customer_id)) {
+        userIds.push(identityData.shopify_customer_id);
+      }
+
+      // 過去の異なる session_id で保存された Web メッセージも取得するため、
+      // conversations テーブルから該当 user_id の過去の web session を収集
+      const { data: pastSessions } = await supabase
         .from("conversations")
         .select("user_id")
+        .in("user_id", userIds)
         .eq("channel", "web")
-        .in("user_id", [
-          ...(identityData ? [
-            identityData.unified_user_id,
-            identityData.line_user_id,
-            identityData.web_session_id,
-            identityData.shopify_customer_id,
-          ].filter((id): id is string => !!id) : []),
-          sessionId as string,
-        ])
-        .limit(50);
-      if (allWebMessages) {
-        for (const row of allWebMessages) {
-          if (!userIds.includes(row.user_id)) {
-            userIds.push(row.user_id);
+        .limit(1);
+      // pastSessions が空 = 現在の userIds では web メッセージが見つからない場合、
+      // unified_user_id に紐づく全 conversations の user_id を幅広く取得
+      if (!pastSessions || pastSessions.length === 0) {
+        const { data: allWebMessages } = await supabase
+          .from("conversations")
+          .select("user_id")
+          .eq("channel", "web")
+          .in("user_id", [
+            ...(identityData ? [
+              identityData.unified_user_id,
+              identityData.line_user_id,
+              identityData.web_session_id,
+              identityData.shopify_customer_id,
+            ].filter((id): id is string => !!id) : []),
+            sessionId as string,
+          ])
+          .limit(50);
+        if (allWebMessages) {
+          for (const row of allWebMessages) {
+            if (!userIds.includes(row.user_id)) {
+              userIds.push(row.user_id);
+            }
           }
         }
       }
+    }
+
+    // 所有未確認のときは cross-channel を出さないよう、以降の channel フィルタも web に固定する。
+    if (!ownsIdentity) {
+      crossChannelAllowed = false;
     }
   }
 
@@ -369,7 +430,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
         keyword: keyword || null,
         date_from: dateFrom ? new Date(dateFrom).toISOString() : null,
         date_to: dateTo ? new Date(dateTo).toISOString() : null,
-        channel_filter: identity.isLinked ? (channelFilter ?? null) : (channelFilter ?? "web"),
+        channel_filter: crossChannelAllowed ? (channelFilter ?? null) : (channelFilter ?? "web"),
         result_limit: limit,
         result_offset: offset,
       },
@@ -379,7 +440,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
       console.error("search_conversations RPC failed, falling back to basic query:", rpcError);
       // フォールバック: 基本クエリ（RPC 未作成の場合）
       const fallbackResult = await basicHistoryQuery(
-        supabase, userIds, identity.isLinked, channelFilter, limit, offset,
+        supabase, userIds, crossChannelAllowed, channelFilter, limit, offset,
       );
       data = fallbackResult.data;
       error = fallbackResult.error;
@@ -390,7 +451,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
     }
   } else {
     // 基本クエリ（従来互換 + pagination 対応）
-    const effectiveChannel = identity.isLinked ? channelFilter : (channelFilter ?? "web");
+    const effectiveChannel = crossChannelAllowed ? channelFilter : (channelFilter ?? "web");
 
     let query = supabase
       .from("conversations")
@@ -430,7 +491,7 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
 
   return c.json({
     messages,
-    is_linked: identity.isLinked,
+    is_linked: crossChannelAllowed,
     total_count: totalCount,
     limit,
     offset,
@@ -609,9 +670,12 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
     const base64 = btoa(binary);
     const mediaType = imageFile.type === "image/png" ? "image/png" as const : "image/jpeg" as const;
 
+    // [SEC-B] shopify_customer_id はサーバ経由（X-API-Key 検証済み）のときだけ信頼する。
+    const trustedCustomerId = isTrustedServerCaller(c) ? shopifyCustomerId : null;
+
     // Identity 解決
-    const identity = shopifyCustomerId
-      ? await resolveWithShopifyCustomerId(supabase, shopifyCustomerId, sessionId as string)
+    const identity = trustedCustomerId
+      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId as string)
       : await resolveUnifiedUserId(supabase, sessionId as string, "web");
     const effectiveUserId = identity.unifiedUserId;
 
@@ -764,7 +828,13 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
 
   // fire-and-forget で記録（レスポンスをブロックしない）
   const supabase = createSupabaseClient(c.env);
-  const userId = shopify_customer_id ?? (session_id as string);
+  // [SEC-B] shopify_customer_id はサーバ経由（X-API-Key 検証済み）のときだけ identity として採用する。
+  // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 session_id に紐付ける。
+  const userId = effectiveEventUserId(
+    isTrustedServerCaller(c),
+    shopify_customer_id,
+    session_id as string,
+  );
 
   c.executionCtx.waitUntil(
     recordBehaviorEvent(

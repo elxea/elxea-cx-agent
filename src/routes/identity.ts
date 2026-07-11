@@ -16,6 +16,7 @@ import {
   linkLineByEmail,
 } from "../lib/identity";
 import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
+import { requireSyncApiKey } from "../lib/sync-auth";
 
 /**
  * POST /api/identity/link-line
@@ -41,11 +42,9 @@ import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
  * }
  */
 export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
-  // C1: Verify shared secret (SYNC_API_SECRET) via X-API-Key header
-  const apiKey = c.req.header("X-API-Key");
-  if (!c.env.SYNC_API_SECRET || apiKey !== c.env.SYNC_API_SECRET) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
+  // C1: Verify shared secret (SYNC_API_SECRET) via X-API-Key header（fail-closed）
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
 
   let body: {
     line_user_id?: string;
@@ -122,6 +121,11 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
  * }
  */
 export async function identityLinkHandler(c: Context<{ Bindings: Env }>) {
+  // C: Verify shared secret (SYNC_API_SECRET) via X-API-Key header（fail-closed）。
+  // link-line と同じ認証を要求し、無認証での identity 束縛（なりすまし）を塞ぐ。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
   let body: {
     session_id?: string;
     shopify_customer_id?: string;

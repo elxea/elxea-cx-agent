@@ -351,17 +351,16 @@ export async function resolveWithShopifyCustomerId(
     }
 
     if (existing?.unified_user_id) {
-      // 2. 既存レコードあり — web_session_id を更新（別セッションからのログインに対応）
-      if (existing.web_session_id !== sessionId) {
-        await supabase
-          .from("user_identity_map")
-          .update({ web_session_id: sessionId })
-          .eq("shopify_customer_id", shopifyCustomerId);
-        console.log(
-          `[identity] Updated web_session_id for Shopify customer ${shopifyCustomerId}`,
-        );
-      }
-
+      // 2. 既存レコードあり。
+      //
+      //    [SEC-B] web_session_id は「上書きしない」。
+      //    以前はここで web_session_id = sessionId に無条件上書きしていたが、
+      //    これはアカウント乗っ取り経路になっていた: 攻撃者が被害者の
+      //    shopify_customer_id と攻撃者自身の session_id を送ると、被害者の
+      //    unified_user に攻撃者の session_id が再束縛され、以後 session_id だけで
+      //    被害者のクロスチャネル履歴・会話に到達できてしまう。
+      //    本関数は X-API-Key 検証済み（サーバ経由）でのみ呼ばれる設計に変更したが、
+      //    多層防御として再束縛そのものを廃止する（既存の束縛を壊さない）。
       return {
         unifiedUserId: existing.unified_user_id,
         originalUserId: sessionId,

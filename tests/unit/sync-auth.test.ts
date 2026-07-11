@@ -1,0 +1,187 @@
+/**
+ * Unit Tests -- sync-auth（X-API-Key / SYNC_API_SECRET 認証ガード）
+ *
+ * server-to-server エンドポイント（identity/link・identity/link-line・survey）に
+ * 付与した X-API-Key 認証を検証する。実 Supabase / 実ネットワークには触れない。
+ * 認証ガードは各ハンドラの冒頭で発火し、Supabase 到達より前に return するため、
+ * mock Context だけで「無認証は 401 / 正しい key は認証を通過」を検証できる。
+ *
+ * 使用方法:
+ *   npx tsx tests/unit/sync-auth.test.ts
+ */
+
+import type { Context } from "hono";
+import type { Env } from "../../src/index";
+import { isValidSyncApiKey } from "../../src/lib/sync-auth";
+import {
+  identityLinkHandler,
+  identityLinkLineHandler,
+} from "../../src/routes/identity";
+import { surveyHandler } from "../../src/routes/survey";
+
+// ---------------------------------------------------------------------------
+// async 対応テストハーネス（外部依存なし）
+// ---------------------------------------------------------------------------
+
+let totalTests = 0;
+let passedTests = 0;
+let failedTests = 0;
+const failures: Array<{ name: string; error: string }> = [];
+const queue: Array<{ name: string; fn: () => void | Promise<void> }> = [];
+
+function describe(suiteName: string, fn: () => void) {
+  queue.push({ name: `--- ${suiteName} ---`, fn: () => {} });
+  fn();
+}
+
+function it(testName: string, fn: () => void | Promise<void>) {
+  queue.push({ name: testName, fn });
+}
+
+function assertEqual<T>(actual: T, expected: T, label = "") {
+  if (actual !== expected) {
+    throw new Error(
+      `${label ? label + ": " : ""}expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+    );
+  }
+}
+
+function assertTrue(value: boolean, label = "") {
+  if (!value) throw new Error(`${label ? label + ": " : ""}expected true`);
+}
+
+// ---------------------------------------------------------------------------
+// mock Context
+//
+// ハンドラが使うのは c.req.header / c.req.json / c.env / c.json のみ（認証段階）。
+// c.json(obj, status) は { __status, __body } を返すスタブにして status を検証する。
+// ---------------------------------------------------------------------------
+
+const TEST_SECRET = "test-sync-secret-abc123";
+
+type MockResult = { __status: number; __body: unknown };
+
+function makeCtx(opts: {
+  apiKey?: string;
+  body?: unknown;
+  secret?: string; // env.SYNC_API_SECRET。undefined なら未設定を再現
+}): Context<{ Bindings: Env }> {
+  return {
+    req: {
+      header: (name: string) =>
+        name === "X-API-Key" ? opts.apiKey : undefined,
+      json: async () => opts.body ?? {},
+    },
+    env: { SYNC_API_SECRET: opts.secret } as unknown as Env,
+    json: (body: unknown, status = 200): MockResult => ({
+      __status: status,
+      __body: body,
+    }),
+  } as unknown as Context<{ Bindings: Env }>;
+}
+
+function statusOf(res: unknown): number {
+  return (res as MockResult).__status;
+}
+
+// ハンドラごとに「無認証パターンで 401 / 正しい key で認証通過（非 401）」を検証する。
+// 正しい key の場合、認証は通過し、後段の body バリデーションで 400 になる
+// （空 body を渡すため）。401 でないこと = 認証を通過したこと、を確認する。
+type Handler = (c: Context<{ Bindings: Env }>) => Promise<unknown>;
+
+function authContractFor(name: string, handler: Handler) {
+  describe(`${name} -- X-API-Key auth contract`, () => {
+    it("X-API-Key 無し → 401", async () => {
+      const res = await handler(makeCtx({ secret: TEST_SECRET }));
+      assertEqual(statusOf(res), 401, "missing key");
+    });
+
+    it("X-API-Key 不一致 → 401", async () => {
+      const res = await handler(
+        makeCtx({ apiKey: "wrong-key", secret: TEST_SECRET }),
+      );
+      assertEqual(statusOf(res), 401, "mismatched key");
+    });
+
+    it("SYNC_API_SECRET 未設定 → 正しそうな key でも 401（fail-closed）", async () => {
+      const res = await handler(
+        makeCtx({ apiKey: TEST_SECRET, secret: undefined }),
+      );
+      assertEqual(statusOf(res), 401, "fail-closed when secret unset");
+    });
+
+    it("正しい X-API-Key → 認証通過（401 ではない）", async () => {
+      const res = await handler(
+        makeCtx({ apiKey: TEST_SECRET, secret: TEST_SECRET, body: {} }),
+      );
+      assertTrue(statusOf(res) !== 401, "valid key must pass auth gate");
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 純粋関数 isValidSyncApiKey
+// ---------------------------------------------------------------------------
+
+describe("isValidSyncApiKey (pure)", () => {
+  it("secret 未設定 → false（fail-closed）", () => {
+    assertEqual(isValidSyncApiKey("anything", undefined), false);
+    assertEqual(isValidSyncApiKey("anything", ""), false);
+  });
+
+  it("providedKey 未指定 → false", () => {
+    assertEqual(isValidSyncApiKey(undefined, TEST_SECRET), false);
+    assertEqual(isValidSyncApiKey(null, TEST_SECRET), false);
+    assertEqual(isValidSyncApiKey("", TEST_SECRET), false);
+  });
+
+  it("不一致 → false", () => {
+    assertEqual(isValidSyncApiKey("nope", TEST_SECRET), false);
+  });
+
+  it("一致 → true", () => {
+    assertEqual(isValidSyncApiKey(TEST_SECRET, TEST_SECRET), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 各エンドポイントの認証コントラクト
+// ---------------------------------------------------------------------------
+
+authContractFor("POST /api/identity/link", identityLinkHandler);
+authContractFor("POST /api/identity/link-line", identityLinkLineHandler);
+authContractFor("POST /api/survey", surveyHandler);
+
+// ---------------------------------------------------------------------------
+// ランナー（直列 await）
+// ---------------------------------------------------------------------------
+
+(async () => {
+  for (const t of queue) {
+    if (t.name.startsWith("--- ")) {
+      console.log(`\n${t.name}`);
+      continue;
+    }
+    totalTests++;
+    try {
+      await t.fn();
+      passedTests++;
+      console.log(`  [PASS] ${t.name}`);
+    } catch (err) {
+      failedTests++;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  [FAIL] ${t.name}: ${msg}`);
+      failures.push({ name: t.name, error: msg });
+    }
+  }
+
+  console.log("\n" + "=".repeat(60));
+  console.log("sync-auth Test Results");
+  console.log("=".repeat(60));
+  console.log(`Total: ${totalTests}, Passed: ${passedTests}, Failed: ${failedTests}`);
+  if (failures.length > 0) {
+    console.log("\nFailed tests:");
+    for (const f of failures) console.log(`  - ${f.name}: ${f.error}`);
+  }
+  process.exit(failedTests > 0 ? 1 : 0);
+})();

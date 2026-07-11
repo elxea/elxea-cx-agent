@@ -1006,7 +1006,11 @@ async function executeTool(
 
       case "get_order_detail": {
         const input = toolUse.input as { order_number: string };
-        const orderResult = await getOrderDetail(input.order_number, env);
+        // [SEC-A] 呼び出しユーザー（userId/channel）を渡し、本人の注文だけに限定する。
+        const orderResult = await getOrderDetail(input.order_number, env, {
+          userId,
+          channel,
+        });
         return { text: orderResult.text, orderDetail: orderResult };
       }
 
