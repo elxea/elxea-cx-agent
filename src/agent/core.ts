@@ -373,16 +373,20 @@ export async function runAgent(
     const response = await withTimeout(
       client.messages.create({
         model: replyModel(env),
-        max_tokens: 1024,
+        max_tokens: 768,
         system: [
+          // 第1ブロック = 完全に不変な SYSTEM_PROMPT のみ。ここに cache_control を置くことで
+          // tools + SYSTEM_PROMPT (計 ~7,000 tokens) を全リクエスト・全ペルソナ横断で共有キャッシュする。
+          // personaFragment はペルソナ (serenity/explorer/sensory/未判定) ごとに変わるため
+          // キャッシュ断片化を避けて第2ブロック (可変) 側へ移動する。
           {
             type: "text" as const,
-            text: SYSTEM_PROMPT + personaFragment,
+            text: SYSTEM_PROMPT,
             cache_control: { type: "ephemeral" as const },
           },
           {
             type: "text" as const,
-            text: languageReminder + customerContext + knowledgeContext,
+            text: personaFragment + languageReminder + customerContext + knowledgeContext,
           },
         ],
         tools: AGENT_TOOLS.map((tool, i) =>
@@ -747,10 +751,12 @@ export async function runAgentStreaming(
 
   const apiParams = {
     model: replyModel(env),
-    max_tokens: 1024,
+    max_tokens: 768,
     system: [
-      { type: "text" as const, text: SYSTEM_PROMPT + personaFragment, cache_control: { type: "ephemeral" as const } },
-      { type: "text" as const, text: languageReminder + customerContext + knowledgeContext },
+      // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
+      // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
+      { type: "text" as const, text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" as const } },
+      { type: "text" as const, text: personaFragment + languageReminder + customerContext + knowledgeContext },
     ],
     tools: AGENT_TOOLS.map((tool, i) =>
       i === AGENT_TOOLS.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
