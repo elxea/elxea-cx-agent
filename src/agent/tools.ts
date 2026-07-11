@@ -102,7 +102,7 @@ const RECOMMEND_PRODUCT_TOOL: Anthropic.Tool = {
             product_url: {
               type: "string",
               description:
-                "商品ページURL（elxea.jpのURL。不明な場合は https://elxea.jp を使用）",
+                "商品ページURL（elxea.com のURL。不明な場合は https://elxea.com/ja/products を使用）",
             },
           },
           required: ["name", "description", "price", "product_url"],
