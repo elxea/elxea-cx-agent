@@ -1,9 +1,21 @@
 /**
  * LINE リッチメニュー設定スクリプト。
  *
- * 6 分割メニュー:
- * | 商品を探す | 注文確認   | お問い合わせ |
- * | おすすめ   | 記事を読む | ヘルプ       |
+ * 6 分割メニュー（構成設計 2026-07-11 準拠 / pull 型「茶室の入口」）:
+ * | ① 淹れ方を知る | ② つくり手・産地の物語 | ③ 好み診断 |
+ * | ④ 相談する     | ⑤ 季節の便り・読みもの | ⑥ 定期便・注文照会 |
+ *
+ * アクション方針（オーナー確定 2026-07-11）:
+ * - ページ遷移系（②⑤）は elxea-web-app の実在ルートへ。正規ドメインは
+ *   https://elxea.com（web-app の sitemap.ts / robots.ts / layout hreflang が SoT）、
+ *   ロケールは /ja（i18n/config.ts defaultLocale = "ja"）。旧 elxea.jp は実在せず廃止。
+ * - LINE 内対話系（③好み診断・④相談・⑥注文照会）は Web に飛ばさず、message アクションで
+ *   ユーザーの自然発話を送信し、CX エージェント（webhook → runAgent）との会話を自然に開始する。
+ *   message イベントは src/routes/line.ts の handleMessage → handleTextMessage → runAgent で処理される。
+ *   postback ハンドラは未実装（processEvents は message/follow/unfollow のみ）のため message を採用。
+ * - ①淹れ方を知る は専用の「淹れ方」ページが web-app に未実在（brew/how-to 単独ページ無し・
+ *   淹れ方ガイドは tea-menu 各詳細ページ内のセクションのみ）。404 回避のため準備中扱いとし、
+ *   淹れ方について CX エージェントと対話が始まる message アクションにする。
  *
  * 実行: pnpm setup-rich-menu
  *
@@ -14,6 +26,9 @@
  */
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
+
+/** 正規サイト（web-app の SoT）— ドメイン + ロケール */
+const SITE_URL = "https://elxea.com/ja";
 
 const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 if (!token) {
@@ -36,39 +51,59 @@ const richMenuBody = {
   name: "elxea メインメニュー",
   chatBarText: "メニュー",
   areas: [
-    // 上段左: 商品を探す
+    // 上段左: ① 淹れ方を知る（準備中: 専用ページ未実在 → CX 対話で 404 回避）
     {
       bounds: { x: 0, y: 0, width: 833, height: 843 },
-      action: { type: "message", text: "おすすめの商品を教えてください" },
+      action: {
+        type: "message",
+        label: "淹れ方を知る",
+        text: "お茶のおいしい淹れ方を教えてください",
+      },
     },
-    // 上段中: 注文確認
+    // 上段中: ② つくり手・産地の物語（実在ページ /ja/farmers へ遷移）
     {
       bounds: { x: 833, y: 0, width: 834, height: 843 },
-      action: { type: "message", text: "注文状況を確認したいです" },
+      action: {
+        type: "uri",
+        label: "つくり手・産地の物語",
+        uri: `${SITE_URL}/farmers`,
+      },
     },
-    // 上段右: お問い合わせ
+    // 上段右: ③ 好み診断（LINE 内で CX 対話を開始）
     {
       bounds: { x: 1667, y: 0, width: 833, height: 843 },
-      action: { type: "message", text: "スタッフに相談したいです" },
+      action: {
+        type: "message",
+        label: "好み診断",
+        text: "好みに合うお茶を診断してほしいです",
+      },
     },
-    // 下段左: おすすめ
+    // 下段左: ④ 相談する（LINE 内で CX 対話を開始）
     {
       bounds: { x: 0, y: 843, width: 833, height: 843 },
-      action: { type: "message", text: "今おすすめのお茶はありますか？" },
+      action: {
+        type: "message",
+        label: "相談する",
+        text: "相談したいことがあります",
+      },
     },
-    // 下段中: 記事を読む
+    // 下段中: ⑤ 季節の便り・読みもの（実在ページ /ja/journal へ遷移）
     {
       bounds: { x: 833, y: 843, width: 834, height: 843 },
       action: {
         type: "uri",
-        uri: "https://elxea.jp/journal",
-        label: "記事を読む",
+        label: "季節の便り・読みもの",
+        uri: `${SITE_URL}/journal`,
       },
     },
-    // 下段右: ヘルプ
+    // 下段右: ⑥ 定期便・注文照会（注文照会は問い合わせ系 → LINE 内で CX 対話を開始）
     {
       bounds: { x: 1667, y: 843, width: 833, height: 843 },
-      action: { type: "message", text: "使い方を教えてください" },
+      action: {
+        type: "message",
+        label: "定期便・注文照会",
+        text: "最近の注文と定期便の状況を教えてください",
+      },
     },
   ],
 };
