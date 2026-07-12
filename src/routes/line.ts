@@ -890,12 +890,6 @@ async function handleTextMessage(
   // 空メッセージをスキップ
   if (!userMessage.trim()) return;
 
-  // 選択式お茶メニュー案内（タップ主体・状態レス・LLM 不使用）。
-  // 限定トリガー（入口発話 / tea:* トークン / 既知の 5 桁番号）のみ反応し、
-  // 無関係な発話は素通りさせて既存の AI 自由対話フローを一切壊さない。
-  const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env);
-  if (wasTeaMenu) return;
-
   // オンボーディング Quick Reply タップの処理
   const wasOnboarding = await handleOnboardingMessage(lineUserId, userMessage, env);
   if (wasOnboarding) return;
@@ -903,6 +897,16 @@ async function handleTextMessage(
   // フィードバックメッセージの処理（Quick Reply タップ or コメント入力）
   const wasFeedback = await handleFeedbackMessage(lineUserId, userMessage, env);
   if (wasFeedback) return;
+
+  // 選択式お茶メニュー案内（タップ主体・状態レス・LLM 不使用）。
+  // 限定トリガー（入口発話 / tea:* トークン / 既知の 5 桁番号）のみ反応し、
+  // 無関係な発話は素通りさせて既存の AI 自由対話フローを一切壊さない。
+  // ⚠ 順序（QA 回帰修正 2026-07-12）: onboarding / feedback の pending-state
+  //   ハンドラより後に置く。改善希望タップ後の「次メッセージ＝コメント」に
+  //   5 桁番号や入口語が含まれても tea-menu が横取りしないようにするため
+  //   （それらの pending トークンは tea トリガーと衝突しないため後置は安全）。
+  const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env);
+  if (wasTeaMenu) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;

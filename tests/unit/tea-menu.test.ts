@@ -11,6 +11,7 @@
  * 使用方法: npx tsx tests/unit/tea-menu.test.ts
  */
 
+import { readFileSync } from "node:fs";
 import {
   parseTeaAction,
   planTeaFlow,
@@ -196,6 +197,33 @@ it("全メッセージの quick reply が 13 以下", () => {
     assert(c !== null, "planned");
     for (const m of c!.messages) assert(m.quickReplies.length <= QR_MAX, `qr<=13 (${m.quickReplies.length})`);
   }
+});
+
+console.log("\n--- 回帰: feedback pending 中は tea-menu が横取りしない（インターセプタ順序） ---");
+
+it("handleTextMessage は onboarding / feedback を tea-menu より先に呼ぶ", () => {
+  // pending-state を持つ onboarding / feedback ハンドラが tea-menu より前に配線されて
+  // いることをソース順序で固定する。改善希望タップ後のコメント（5桁や入口語を含みうる）が
+  // tea-menu に横取りされて message_feedback 記録 / Slack 通知を失う回帰を防ぐ。
+  const src = readFileSync(new URL("../../src/routes/line.ts", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("async function handleTextMessage"));
+  const iOnboarding = fn.indexOf("handleOnboardingMessage(lineUserId");
+  const iFeedback = fn.indexOf("handleFeedbackMessage(lineUserId");
+  const iTea = fn.indexOf("handleTeaMenuFlow(lineUserId");
+  assert(iOnboarding > -1 && iFeedback > -1 && iTea > -1, "all three interceptors present");
+  assert(iOnboarding < iTea, `onboarding(${iOnboarding}) must precede tea-menu(${iTea})`);
+  assert(iFeedback < iTea, `feedback(${iFeedback}) must precede tea-menu(${iTea})`);
+});
+
+it("feedback pending コメントに5桁が混じっても tea トリガーと衝突しない（解析上の独立性）", () => {
+  // フィードバックのコメントは自由文。5桁を含む/含まないに関わらず、tea-menu は
+  // 「先に feedback が pending を消費する」順序で守られる。ここでは、コメント本文が
+  // tea-menu の内部トークン（お茶を選ぶ｜ / 淹れ方｜ 等）と一致し得ないことを確認する
+  // （feedback pending トークン FEEDBACK_* / onboarding: とも別空間）。
+  assertEqual(parseTeaAction("味が薄いと感じました"), null, "free comment → not tea");
+  // 5桁のみ / 既知5桁を含むコメントは tea として解釈され得るが、順序保証（上のテスト）で
+  // feedback pending が先に消費するため横取りされない。設計の前提を明示。
+  assert(parseTeaAction("11301") !== null, "bare 5-digit is a tea action (guarded by ordering)");
 });
 
 console.log("\n" + "=".repeat(60));
