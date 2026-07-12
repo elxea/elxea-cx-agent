@@ -18,6 +18,7 @@ import {
   searchKnowledgeHybrid,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
+import { handleTeaMenuFlow } from "../lib/tea-menu";
 import {
   getFirestoreEnv,
   updateCustomerProfile,
@@ -888,6 +889,12 @@ async function handleTextMessage(
 ): Promise<void> {
   // 空メッセージをスキップ
   if (!userMessage.trim()) return;
+
+  // 選択式お茶メニュー案内（タップ主体・状態レス・LLM 不使用）。
+  // 限定トリガー（入口発話 / tea:* トークン / 既知の 5 桁番号）のみ反応し、
+  // 無関係な発話は素通りさせて既存の AI 自由対話フローを一切壊さない。
+  const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env);
+  if (wasTeaMenu) return;
 
   // オンボーディング Quick Reply タップの処理
   const wasOnboarding = await handleOnboardingMessage(lineUserId, userMessage, env);
