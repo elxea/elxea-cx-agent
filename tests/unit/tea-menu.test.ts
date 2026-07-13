@@ -176,6 +176,35 @@ it("buildStoryAnswer は物語なしで準備中フォールバック", () => {
   assert(m.text.includes("準備中"), "準備中 fallback");
 });
 
+console.log("\n--- (P0-3) 感想ひとこと（product_ratings 入口） ---");
+
+it("カードに 💬この一杯の感想 ボタンが常設される", () => {
+  const t = tea("40101", "青茶", "香駿の和烏龍茶");
+  const m = buildTeaCard(t);
+  assert(m.quickReplies.some((q) => q.action.label.includes("感想")), "rating button present");
+  assert(m.quickReplies.some((q) => q.action.text === "感想｜40101"), "rate token");
+});
+it("感想｜40101 → 2択（おいしかった / 好みと少し違った）を提示", () => {
+  const teas = [tea("40101", "青茶", "香駿の和烏龍茶")];
+  const plan = planTeaFlow("感想｜40101", teas);
+  assert(!!plan, "plan exists");
+  const texts = plan!.messages[0].quickReplies.map((q) => q.action.text);
+  assert(texts.includes("感想よい｜40101"), "good choice");
+  assert(texts.includes("感想いまいち｜40101"), "bad choice");
+});
+it("感想よい / 感想いまいち → お礼メッセージ（記録は handler 側の副作用）", () => {
+  const teas = [tea("40101", "青茶", "香駿の和烏龍茶")];
+  const good = planTeaFlow("感想よい｜40101", teas);
+  const bad = planTeaFlow("感想いまいち｜40101", teas);
+  assert(!!good && good.messages[0].text.includes("ありがとう"), "thanks (good)");
+  assert(!!bad && bad.messages[0].text.includes("ありがとう"), "thanks (bad)");
+});
+it("感想トークンの解析: rate / rate-good / rate-bad を正しく区別（衝突なし）", () => {
+  assertEqual(parseTeaAction("感想｜40101")?.kind, "rate", "rate");
+  assertEqual(parseTeaAction("感想よい｜40101")?.kind, "rate-good", "rate-good");
+  assertEqual(parseTeaAction("感想いまいち｜40101")?.kind, "rate-bad", "rate-bad");
+});
+
 console.log("\n--- (P0-1) tea.* flow_events 導出 ---");
 
 it("teaFlowEvents: entry → tea.list_view(page1)", () => {

@@ -28,6 +28,7 @@ import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { logFlowEvent, type FlowEventInput } from "./flow-events";
+import { recordProductRating, type RatingValue } from "./product-ratings";
 
 // ---------------------------------------------------------------------------
 // データモデル
@@ -107,6 +108,9 @@ type Action =
   | { kind: "flavor"; number: string }
   | { kind: "enjoy"; number: string }
   | { kind: "story"; number: string } // P0-9: つくり手（農家）の物語
+  | { kind: "rate"; number: string } // P0-3: 感想ひとこと（2択提示）
+  | { kind: "rate-good"; number: string } // P0-3: おいしかった（+1）
+  | { kind: "rate-bad"; number: string } // P0-3: 好みと少し違った（-1）
   | { kind: "number-exact"; number: string } // 5 桁のみのメッセージ
   | { kind: "number-loose"; number: string }; // 5 桁を含む文中
 
@@ -118,6 +122,9 @@ const TOK = {
   flavor: "味と香り" + SEP, // 例: 味と香り｜11301
   enjoy: "楽しみ方" + SEP, // 例: 楽しみ方｜11301
   story: "つくり手の物語" + SEP, // P0-9・例: つくり手の物語｜11301
+  rate: "感想" + SEP, // P0-3・例: 感想｜11301（2択提示）
+  rateGood: "感想よい" + SEP, // P0-3・例: 感想よい｜11301
+  rateBad: "感想いまいち" + SEP, // P0-3・例: 感想いまいち｜11301
 } as const;
 
 /** 「別のお茶を見る／一覧に戻る」= 一覧 1 ページ目に戻る message テキスト。 */
@@ -166,6 +173,19 @@ export function parseTeaAction(raw: string): Action | null {
   if (t.startsWith(TOK.story)) {
     const n = firstFiveDigits(t);
     if (n) return { kind: "story", number: n };
+  }
+  // P0-3 感想: rateGood / rateBad を rate より先に判定（prefix の包含関係はないが明示順）。
+  if (t.startsWith(TOK.rateGood)) {
+    const n = firstFiveDigits(t);
+    if (n) return { kind: "rate-good", number: n };
+  }
+  if (t.startsWith(TOK.rateBad)) {
+    const n = firstFiveDigits(t);
+    if (n) return { kind: "rate-bad", number: n };
+  }
+  if (t.startsWith(TOK.rate)) {
+    const n = firstFiveDigits(t);
+    if (n) return { kind: "rate", number: n };
   }
 
   // 番号直指定（予備）
@@ -256,6 +276,8 @@ function cardItemQuickReplies(
   if (exclude !== "story" && tea.story.trim()) {
     items.push(qr("🌱 つくり手の物語", `${TOK.story}${tea.number}`));
   }
+  // P0-3 感想ひとこと: お茶カードに常設（設計 §B-5b）。押し売りしない 1 タップ入口。
+  items.push(qr("💬 この一杯の感想", `${TOK.rate}${tea.number}`));
   items.push(qr("🍃 別のお茶を見る", BACK_TO_LIST));
   return items;
 }
@@ -324,6 +346,31 @@ export function buildStoryAnswer(tea: TeaItem): OutMessage {
   return { text, quickReplies: cardItemQuickReplies(tea, "story") };
 }
 
+/**
+ * 💬 感想ひとこと（P0-3）: 2 択の quick reply を提示する（押し売りしない文言）。
+ * 「お口に合いましたか？」＋「おいしかった」「好みと少し違った」の 2 択（3 タップ原則内: カード+1）。
+ */
+export function buildRatePrompt(tea: TeaItem): OutMessage {
+  return {
+    text: `【${tea.name}（No.${tea.number}）】\nお口に合いましたか？ よければひとことだけ教えてください。`,
+    quickReplies: [
+      qr("おいしかった", `${TOK.rateGood}${tea.number}`),
+      qr("好みと少し違った", `${TOK.rateBad}${tea.number}`),
+      qr("🍃 別のお茶を見る", BACK_TO_LIST),
+    ],
+  };
+}
+
+/** 感想を受け取ったお礼（P0-3）。1 タップで完了 + 次のおすすめに活かす旨。 */
+export function buildRateThanks(tea: TeaItem): OutMessage {
+  return {
+    text:
+      `【${tea.name}（No.${tea.number}）】\n` +
+      "ありがとうございます。次のおすすめに活かしますね。",
+    quickReplies: cardItemQuickReplies(tea),
+  };
+}
+
 /** 番号が見つからないときの正直な案内（創作しない）。 */
 export function buildNumberNotFound(teas: TeaItem[], number: string): OutMessage {
   return {
@@ -367,6 +414,17 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
     case "story": {
       const tea = find(action.number);
       return { messages: [tea ? buildStoryAnswer(tea) : buildNumberNotFound(teas, action.number)] };
+    }
+    case "rate": {
+      const tea = find(action.number);
+      return { messages: [tea ? buildRatePrompt(tea) : buildNumberNotFound(teas, action.number)] };
+    }
+    case "rate-good":
+    case "rate-bad": {
+      // 記録（product_ratings への書込）は handleTeaMenuFlow が担う（副作用）。
+      // ここでは純粋にお礼メッセージだけを返す。
+      const tea = find(action.number);
+      return { messages: [tea ? buildRateThanks(tea) : buildNumberNotFound(teas, action.number)] };
     }
 
     case "number-exact": {
@@ -423,6 +481,11 @@ export function teaFlowEvents(
       return found(action.number)
         ? [{ eventName: "tea.card_view", userRef, value: "number", productNo: action.number }]
         : [];
+    case "rate":
+    case "rate-good":
+    case "rate-bad":
+      // 感想は product_ratings に記録する（flow_events の 12 種には含めない）。
+      return [];
   }
 }
 
@@ -601,6 +664,19 @@ export async function handleTeaMenuFlow(
   const supabase = createSupabaseClient(env);
   for (const ev of teaFlowEvents(userMessage, teas, lineUserId)) {
     void logFlowEvent(supabase, ev);
+  }
+
+  // P0-3 感想の記録（product_ratings へ・fire-and-forget）。おいしかった=+1 / 好みと違った=-1。
+  //   再評価は上書きせず追記（recordProductRating の仕様）。source=tea_card。
+  if (action.kind === "rate-good" || action.kind === "rate-bad") {
+    const rating: RatingValue = action.kind === "rate-good" ? 1 : -1;
+    void recordProductRating(supabase, {
+      userRef: lineUserId,
+      channel: "line",
+      productNo: action.number,
+      rating,
+      source: "tea_card",
+    });
   }
   return true;
 }
