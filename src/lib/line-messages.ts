@@ -249,17 +249,17 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
       };
     },
 
-    async broadcast(messages, estimatedRecipients, aggregationUnit) {
-      // 注: 案A（決定1・P0-4）で全員配信は multicast に統一され、この broadcast 経路は
-      //   resolveTargets からは到達しない（deprecated）。防御的に unit 付与だけ維持する。
-      const unitPayload = aggregationUnit
-        ? { customAggregationUnits: [aggregationUnit] }
-        : {};
+    async broadcast(messages, estimatedRecipients, _aggregationUnit) {
+      // ⚠ LINE 仕様: broadcast は customAggregationUnits（unit 別統計）に**非対応**。
+      //   よって unit は送信ペイロードに付けない（付けても無効なため）。第3引数 _aggregationUnit は
+      //   LineSender インターフェースの対称性のために残すが broadcast では使用しない。
+      //   全員配信の計測は LINE 標準の per-message insight を使う。unit 別計測は push/multicast のみ有効。
+      //   参照: https://developers.line.biz/en/docs/messaging-api/unit-based-statistics-aggregation/
       try {
         const res = await fetch("https://api.line.me/v2/bot/message/broadcast", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
-          body: JSON.stringify({ messages, ...unitPayload }),
+          body: JSON.stringify({ messages }),
         });
         if (res.ok) {
           return {

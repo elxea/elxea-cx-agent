@@ -33,9 +33,13 @@ const PERSONA_SEG: Record<PersonaType, string> = {
 
 /**
  * AudienceSpec を unit のセグメント略号へ写す（純粋）。
- * - all       → "all"（案A で全員も multicast だが計測 unit は全体として "all"）
- * - persona   → ser / exp / sen
- * - allowlist → "int"（社内テスト配信。本番の効果計測対象ではないが unit は付ける）
+ * - all       → "all"（全員配信は LINE 標準 broadcast。ただし broadcast は customAggregationUnits
+ *               非対応のため unit 別計測は効かない。全員の計測は LINE 標準の per-message insight を使う）
+ * - persona   → ser / exp / sen（multicast なので unit 別計測が有効）
+ * - allowlist → "int"（社内テスト配信・multicast）
+ *
+ * ⚠ unit 別統計（customAggregationUnits）は push / multicast のみ対応。broadcast は非対応。
+ *   参照: https://developers.line.biz/en/docs/messaging-api/unit-based-statistics-aggregation/
  */
 export function audienceSegmentCode(audience: AudienceSpec): string {
   if (audience.kind === "all") return "all";

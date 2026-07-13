@@ -1066,21 +1066,45 @@ describe("runDeliveryOnce: 正常系（順序 claim→ガード→送信）", ()
     assertTrue(iSending >= 0 && iSent > iSending, "Sending→Sent 順");
   });
 
-  it("【P0-7a】unit を台帳 claim と送信ペイロードの両方へ同一値で載せる（broadcast 経路でも付与）", async () => {
-    // audienceRaw=全員・now=2026-07-10T05:00Z（JST 07-10）→ unit=s20260710_all
+  it("【P0-7a】broadcast（全員配信）は unit を付けない（LINE 仕様: customAggregationUnits 非対応）", async () => {
     // 全員配信は LINE 標準 broadcast（default baseDeps.resolveTargets が broadcast を返す）。
+    // broadcast は customAggregationUnits 非対応のため、送信・台帳とも unit を付けない。
     const page = await makePage({});
     const repo = makeFakeRepo([page]);
     const ledger = makeFakeLedger();
     const sender = createRecordingSender();
     const res = await runDeliveryOnce(baseDeps({ repo, ledger, sender }));
     assertEqual(res.processed[0].disposition, "sent", "sent");
-    // 送信側 unit（broadcast でも customAggregationUnits を付与）
     assertEqual(sender.calls[0].kind, "broadcast", "broadcast 送信");
-    assertEqual(sender.calls[0].aggregationUnit, "s20260710_all", "broadcast にも送信 unit");
-    // 台帳側 unit（同一値で 1:1）
+    assertEqual(sender.calls[0].aggregationUnit, undefined, "broadcast に unit を付けない");
     assertEqual(ledger.rows.length, 1, "claim 1 行");
-    assertEqual(ledger.rows[0].aggregationUnit, "s20260710_all", "台帳 unit");
+    assertEqual(ledger.rows[0].aggregationUnit, undefined, "台帳も broadcast は unit なし");
+  });
+  it("【P0-7a】multicast（ペルソナ/社内）は unit を台帳と送信の両方へ同一値で載せる", async () => {
+    // audienceRaw=全員だが resolveTargets を multicast に差し替え（ペルソナ配信の実経路を再現）。
+    // now=2026-07-10T05:00Z（JST 07-10）→ unit=s20260710_all
+    const page = await makePage({});
+    const repo = makeFakeRepo([page]);
+    const ledger = makeFakeLedger();
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(
+      baseDeps({
+        repo,
+        ledger,
+        sender,
+        resolveTargets: async () => ({
+          kind: "multicast",
+          userIds: ["L1", "L2"],
+          batches: [["L1", "L2"]],
+          estimatedRecipients: 2,
+        }),
+      }),
+    );
+    assertEqual(res.processed[0].disposition, "sent", "sent");
+    assertEqual(sender.calls[0].kind, "multicast", "multicast 送信");
+    assertEqual(sender.calls[0].aggregationUnit, "s20260710_all", "multicast は送信 unit あり");
+    assertEqual(ledger.rows.length, 1, "claim 1 行");
+    assertEqual(ledger.rows[0].aggregationUnit, "s20260710_all", "台帳 unit（multicast）");
   });
 });
 

@@ -296,10 +296,13 @@ async function processPage(
   // ==== 以降は sendEnabled=true（実送信モード）のみ到達する ====
 
   // P0-7a: 配信計測の集計単位（後付け不可）。送信時に付与しないと unit 別統計が永久に取れない。
-  //   台帳（会計）と送信ペイロード（LINE 統計）の両方に同一 unit を載せ 1:1 で紐づける。
+  //   ⚠ LINE 仕様: customAggregationUnits は push / multicast のみ対応で **broadcast は非対応**。
+  //   よって unit を付けるのは multicast（ペルソナ / 社内）のときだけ。全員配信（broadcast）は
+  //   unit 計測対象外（LINE 標準の per-message insight で足りる）。台帳にも broadcast は unit を記録しない。
   //   命名不正（LINE 制約違反）は fail-closed で unit を付けない（送信自体は止めない＝計測欠落に留める）。
   const unit = buildAggregationUnit(audience, now);
-  const aggregationUnit = isValidAggregationUnit(unit) ? unit : undefined;
+  const aggregationUnit =
+    targets.kind === "multicast" && isValidAggregationUnit(unit) ? unit : undefined;
 
   // (g) 通数ガード + 台帳 claim（真の排他 + 会計）。送信より前に必ず実施。
   const decision = await guardAndClaim(
