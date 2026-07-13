@@ -17,8 +17,12 @@
  *
  * 記録:
  *   結果確定時、winner を既存 `mergePersonaScores` に weight=3（購入と同格・Boss 確定値）で
- *   加算し Firestore の persona に反映する。未連携（LINE userId ↔ Shopify 顧客 ID 未解決）や
- *   Firebase 未設定・取得失敗時は skip（フロー自体は完結・エラーで止めない fail-safe）。
+ *   加算し Firestore の persona に反映する。
+ *   - 連携済み（Shopify 顧客 ID 解決可）: users/{shopifyId} に加算（従来どおり）。
+ *   - 未連携（LINE userId ↔ Shopify 未解決）: lineUsers/{lineUserId} に加算（UX レビュー指摘 #2）。
+ *     → 結果文面の「記録した」という約束と実データの乖離を解消。将来 Shopify 連携が成立したら
+ *       この LINE カルテを users へマージできる構造（自動マージは今回スコープ外・TODO）。
+ *   - Firebase 未設定・取得/更新失敗時は skip（フロー自体は完結・エラーで止めない fail-safe）。
  *
  * 送信は LineResponder 経由（reply 優先・無料化）。
  */
@@ -31,9 +35,13 @@ import {
   getFirestoreEnv,
   getCustomerProfile,
   updateCustomerProfile,
+  getLineUserProfile,
+  updateLineUserProfile,
   mergePersonaScores,
   type PersonaType,
   type PersonaScores,
+  type CustomerProfile,
+  type LineUserProfile,
 } from "./firestore";
 
 // ---------------------------------------------------------------------------
@@ -313,11 +321,88 @@ export function planPreferenceFlow(
 // 記録（既存ペルソナ機構への反映・fail-safe）
 // ---------------------------------------------------------------------------
 
+/** ゼロ起点スコア（新規カルテの初期値）。 */
+function zeroScores(): PersonaScores {
+  return { serenity: 0, explorer: 0, sensory: 0 };
+}
+
+/** どちらのカルテに記録したか（テスト・ログ用）。 */
+export type DiagnosisRecordPath = "shopify" | "line";
+
 /**
- * 診断結果を既存 persona.scores に weight=3 で加算して Firestore に記録する。
+ * 記録の I/O シーム（テストは fake を注入しネットワーク非接触にする）。
+ */
+export interface RecordDiagnosisDeps {
+  /** LINE userId → Shopify 顧客 ID（未連携は null）。 */
+  resolveShopifyId: (lineUserId: string) => Promise<string | null>;
+  /** 連携済みカルテ取得（users/{shopifyId}）。 */
+  getShopifyProfile: (shopifyId: string) => Promise<CustomerProfile | null>;
+  /** 連携済みカルテ更新。 */
+  updateShopifyProfile: (
+    shopifyId: string,
+    updates: Partial<CustomerProfile>,
+  ) => Promise<void>;
+  /** 未連携カルテ取得（lineUsers/{lineUserId}）。 */
+  getLineProfile: (lineUserId: string) => Promise<LineUserProfile | null>;
+  /** 未連携カルテ更新（不在なら upsert 作成）。 */
+  updateLineProfile: (
+    lineUserId: string,
+    updates: Partial<LineUserProfile>,
+  ) => Promise<void>;
+}
+
+/**
+ * 診断結果（winner）を既存 persona に weight=3 で「別軸に累積加算」して記録する（純粋な分岐 + 注入 I/O）。
  *
- * fail-safe: 未連携（Shopify 顧客 ID 未解決）・Firebase 未設定・取得/更新失敗は
- * すべて silent skip（例外を投げない＝診断フローを止めない）。
+ * - 連携済み: users/{shopifyId} に加算（従来挙動を維持）。
+ * - 未連携:   lineUsers/{lineUserId} に加算（指摘 #2）。新規なら createdAt を刻む。
+ *
+ * どちらも `mergePersonaScores` の流儀（上書きせず各軸独立に累積・primary は最大軸を再計算）を踏襲し、
+ * 将来 Shopify 連携時に LINE カルテを users へマージできる同一構造にする。
+ */
+export async function recordDiagnosisPersonaWith(
+  lineUserId: string,
+  winner: PersonaType,
+  deps: RecordDiagnosisDeps,
+): Promise<DiagnosisRecordPath> {
+  const now = new Date().toISOString();
+  const shopifyId = await deps.resolveShopifyId(lineUserId);
+
+  if (shopifyId) {
+    const existing = await deps.getShopifyProfile(shopifyId);
+    const existingScores = existing?.persona?.scores ?? zeroScores();
+    const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
+    await deps.updateShopifyProfile(shopifyId, {
+      persona: { primary, scores, lastUpdated: now },
+      lastActiveAt: now,
+    });
+    return "shopify";
+  }
+
+  // 未連携: LINE userId をキーにしたカルテへ（指摘 #2）。既存カルテと同種の persona のみ保持。
+  const existingLine = await deps.getLineProfile(lineUserId);
+  const existingScores = existingLine?.persona?.scores ?? zeroScores();
+  const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
+  const updates: Partial<LineUserProfile> = {
+    lineUserId,
+    persona: { primary, scores, lastUpdated: now },
+    lastActiveAt: now,
+  };
+  if (!existingLine) {
+    updates.createdAt = now;
+    // TODO(将来マージ): 後日 Shopify 連携成立時に lineUsers/{lineUserId} を
+    //   users/{shopifyId} へ mergePersonaScores 流儀で統合し mergedToShopify=true を立てる
+    //   （or 削除）。自動マージ処理は今回スコープ外。
+  }
+  await deps.updateLineProfile(lineUserId, updates);
+  return "line";
+}
+
+/**
+ * 診断結果を Firestore に記録する（runtime 配線・fail-safe）。
+ *
+ * fail-safe: Firebase 未設定・取得/更新失敗はすべて silent skip（例外を投げない＝診断フローを止めない）。
+ * 未連携でも lineUsers/{lineUserId} に記録するため、従来の「未連携は skip」は解消済み。
  */
 export async function recordDiagnosisPersona(
   lineUserId: string,
@@ -334,33 +419,16 @@ export async function recordDiagnosisPersona(
     }
 
     const supabase = createSupabaseClient(env);
-    const shopifyId = await resolveCallerShopifyCustomerId(lineUserId, "line", supabase);
-    if (!shopifyId) {
-      // 未連携ユーザー — プロファイル更新不可（フローは完結済み）
-      console.log("[preference-diagnosis] No linkage found, skipping persona record");
-      return;
-    }
-
-    const existing = await getCustomerProfile(shopifyId, fsEnv);
-    const existingScores: PersonaScores =
-      existing?.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 };
-
-    // 上書きせず別軸に累積加算（属性整合の要）。winner に +DIAGNOSIS_WEIGHT。
-    const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
-
-    const now = new Date().toISOString();
-    await updateCustomerProfile(
-      shopifyId,
-      {
-        persona: { primary, scores, lastUpdated: now },
-        lastActiveAt: now,
-      },
-      fsEnv,
-    );
+    const path = await recordDiagnosisPersonaWith(lineUserId, winner, {
+      resolveShopifyId: (id) => resolveCallerShopifyCustomerId(id, "line", supabase),
+      getShopifyProfile: (id) => getCustomerProfile(id, fsEnv!),
+      updateShopifyProfile: (id, updates) => updateCustomerProfile(id, updates, fsEnv!),
+      getLineProfile: (id) => getLineUserProfile(id, fsEnv!),
+      updateLineProfile: (id, updates) => updateLineUserProfile(id, updates, fsEnv!),
+    });
 
     console.log(
-      `[preference-diagnosis] persona recorded for ${shopifyId}: ` +
-        `winner=${winner} weight=${DIAGNOSIS_WEIGHT} primary=${primary}`,
+      `[preference-diagnosis] persona recorded (${path}): winner=${winner} weight=${DIAGNOSIS_WEIGHT}`,
     );
   } catch (err) {
     // fail-safe: フローを止めない

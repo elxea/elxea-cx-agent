@@ -75,6 +75,39 @@ export type CustomerProfile = {
   broadcastCountMonth?: string;
 };
 
+/**
+ * 未連携（LINE userId ↔ Shopify 顧客 ID 未解決）ユーザーのカルテ。
+ *
+ * 背景（UX レビュー指摘 #2）: 買い切り・未連携のユーザーは Shopify 顧客 ID が無いため
+ * `users/{shopifyCustomerId}` に紐づけられず、診断・会話由来のペルソナスコアが従来は
+ * どこにも貯まらなかった（silent skip）。本レコードは LINE userId をキーにした別コレクション
+ * `lineUsers/{lineUserId}` に、既存カルテ（CustomerProfile）と同種の persona 情報だけを保持する。
+ *
+ * プライバシー: 保持するのは既存カルテと同種の好みスコア・タイプ・タイムスタンプのみ。
+ * 新たな個人情報は保存しない（lineUserId はドキュメントキーであり、既存の customer_linkages
+ * でも識別子として使われている既存情報。氏名・住所・注文内容などは一切持たない）。
+ *
+ * 将来マージ（今回スコープ外・TODO）: 後日 Shopify 連携が成立したら、この
+ * `lineUsers/{lineUserId}.persona.scores` を `users/{shopifyCustomerId}.persona.scores` へ
+ * `mergePersonaScores` 系の「別軸への累積加算」流儀で統合し、`mergedToShopify=true` を立てる
+ * （or レコード削除）。自動マージ処理は本タスクでは実装しない。構造だけ統合可能にしてある。
+ */
+export type LineUserProfile = {
+  /** LINE userId（= ドキュメントキーの写し。将来マージ処理の可読性のため保持）。 */
+  lineUserId?: string;
+  /** 好み（ペルソナ）— CustomerProfile.persona と同一構造。 */
+  persona?: PersonaProfile;
+  /** 会話由来の嗜好 — CustomerProfile.tasteProfile と同一構造（将来拡張用・現状は persona のみ書く）。 */
+  tasteProfile?: TasteProfile;
+  createdAt?: string;
+  lastActiveAt?: string;
+  /**
+   * 将来 Shopify 連携時にこのレコードを users/{shopifyId} へ統合したら true にする（TODO）。
+   * 未マージ = false / 未設定。
+   */
+  mergedToShopify?: boolean;
+};
+
 export type BehaviorAction =
   | "tap_button"
   | "view_content"
@@ -376,6 +409,104 @@ export async function updateCustomerProfile(
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Firestore PATCH error (${res.status}): ${err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 未連携ユーザーのカルテ（lineUsers/{lineUserId}）— UX レビュー指摘 #2
+// 既存 users/{shopifyCustomerId} と同じ低レベル I/O（getAccessToken / toFirestoreValue /
+// fromFirestoreFields）を共有しつつ、コレクションとキー検証だけを差し替える。
+// ---------------------------------------------------------------------------
+
+/** 未連携カルテのコレクション名。 */
+export const LINE_USERS_COLLECTION = "lineUsers";
+
+/**
+ * lineUserId が LINE Messaging API の userId 形式（"U" + 32 桁 16 進）であることを検証する。
+ * Firestore REST の URL パスにそのまま埋め込むため、パストラバーサル（"/" 等）を構造的に排除する。
+ */
+function validateLineUserId(id: string): void {
+  if (!/^U[0-9a-fA-F]{32}$/.test(id)) {
+    throw new Error(
+      `Invalid lineUserId: expected LINE user id (U + 32 hex), got "${id.slice(0, 8)}..."`,
+    );
+  }
+}
+
+/**
+ * 未連携ユーザーのカルテを取得（lineUsers/{lineUserId}）。
+ * @returns LineUserProfile または null（ドキュメント不在）
+ */
+export async function getLineUserProfile(
+  lineUserId: string,
+  env: FirestoreEnv,
+): Promise<LineUserProfile | null> {
+  validateLineUserId(lineUserId);
+  const { FIREBASE_PROJECT_ID } = env;
+  const accessToken = await getAccessToken(env);
+  const url = `${firestoreBaseUrl(FIREBASE_PROJECT_ID)}/${LINE_USERS_COLLECTION}/${lineUserId}`;
+
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (res.status === 404) {
+    return null;
+  }
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Firestore GET (lineUsers) error (${res.status}): ${err}`);
+  }
+
+  const doc = (await res.json()) as {
+    fields?: Record<string, Record<string, unknown>>;
+  };
+  if (!doc.fields) {
+    return {};
+  }
+  return fromFirestoreFields(doc.fields) as LineUserProfile;
+}
+
+/**
+ * 未連携ユーザーのカルテを更新（PATCH = 部分更新・updateMask 指定フィールドのみ）。
+ * ドキュメント不在時は Firestore REST の PATCH が upsert として作成する（users と同挙動）。
+ */
+export async function updateLineUserProfile(
+  lineUserId: string,
+  updates: Partial<LineUserProfile>,
+  env: FirestoreEnv,
+): Promise<void> {
+  validateLineUserId(lineUserId);
+  const { FIREBASE_PROJECT_ID } = env;
+  const accessToken = await getAccessToken(env);
+
+  const updateMaskFields = Object.keys(updates)
+    .map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`)
+    .join("&");
+  const url = `${firestoreBaseUrl(FIREBASE_PROJECT_ID)}/${LINE_USERS_COLLECTION}/${lineUserId}?${updateMaskFields}`;
+
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined) {
+      fields[key] = toFirestoreValue(value);
+    }
+  }
+
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Firestore PATCH (lineUsers) error (${res.status}): ${err}`);
   }
 }
 

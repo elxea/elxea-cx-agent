@@ -148,6 +148,28 @@ const CREATE_CART_LINK_TOOL: Anthropic.Tool = {
   },
 };
 
+/** 配信 opt-out ツール（UX レビュー指摘 #3・migration 020 の入口） */
+const SET_BROADCAST_OPTOUT_TOOL: Anthropic.Tool = {
+  name: "set_broadcast_optout",
+  description:
+    "LINE のお知らせ配信（一斉配信・おすすめ配信）の受け取りを、停止または再開します。" +
+    "お客様が『配信を止めてほしい』『配信はもういらない』『配信を再開したい』のように" +
+    "配信の停止・再開を明確に希望されたときにだけ使用してください。連携（アカウント紐付け）の有無に関わらず有効です。" +
+    "【誤作動ガード】次の場合は絶対に呼ばないでください: 『配信って何？』『どんな配信が来るの？』など" +
+    "配信についての質問、頻度だけの相談、停止/再開の意思が曖昧な発言。これらは道具を使わず言葉で説明・確認します。",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      opt_out: {
+        type: "boolean",
+        description:
+          "true=配信を停止する / false=配信を再開する。お客様の明確な意思にのみ厳密に一致させる。",
+      },
+    },
+    required: ["opt_out"],
+  },
+};
+
 /** 全ツールをエクスポート */
 export const AGENT_TOOLS: Anthropic.Tool[] = [
   ESCALATION_TOOL,
@@ -155,6 +177,7 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   ORDER_DETAIL_TOOL,
   RECOMMEND_PRODUCT_TOOL,
   CREATE_CART_LINK_TOOL,
+  SET_BROADCAST_OPTOUT_TOOL,
 ];
 
 /** 後方互換のため旧名もエクスポート */

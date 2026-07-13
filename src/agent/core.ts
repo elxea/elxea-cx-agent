@@ -9,6 +9,7 @@ import {
 } from "../lib/supabase";
 import { classifyQuery } from "../lib/query-classifier";
 import { lookupMyOrders, getOrderDetail, createCartLink, type OrderDetailResult, type CartLinkResult } from "../lib/shopify";
+import { setBroadcastOptOut } from "../lib/broadcast-optout";
 import {
   getCustomerProfile,
   addBehaviorEvent,
@@ -1040,6 +1041,12 @@ async function executeTool(
         }));
         const cartResult = await createCartLink(items, env);
         return { text: cartResult.text, cartLink: cartResult };
+      }
+
+      case "set_broadcast_optout": {
+        const input = toolUse.input as { opt_out: boolean };
+        const result = await setBroadcastOptOut(userId, channel, input.opt_out, env);
+        return { text: result.text };
       }
 
       default:
