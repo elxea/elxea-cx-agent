@@ -4,11 +4,11 @@ import { runAgent } from "../agent/core";
 import { createEmbedding } from "../lib/embedding";
 import {
   verifyLineSignature,
-  pushTextMessage,
-  pushFlexMessage,
   getImageContent,
+  createResponder,
   type LineWebhookBody,
   type QuickReplyItem,
+  type LineResponder,
 } from "../lib/line";
 import {
   createSupabaseClient,
@@ -304,26 +304,30 @@ async function processEvents(
     const lineUserId = event.source.userId;
     if (!lineUserId) continue;
 
+    // このイベント（1 ターン）専用の Responder。reply token が生きていれば最初の送信を
+    // 無料化し、無い/使用済み/失敗時は push にフォールバックする。
+    const responder = createResponder(lineUserId, event.replyToken, env);
+
     // メッセージイベントの処理
     if (event.type === "message" && event.message) {
       try {
         const lineStart = Date.now();
-        await handleMessage(lineUserId, event.message, env);
+        await handleMessage(lineUserId, event.message, env, responder);
         recordResponseTime(env, Date.now() - lineStart);
       } catch (error) {
         console.error("Error processing message:", error);
         recordApiError(env, error instanceof Error ? error.message : String(error));
-        await pushTextMessage(
-          lineUserId,
-          "申し訳ありません、一時的にエラーが発生しました。しばらくしてからもう一度お試しください。",
-          env,
-        ).catch(console.error);
+        await responder
+          .text(
+            "申し訳ありません、一時的にエラーが発生しました。しばらくしてからもう一度お試しください。",
+          )
+          .catch(console.error);
       }
     }
     // フォローイベント（友だち追加時のウェルカムメッセージ）
     if (event.type === "follow") {
       try {
-        await handleFollowEvent(lineUserId, env);
+        await handleFollowEvent(lineUserId, env, responder);
       } catch (error) {
         console.error("Error processing follow event:", error);
       }
@@ -358,39 +362,34 @@ async function handleMessage(
   lineUserId: string,
   message: { type: string; id: string; text?: string },
   env: Env,
+  responder: LineResponder,
 ): Promise<void> {
   switch (message.type) {
     case "text":
-      await handleTextMessage(lineUserId, message.text ?? "", env);
+      await handleTextMessage(lineUserId, message.text ?? "", env, responder);
       break;
 
     case "sticker":
-      await pushTextMessage(
-        lineUserId,
+      await responder.text(
         "スタンプありがとうございます！何かご質問がありましたら、テキストでお気軽にどうぞ。",
-        env,
       );
       break;
 
     case "image":
-      await handleImageMessage(lineUserId, message.id, env);
+      await handleImageMessage(lineUserId, message.id, env, responder);
       break;
 
     case "video":
     case "audio":
     case "file":
-      await pushTextMessage(
-        lineUserId,
+      await responder.text(
         "現在、テキストと画像メッセージに対応しております。お手数ですが、テキストまたは画像でお問い合わせください。",
-        env,
       );
       break;
 
     case "location":
-      await pushTextMessage(
-        lineUserId,
+      await responder.text(
         "位置情報ありがとうございます。何かご質問がありましたら、テキストでお気軽にどうぞ。",
-        env,
       );
       break;
 
@@ -414,6 +413,7 @@ async function handleMessage(
 async function handleFollowEvent(
   lineUserId: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<void> {
   const supabase = createSupabaseClient(env);
 
@@ -520,7 +520,7 @@ async function handleFollowEvent(
     const welcomeText = buildProductWelcomeMessage(productName);
     const quickReplyItems = buildProductQuickReplies(productSlug);
 
-    await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
+    await responder.text(welcomeText, quickReplyItems);
     console.log(`[follow] Sent product-specific welcome for ${productSlug} to ${lineUserId}`);
   } else {
     // --- 通常の友だち追加ウェルカムメッセージ（既存フロー維持） ---
@@ -544,7 +544,7 @@ async function handleFollowEvent(
       },
     ];
 
-    await pushTextMessage(lineUserId, welcomeText, env, quickReplyItems);
+    await responder.text(welcomeText, quickReplyItems);
   }
 
   // Firestore にオンボーディング開始 + source を記録（fire-and-forget）
@@ -600,6 +600,7 @@ async function handleFeedbackMessage(
   lineUserId: string,
   userMessage: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<boolean> {
   const supabase = createSupabaseClient(env);
 
@@ -622,10 +623,8 @@ async function handleFeedbackMessage(
     // Slack 通知
     await sendNegativeFeedbackAlert(env, identity.unifiedUserId, pending.messageContent, userMessage.trim());
 
-    await pushTextMessage(
-      lineUserId,
+    await responder.text(
       "ご意見ありがとうございます。改善に活かしてまいります。",
-      env,
     );
     return true;
   }
@@ -664,10 +663,8 @@ async function handleFeedbackMessage(
     ).catch((err) => console.warn("[feedback] behavior event failed:", err instanceof Error ? err.message : err));
 
     if (rating === 1) {
-      await pushTextMessage(
-        lineUserId,
+      await responder.text(
         "ありがとうございます！お役に立てて嬉しいです。",
-        env,
       );
     } else {
       // コメント待ち状態をセット
@@ -675,10 +672,8 @@ async function handleFeedbackMessage(
         messageContent: lastAssistantContent,
         expiresAt: Date.now() + FEEDBACK_COMMENT_TTL_MS,
       });
-      await pushTextMessage(
-        lineUserId,
+      await responder.text(
         "ご意見ありがとうございます。よろしければ、どんな点を改善できるかメッセージで教えてください。",
-        env,
       );
     }
 
@@ -708,6 +703,7 @@ async function handleOnboardingMessage(
   lineUserId: string,
   userMessage: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<boolean> {
   let responseText: string;
   let initialAction: string;
@@ -781,22 +777,22 @@ async function handleOnboardingMessage(
       initialAction = "brewing_guide";
       responseText = "おいしい淹れ方をご案内しますね。お届けしたお茶の最適な淹れ方をお伝えします。";
       // エージェントに自然言語で問い合わせを流す（Quick Reply テキストは内部トリガー）
-      return handleProductOnboardingAction(lineUserId, "おいしい淹れ方を教えてください", initialAction, env);
+      return handleProductOnboardingAction(lineUserId, "おいしい淹れ方を教えてください", initialAction, env, responder);
 
     case ONBOARDING_PRODUCT_DETAIL_TEXT:
       initialAction = "product_detail";
-      return handleProductOnboardingAction(lineUserId, "この茶葉について詳しく教えてください", initialAction, env);
+      return handleProductOnboardingAction(lineUserId, "この茶葉について詳しく教えてください", initialAction, env, responder);
 
     case ONBOARDING_SIMILAR_TEXT:
       initialAction = "similar_products";
-      return handleProductOnboardingAction(lineUserId, "似たお茶をもっと見たいです", initialAction, env);
+      return handleProductOnboardingAction(lineUserId, "似たお茶をもっと見たいです", initialAction, env, responder);
 
     default:
       return false;
   }
 
   // 応答送信
-  await pushTextMessage(lineUserId, responseText, env, followUpQuickReplies);
+  await responder.text(responseText, followUpQuickReplies);
 
   // Firestore にオンボーディング完了を記録（fire-and-forget）
   recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {
@@ -816,10 +812,11 @@ async function handleProductOnboardingAction(
   naturalLanguageQuery: string,
   initialAction: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<boolean> {
   // エージェントに自然言語で問い合わせを転送
   // （handleTextMessage の通常フローに乗せる）
-  await handleTextMessage(lineUserId, naturalLanguageQuery, env);
+  await handleTextMessage(lineUserId, naturalLanguageQuery, env, responder);
 
   // Firestore にオンボーディング完了を記録（fire-and-forget）
   recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {
@@ -887,16 +884,17 @@ async function handleTextMessage(
   lineUserId: string,
   userMessage: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<void> {
   // 空メッセージをスキップ
   if (!userMessage.trim()) return;
 
   // オンボーディング Quick Reply タップの処理
-  const wasOnboarding = await handleOnboardingMessage(lineUserId, userMessage, env);
+  const wasOnboarding = await handleOnboardingMessage(lineUserId, userMessage, env, responder);
   if (wasOnboarding) return;
 
   // フィードバックメッセージの処理（Quick Reply タップ or コメント入力）
-  const wasFeedback = await handleFeedbackMessage(lineUserId, userMessage, env);
+  const wasFeedback = await handleFeedbackMessage(lineUserId, userMessage, env, responder);
   if (wasFeedback) return;
 
   // 選択式お茶メニュー案内（タップ主体・状態レス・LLM 不使用）。
@@ -906,13 +904,13 @@ async function handleTextMessage(
   //   ハンドラより後に置く。改善希望タップ後の「次メッセージ＝コメント」に
   //   5 桁番号や入口語が含まれても tea-menu が横取りしないようにするため
   //   （それらの pending トークンは tea トリガーと衝突しないため後置は安全）。
-  const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env);
+  const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env, responder);
   if (wasTeaMenu) return;
 
   // リッチメニュー ③相談 / ④定期便 / ⑤elxeaについて の決定的応答（LLM 不使用・完全一致トリガー）。
   // tea-menu 同様、onboarding / feedback の pending-state ハンドラより後に置く。
   // 対象 3 トリガーは自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
-  const wasMenuAction = await handleMenuActionFlow(lineUserId, userMessage, env);
+  const wasMenuAction = await handleMenuActionFlow(lineUserId, userMessage, env, responder);
   if (wasMenuAction) return;
 
   // メッセージ長制限（MS8 8.2）
@@ -987,9 +985,10 @@ async function handleTextMessage(
     tastingNoteCTAShown.add(lineUserId);
   }
 
-  // テキスト送信と応答保存を並列実行
+  // テキスト送信と応答保存を並列実行。
+  // 本文は reply（無料）で送られ、ターン内で reply token を消費する。
   await Promise.all([
-    pushTextMessage(lineUserId, responseText, env, allQuickReplies),
+    responder.text(responseText, allQuickReplies),
     saveMessage(supabase, {
       userId: lineUserId,
       channel: "line",
@@ -998,10 +997,11 @@ async function handleTextMessage(
     }),
   ]);
 
-  // Flex Message がある場合はテキストの後に送信（順序保証）
+  // Flex Message がある場合はテキストの後に送信（順序保証）。
+  // reply token は本文で消費済みのため、この Flex は push（有料）にフォールバックする。
   if (result.flexMessages && result.flexMessages.length > 0) {
     for (const flex of result.flexMessages) {
-      await pushFlexMessage(lineUserId, flex.altText, flex.contents, env)
+      await responder.flex(flex.altText, flex.contents)
         .catch((err) => {
           console.error("Flex Message send failed:", err);
         });
@@ -1024,6 +1024,7 @@ async function handleImageMessage(
   lineUserId: string,
   messageId: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<void> {
   const supabase = createSupabaseClient(env);
 
@@ -1064,9 +1065,9 @@ async function handleImageMessage(
     { isLinked: identity.isLinked, imageContent },
   );
 
-  // 応答送信と保存を並列実行
+  // 応答送信と保存を並列実行（本文は reply〔無料〕で送る）
   await Promise.all([
-    pushTextMessage(lineUserId, result.response, env),
+    responder.text(result.response),
     saveMessage(supabase, {
       userId: lineUserId,
       channel: "line",
@@ -1075,10 +1076,10 @@ async function handleImageMessage(
     }),
   ]);
 
-  // Flex Message がある場合はテキストの後に送信
+  // Flex Message がある場合はテキストの後に送信（reply 消費済みのため push フォールバック）
   if (result.flexMessages && result.flexMessages.length > 0) {
     for (const flex of result.flexMessages) {
-      await pushFlexMessage(lineUserId, flex.altText, flex.contents, env)
+      await responder.flex(flex.altText, flex.contents)
         .catch((err) => {
           console.error("Flex Message send failed:", err);
         });

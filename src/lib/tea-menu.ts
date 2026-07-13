@@ -21,11 +21,11 @@
  *     ①メニュー → お茶一覧 [1] → お茶タップ → カード [2] → 項目タップ → 回答 [3] = 最大 3 タップ。
  *     ページング（次へ／前へ）と 5 桁直指定は補助経路（happy path の 3 タップ保証外）。
  *
- * ⚠ 実配信はしない前提の PoC。push は既存 pushTextMessage 経由。
+ * 送信は LineResponder 経由（reply 優先・無料化。ターン内 2 通目以降は push フォールバック）。
  */
 
 import type { Env } from "../index";
-import { pushTextMessage, type QuickReplyItem } from "./line";
+import { type QuickReplyItem, type LineResponder } from "./line";
 
 // ---------------------------------------------------------------------------
 // データモデル
@@ -478,6 +478,7 @@ export async function handleTeaMenuFlow(
   lineUserId: string,
   userMessage: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<boolean> {
   const action = parseTeaAction(userMessage);
   if (!action) return false;
@@ -493,11 +494,11 @@ export async function handleTeaMenuFlow(
   } catch (err) {
     console.warn("[tea-menu] fetch failed:", err instanceof Error ? err.message : err);
     if (isExplicit) {
-      await pushTextMessage(
-        lineUserId,
-        "申し訳ありません、ただいまメニュー情報を取得できませんでした。少し時間をおいてお試しください。",
-        env,
-      ).catch((e) => console.error("[tea-menu] apology push failed:", e));
+      await responder
+        .text(
+          "申し訳ありません、ただいまメニュー情報を取得できませんでした。少し時間をおいてお試しください。",
+        )
+        .catch((e) => console.error("[tea-menu] apology send failed:", e));
       return true;
     }
     return false; // 文中 5 桁の曖昧ケースは自由対話へ素通り
@@ -506,8 +507,9 @@ export async function handleTeaMenuFlow(
   const plan = planTeaFlow(userMessage, teas);
   if (!plan) return false; // number-loose 不一致など → 素通り
 
+  // 複数通の場合、最初の 1 通が reply（無料）、以降は push（有料）にフォールバックする。
   for (const m of plan.messages) {
-    await pushTextMessage(lineUserId, m.text, env, m.quickReplies);
+    await responder.text(m.text, m.quickReplies);
   }
   return true;
 }

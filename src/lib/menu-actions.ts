@@ -16,7 +16,7 @@
  */
 
 import type { Env } from "../index";
-import { pushTextMessage, type QuickReplyItem } from "./line";
+import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import { getCustomerProfile, getFirestoreEnv } from "./firestore";
@@ -146,26 +146,27 @@ export async function handleMenuActionFlow(
   lineUserId: string,
   userMessage: string,
   env: Env,
+  responder: LineResponder,
 ): Promise<boolean> {
   const t = userMessage.trim();
 
   // ③ 相談 — 初手 quick reply（以降は AI 会話）
   if (t === CONSULTATION_TRIGGER) {
     const m = buildConsultationPrompt();
-    await pushTextMessage(lineUserId, m.text, env, m.quickReplies);
+    await responder.text(m.text, m.quickReplies);
     return true;
   }
 
   // ⑤ elxea について — ブランド紹介 1 通
   if (t === ABOUT_TRIGGER) {
-    await pushTextMessage(lineUserId, buildAboutMessage(), env);
+    await responder.text(buildAboutMessage());
     return true;
   }
 
   // ④ 定期便 — Shopify 連携 × isSubscriber で出し分け
   if (t === SUBSCRIPTION_TRIGGER) {
     const kind = await resolveSubscriptionKind(lineUserId, env);
-    await pushTextMessage(lineUserId, buildSubscriptionMessage(kind), env);
+    await responder.text(buildSubscriptionMessage(kind));
     return true;
   }
 

@@ -103,6 +103,87 @@ async function linePush(
   throw new Error(`LINE Push API failed after ${MAX_RETRIES + 1} attempts`);
 }
 
+/**
+ * LINE Reply API の共通送信ロジック（無料 — 通数にカウントされない）。
+ *
+ * push と同じリトライ方針（429/5xx を最大2回・指数バックオフ）だが、
+ * reply token 固有のエラー（400 = Invalid reply token: 期限切れ / 使用済み）は
+ * リトライ不能として即 throw する。呼び出し側（Responder）がこれを捕捉して
+ * push にフォールバックする（＝配信は必ず担保しつつ、可能な限り無料化する）。
+ *
+ * reply token 現行仕様（LINE 公式 2026-07 確認）:
+ *   - webhook 受信後「1分以内」に使用（時間制限は予告なく変わり得るため実装で依存しない）
+ *   - 1 回のみ使用可（使用済み / 期限切れは 400 Invalid reply token）
+ *   - 1 リクエストで最大 5 message object
+ *   出典: https://developers.line.biz/en/docs/messaging-api/sending-messages/
+ *         https://developers.line.biz/en/reference/messaging-api/#send-reply-message
+ */
+async function lineReply(
+  replyToken: string,
+  messages: Array<Record<string, unknown>>,
+  env: Env,
+): Promise<void> {
+  let lastError: string | undefined;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, RETRY_DELAY_MS * attempt),
+      );
+    }
+
+    const res = await fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ replyToken, messages }),
+    });
+
+    if (res.ok) return;
+
+    lastError = await res.text().catch(() => "unknown error");
+    const statusCode = res.status;
+
+    // リトライ不能なエラー（4xx 系、429 を除く。reply token 期限切れ/使用済みを含む）は即失敗。
+    // 呼び出し側はこれを捕捉して push フォールバックする。
+    if (!RETRYABLE_STATUS_CODES.has(statusCode)) {
+      throw new Error(`LINE Reply API failed: ${statusCode}: ${lastError}`);
+    }
+
+    console.warn(
+      `LINE Reply API error [${statusCode}] (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`,
+      lastError,
+    );
+  }
+
+  throw new Error(`LINE Reply API failed after ${MAX_RETRIES + 1} attempts`);
+}
+
+/** テキスト message object を組み立てる（5000 文字上限 + quickReply 最大 13）。 */
+function buildTextMessage(
+  text: string,
+  quickReplyItems?: QuickReplyItem[],
+): Record<string, unknown> {
+  const truncatedText = text.length > 5000 ? text.slice(0, 4997) + "..." : text;
+  const message: Record<string, unknown> = { type: "text", text: truncatedText };
+  if (quickReplyItems && quickReplyItems.length > 0) {
+    message.quickReply = { items: quickReplyItems.slice(0, 13) };
+  }
+  return message;
+}
+
+/** Flex message object を組み立てる（altText 400 文字上限）。 */
+function buildFlexMessage(
+  altText: string,
+  contents: Record<string, unknown>,
+): Record<string, unknown> {
+  const truncatedAltText =
+    altText.length > 400 ? altText.slice(0, 397) + "..." : altText;
+  return { type: "flex", altText: truncatedAltText, contents };
+}
+
 /** LINE Push API でテキストメッセージを送信 */
 export async function pushTextMessage(
   userId: string,
@@ -110,15 +191,7 @@ export async function pushTextMessage(
   env: Env,
   quickReplyItems?: QuickReplyItem[],
 ): Promise<void> {
-  // LINE API テキスト上限: 5000 文字
-  const truncatedText = text.length > 5000 ? text.slice(0, 4997) + "..." : text;
-
-  const message: Record<string, unknown> = { type: "text", text: truncatedText };
-  if (quickReplyItems && quickReplyItems.length > 0) {
-    message.quickReply = { items: quickReplyItems.slice(0, 13) };
-  }
-
-  await linePush(userId, [message], env);
+  await linePush(userId, [buildTextMessage(text, quickReplyItems)], env);
 }
 
 /** LINE Push API で Flex Message を送信 */
@@ -128,15 +201,66 @@ export async function pushFlexMessage(
   contents: Record<string, unknown>,
   env: Env,
 ): Promise<void> {
-  // altText も 400 文字制限
-  const truncatedAltText =
-    altText.length > 400 ? altText.slice(0, 397) + "..." : altText;
+  await linePush(userId, [buildFlexMessage(altText, contents)], env);
+}
 
-  await linePush(
-    userId,
-    [{ type: "flex", altText: truncatedAltText, contents }],
-    env,
-  );
+/**
+ * 1 ターン（1 webhook イベント）分の応答送信を担う Responder。
+ *
+ * 会計方針（最大の節約）:
+ *   - reply token が生きていて未使用なら **reply（無料 — 通数非消費）** で送る。
+ *   - reply token が無い / 既に使用済み / reply が失敗した場合は **push（有料）** にフォールバック。
+ *   - reply token は「1 ターンで 1 回だけ」使えるため、ターン内の最初の送信のみ無料化される。
+ *     2 通目以降（例: テキストの後の Flex）は push になる（＝現行のメッセージ境界・quickReply
+ *     配置を一切変えずに、支配的コストである本文 1 通を無料化する非回帰設計）。
+ *
+ * 配信は常に担保する: reply が期限切れ/使用済み等で失敗しても push で必ず届ける。
+ */
+export interface LineResponder {
+  /** テキストを送る（reply 優先・push フォールバック）。 */
+  text(text: string, quickReplyItems?: QuickReplyItem[]): Promise<void>;
+  /** Flex を送る（reply 優先・push フォールバック）。 */
+  flex(altText: string, contents: Record<string, unknown>): Promise<void>;
+}
+
+/**
+ * Responder を生成する。`replyToken` が undefined のイベント（例: unfollow）では
+ * 常に push になる。
+ */
+export function createResponder(
+  userId: string,
+  replyToken: string | undefined,
+  env: Env,
+): LineResponder {
+  // reply token は 1 ターン 1 回のみ。並行送信での二重使用を避けるため、
+  // reply を試みる前に楽観的に consumed=true にする。
+  let consumed = false;
+
+  async function sendOne(messages: Array<Record<string, unknown>>): Promise<void> {
+    if (replyToken && !consumed) {
+      consumed = true;
+      try {
+        await lineReply(replyToken, messages, env);
+        return;
+      } catch (err) {
+        console.warn(
+          "[line] reply failed, falling back to push:",
+          err instanceof Error ? err.message : err,
+        );
+        // フォールスルーして push で必ず届ける
+      }
+    }
+    await linePush(userId, messages, env);
+  }
+
+  return {
+    async text(text: string, quickReplyItems?: QuickReplyItem[]): Promise<void> {
+      await sendOne([buildTextMessage(text, quickReplyItems)]);
+    },
+    async flex(altText: string, contents: Record<string, unknown>): Promise<void> {
+      await sendOne([buildFlexMessage(altText, contents)]);
+    },
+  };
 }
 
 /**
