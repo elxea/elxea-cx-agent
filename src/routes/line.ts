@@ -528,6 +528,7 @@ async function handleFollowEvent(
     const welcomeText =
       "こんにちは！elxea（エルシア）へようこそ。\n\n" +
       "鹿児島の茶畑から届くお茶を、あなたにぴったりの一杯としてお届けします。\n\n" +
+      "お便りをお送りするのは月に1〜2回、季節の節目だけ。気になるときはいつでも停止できます。\n\n" +
       "まずは、何から始めましょうか？";
 
     const quickReplyItems: QuickReplyItem[] = [
