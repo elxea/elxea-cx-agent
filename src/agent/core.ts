@@ -23,6 +23,7 @@ import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
 import { withTimeout } from "../lib/utils";
 import { recordEscalation } from "../lib/alerts";
+import { applyBrandGuard } from "../lib/brand-guard";
 
 type Message = {
   role: "user" | "assistant";
@@ -411,7 +412,11 @@ export async function runAgent(
 
     // ツール呼び出しがなければ最終応答
     if (toolUseBlocks.length === 0) {
-      const finalText = textBlocks.map((b) => b.text).join("");
+      // egress brand-fact ガード: 送信直前に AI 生成応答の非正本ブランド文言を正本語へ是正する。
+      const finalText = applyBrandGuard(
+        textBlocks.map((b) => b.text).join(""),
+        { channel, userId },
+      );
 
       // ナレッジ不足を記録
       if (isLowKnowledge) {
@@ -802,7 +807,10 @@ export async function runAgentStreaming(
     const quickReplies = generateQuickReplies(usedTools, escalated);
     if (quickReplies.length > 0) callbacks.onQuickReplies(quickReplies);
     // ツール使用ターンで蓄積されたテキストと最終テキストを結合
-    const fullResponse = (accumulatedText + finalText) || "申し訳ありません、お返事の生成に失敗しました。";
+    // egress brand-fact ガード: 保存・最終確定に使う全文を送信直前に是正する（冪等）。
+    const fullResponse =
+      applyBrandGuard(accumulatedText + finalText, { channel, userId }) ||
+      "申し訳ありません、お返事の生成に失敗しました。";
     callbacks.onDone(fullResponse);
     return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies };
   };
@@ -877,8 +885,13 @@ export async function runAgentStreaming(
     const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
 
     if (toolUseBlocks.length === 0) {
-      // ツール不使用: テキストをチャンク送信（既に生成済みのため擬似ストリーミング）
-      const finalText = textBlocks.map((b) => b.text).join("");
+      // ツール不使用: テキストをチャンク送信（既に生成済みのため擬似ストリーミング）。
+      // turn 0 は非ストリーミングで全文が揃っているため、チャンク送信前に egress ガードを適用でき、
+      // クライアントへ流れる delta も是正済みになる。
+      const finalText = applyBrandGuard(
+        textBlocks.map((b) => b.text).join(""),
+        { channel, userId },
+      );
       for (let i = 0; i < finalText.length; i += 8) {
         callbacks.onTextDelta(finalText.slice(i, i + 8));
       }
