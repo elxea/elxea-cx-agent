@@ -187,6 +187,19 @@ export async function runKnowledgeSync(
     lastSyncedAt = lastSync?.completed_at ?? undefined;
   }
 
+  // ブランド正本（About elxea + 公開してよい会社事実）を最初に同期する。
+  //   商品系 4 DB には無いブランド事実（社名・ステートメント・タグライン・取扱カテゴリ）を
+  //   RAG に載せ、AI が空欄を幻覚で埋める構造を断つ（ID-6701）。小さく最重要なので、
+  //   重い商品系ループより前に置き、フル再 embed で時間切れになっても確実に着地させる。
+  try {
+    await syncBrandKnowledge(supabase, env, result);
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error("Sync error for ブランド正本（About elxea）:", errMsg);
+    result.errorCount++;
+    result.errorDetails.push({ source: "brand", error: errMsg });
+  }
+
   const dbConfigs = getDBConfigs(env);
 
   for (const config of dbConfigs) {
@@ -214,18 +227,6 @@ export async function runKnowledgeSync(
       result.errorCount++;
       result.errorDetails.push({ source: config.label, error: errMsg });
     }
-  }
-
-  // ブランド正本（About elxea + 公開してよい会社事実）を knowledge に同期する。
-  //   商品系 4 DB には無いブランド事実（社名・ステートメント・タグライン・取扱カテゴリ）を
-  //   RAG に載せ、AI が空欄を幻覚で埋める構造を断つ（ID-6701）。mode 非依存で毎回リフレッシュ。
-  try {
-    await syncBrandKnowledge(supabase, env, result);
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    console.error("Sync error for ブランド正本（About elxea）:", errMsg);
-    result.errorCount++;
-    result.errorDetails.push({ source: "brand", error: errMsg });
   }
 
   // 結果の集計
