@@ -54,12 +54,12 @@ export const SITE_URL_JA = "https://elxea.com/ja";
  */
 export const ABOUT_BLURB =
   `${BRAND_NAME}（${BRAND_NAME_READING}）は、${BRAND_STATEMENT_SHORT}\n\n` +
-  "日本各地の小規模茶農家さんが大切に育てた茶葉を厳選し、産地ごとの個性（テロワール）を、つくり手の物語とともにお届けしています。";
+  "シングルオリジン（単一農園・単一品種）の茶葉は、それぞれの産地で小規模茶農家さんが大切に育てたもの。産地ごとの個性（テロワール）を、つくり手の物語とともにお届けしています。";
 
 /** 友だち追加ウェルカムの導入文（brand-context ステートメント準拠）。 */
 export const WELCOME_INTRO =
   `こんにちは！${BRAND_NAME}（${BRAND_NAME_READING}）へようこそ。\n\n` +
-  "日本各地の小規模茶農家さんから厳選した、シングルオリジンのお茶を、あなたにぴったりの一杯としてお届けします。";
+  "日本各地の小規模茶農家さんから厳選した、シングルオリジン（単一農園・単一品種）のお茶を、あなたにぴったりの一杯としてお届けします。";
 
 /** オンボーディング「お茶を探す」導入文。 */
 export const ONBOARDING_EXPLORE_INTRO =

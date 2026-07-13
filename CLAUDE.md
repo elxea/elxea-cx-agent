@@ -67,7 +67,3 @@ Spec や設計書の「文面案」からの再創作は禁止（文面案は正
 ## Devlog ルール
 
 notion-record スキルに準拠。
-
-## Devlog ルール
-
-notion-record スキルに準拠。
