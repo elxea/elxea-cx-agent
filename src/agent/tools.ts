@@ -177,7 +177,10 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   ORDER_DETAIL_TOOL,
   RECOMMEND_PRODUCT_TOOL,
   CREATE_CART_LINK_TOOL,
-  SET_BROADCAST_OPTOUT_TOOL,
+  // SET_BROADCAST_OPTOUT_TOOL: opt-out 機能は当面廃止（配信停止は LINE 標準ブロックに委譲・
+  //   2026-07-13 オーナー方針）。AI が「配信を止めた」と偽の約束をしないよう、AI へのツール露出を停止。
+  //   定義（SET_BROADCAST_OPTOUT_TOOL）・実体（broadcast-optout.ts）・core.ts ハンドラ・migration 020 は
+  //   将来の再導入用に温存（眠らせるのみ・削除しない）。
 ];
 
 /** 後方互換のため旧名もエクスポート */

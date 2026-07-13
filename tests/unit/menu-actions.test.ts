@@ -107,11 +107,14 @@ it("subscriber と generic は別文面", () => {
 
 console.log("\n--- (d) ⑤elxea について ---");
 
-it("ブランド紹介 + 実在 URL(/ja) + 配信設定の受け皿", () => {
+it("ブランド紹介 + 実在 URL(/ja) + AI 開示 + 配信頻度（opt-out 約束は書かない）", () => {
   const a = buildAboutMessage();
   assert(a.includes("elxea"), "mentions brand");
   assert(a.includes("https://elxea.com/ja"), "has site URL");
-  assert(a.includes("配信") && (a.includes("停止") || a.includes("変更")), "opt-out catcher line");
+  assert(a.includes("AI"), "AI 開示1文（P0-5）");
+  assert(a.includes("月に1〜2回"), "配信頻度の期待値");
+  // opt-out 廃止（2026-07-13）: 存在しない「配信停止できます」約束を書かないことを固定。
+  assert(!a.includes("停止"), "配信停止の約束を含めない");
 });
 
 console.log("\n--- (e) インターセプタ順序（pending-state 保護） ---");

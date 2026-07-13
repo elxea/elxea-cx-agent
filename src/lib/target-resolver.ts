@@ -85,8 +85,12 @@ export function joinCandidates(
 
 /**
  * 配信可能な lineUserId を抽出する（純粋・除外ロジックの中核）。
- * 除外: 未リンク / lineUserId 空 / 退会 / opt-out / ペルソナ不一致。
+ * 除外: 未リンク / lineUserId 空 / 退会（unfollow=ブロック相当）/ ペルソナ不一致。
  * 重複 lineUserId は 1 件に畳む（二重計上防止）。
+ *
+ * 注（2026-07-13 オーナー方針）: opt-out 機能は当面廃止（配信停止は LINE 標準ブロックに委譲）。
+ *   したがって配信経路（本関数）は broadcast_opted_out を**参照しない**。
+ *   LinkageRow.optedOut / migration 020 の列は将来の再導入用に温存（dead metadata）。
  */
 export function filterEligible(
   candidates: Candidate[],
@@ -99,39 +103,10 @@ export function filterEligible(
     if (!c.linked) continue;
     if (!c.lineUserId) continue;
     if (c.unfollowed) continue;
-    if (c.optedOut) continue;
+    // opt-out は廃止のため除外しない（c.optedOut は参照しない・温存）。
     if (seen.has(c.lineUserId)) continue;
     seen.add(c.lineUserId);
     out.push(c.lineUserId);
-  }
-  return out;
-}
-
-/**
- * 全員配信の配信可能 lineUserId を抽出する（純粋・案A / P0-4 の中核）。
- *
- * 決定1（案A）: 全員一斉配信（broadcast API）は廃止し、登録リスト（customer_linkages）への
- *   multicast に統一する。broadcast API は受信者を絞れず opt-out を除外できないため、
- *   opt-out 者を確実に除外するにはアドレス可能な multicast に切り替える必要がある。
- *
- * 除外: lineUserId 空 / 退会（unfollow）/ opt-out。ペルソナは問わない（全ペルソナ横断）。
- *   重複 lineUserId は 1 件に畳む（同一 line_user_id に複数連携があっても二重送信しない）。
- *
- * 注（対象母集団の限界・要判断で報告）: 対象は customer_linkages に line_user_id を持つ行に限る。
- *   Shopify 連携も opt-out もしたことがない純粋な友だちは customer_linkages に行が無く、
- *   この集合には含まれない。broadcast の「全友だち」より狭い「登録リスト」である点は
- *   決定1（登録者リストへの multicast）と整合する。
- */
-export function filterEligibleAll(linkages: LinkageRow[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const l of linkages) {
-    if (!l.lineUserId) continue;
-    if (l.unfollowed) continue;
-    if (l.optedOut) continue;
-    if (seen.has(l.lineUserId)) continue;
-    seen.add(l.lineUserId);
-    out.push(l.lineUserId);
   }
   return out;
 }
@@ -168,10 +143,7 @@ export interface TargetResolverDeps {
   loadLinkages(): Promise<LinkageRow[]>;
   /** persona.primary 設定済みユーザーをページングで全件取得。 */
   loadPersonaUsers(): Promise<PersonaRow[]>;
-  /**
-   * @deprecated 案A（決定1 / P0-4）で全員配信が multicast に統一されたため resolveTargets からは
-   *   参照されなくなった（全員配信も loadLinkages ベース）。互換のため残置。
-   */
+  /** broadcast（全員配信）時の想定受信者数（無料枠ガードの見積用）。未設定・取得不能は null。 */
   broadcastEstimate(): Promise<number | null>;
   /**
    * 社内 allowlist（LINE user ID 群）を供給する。SoT は env `LINE_INTERNAL_USER_IDS`。
@@ -203,31 +175,26 @@ export async function resolveTargets(
   deps: TargetResolverDeps,
 ): Promise<ResolvedTargets> {
   if (audience.kind === "all") {
-    // 案A（決定1 / P0-4）: broadcast API 廃止。登録リスト（customer_linkages）への multicast に統一し、
-    //   opt-out / 退会を確実に除外する（broadcast では除外できないため）。
-    let linkages: LinkageRow[];
+    // 全員配信は LINE 標準 broadcast に戻す（案A multicast 統一を撤回・2026-07-13 オーナー方針）。
+    //   opt-out 廃止（配信停止は LINE 標準ブロックに委譲）のため、opt-out 除外目的の multicast は不要。
+    //   broadcast は受信者 ID 不要で全友だちへ届く。見積は無料枠ガード用（LINE_BROADCAST_ESTIMATED_*）。
+    let estimate: number | null;
     try {
-      linkages = await deps.loadLinkages();
+      estimate = await deps.broadcastEstimate();
     } catch (err) {
       return {
         kind: "error",
-        reason: `全員配信の対象取得失敗: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `broadcast 見積取得失敗: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
-    const userIds = filterEligibleAll(linkages);
-    if (userIds.length === 0) {
+    if (estimate == null || !Number.isInteger(estimate) || estimate < 1) {
       return {
         kind: "error",
-        reason: "配信可能な登録ユーザーが 0 件（退会/opt-out 除外後・fail-closed）",
+        reason:
+          "broadcast の想定受信者数が未設定/不正（fail-closed。LINE_BROADCAST_ESTIMATED_RECIPIENTS_* を設定）",
       };
     }
-    const batches = chunkForMulticast(userIds, MULTICAST_MAX_RECIPIENTS);
-    return {
-      kind: "multicast",
-      userIds,
-      batches,
-      estimatedRecipients: userIds.length,
-    };
+    return { kind: "broadcast", estimatedRecipients: estimate };
   }
 
   if (audience.kind === "allowlist") {

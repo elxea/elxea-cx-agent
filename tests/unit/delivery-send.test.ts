@@ -65,7 +65,6 @@ import {
 import {
   joinCandidates,
   filterEligible,
-  filterEligibleAll,
   collectAllPages,
   resolveTargets,
   parseAllowlist,
@@ -488,11 +487,11 @@ describe("joinCandidates / filterEligible（除外ロジック）", () => {
     { shopifyCustomerId: "s6", persona: "serenity" }, // linkage 無し（未リンク）
   ];
 
-  it("serenity 対象は L1 のみ（退会/opt-out/未リンク/別ペルソナを除外）", () => {
+  it("serenity 対象は L1,L3（退会/未リンク/別ペルソナを除外・opt-out は廃止で除外しない）", () => {
     const cands = joinCandidates(personas, linkages);
     const ids = filterEligible(cands, "serenity");
-    assertEqual(ids.length, 1, "1 件");
-    assertEqual(ids[0], "L1", "L1 のみ");
+    // opt-out 廃止（2026-07-13）: s3/L3（旧 opt-out）も配信対象に含まれる。退会 s2/L2・未リンク s4/s6 は除外。
+    assertEqual(ids.sort().join(","), "L1,L3", "L1,L3（opt-out は除外しない）");
   });
   it("explorer 対象は L5", () => {
     const cands = joinCandidates(personas, linkages);
@@ -532,35 +531,20 @@ describe("resolveTargets", () => {
     ...over,
   });
 
-  it("全員（案A/P0-4）: 登録リストへ multicast（退会/opt-out を除外）", async () => {
+  it("全員: 見積があれば broadcast（LINE 標準・opt-out 廃止で multicast 統一を撤回）", async () => {
     const r = await resolveTargets(
       { kind: "all" },
-      baseDeps({
-        loadLinkages: async () => [
-          { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: false },
-          { shopifyCustomerId: "s2", lineUserId: "L2", unfollowed: true, optedOut: false }, // 退会→除外
-          { shopifyCustomerId: "s3", lineUserId: "L3", unfollowed: false, optedOut: true }, // opt-out→除外
-          { shopifyCustomerId: "s4", lineUserId: "L4", unfollowed: false, optedOut: false },
-          { shopifyCustomerId: "s5", lineUserId: null, unfollowed: false, optedOut: false }, // 未リンク→除外
-        ],
-      }),
+      baseDeps({ broadcastEstimate: async () => 38 }),
     );
-    assertTrue(r.kind === "multicast", "multicast（broadcast ではない）");
-    if (r.kind === "multicast") {
-      assertEqual(r.userIds.join(","), "L1,L4", "退会/opt-out/未リンクを除外");
-      assertEqual(r.estimatedRecipients, 2, "2 件");
-    }
+    assertTrue(r.kind === "broadcast", "broadcast");
+    if (r.kind === "broadcast") assertEqual(r.estimatedRecipients, 38, "38（LINE 管理画面の友だち数）");
   });
-  it("全員（案A/P0-4）: 除外後 0 件は error（fail-closed）", async () => {
+  it("全員: 見積 null は error（fail-closed）", async () => {
     const r = await resolveTargets(
       { kind: "all" },
-      baseDeps({
-        loadLinkages: async () => [
-          { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: true },
-        ],
-      }),
+      baseDeps({ broadcastEstimate: async () => null }),
     );
-    assertTrue(r.kind === "error", "全員 opt-out は error");
+    assertTrue(r.kind === "error", "見積なしは error");
   });
   it("ペルソナ: 除外後 0 件は error", async () => {
     const r = await resolveTargets(
@@ -646,35 +630,6 @@ describe("parseAllowlist（env カンマ区切り → ID 配列）", () => {
     assertEqual(parseAllowlist(undefined).length, 0, "undefined");
     assertEqual(parseAllowlist("").length, 0, "空文字");
     assertEqual(parseAllowlist("   ").length, 0, "空白のみ");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// filterEligibleAll（案A / P0-4）— 全員配信の登録リスト抽出
-// ---------------------------------------------------------------------------
-describe("filterEligibleAll（全ペルソナ横断・退会/opt-out/未リンク除外）", () => {
-  it("全ペルソナ横断で配信可能な lineUserId を返す", () => {
-    const ids = filterEligibleAll([
-      { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: false },
-      { shopifyCustomerId: "s2", lineUserId: "L2", unfollowed: false, optedOut: false },
-    ]);
-    assertEqual(ids.join(","), "L1,L2", "全員");
-  });
-  it("退会/opt-out/未リンクを除外する", () => {
-    const ids = filterEligibleAll([
-      { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: true, optedOut: false },
-      { shopifyCustomerId: "s2", lineUserId: "L2", unfollowed: false, optedOut: true },
-      { shopifyCustomerId: "s3", lineUserId: null, unfollowed: false, optedOut: false },
-      { shopifyCustomerId: "s4", lineUserId: "L4", unfollowed: false, optedOut: false },
-    ]);
-    assertEqual(ids.join(","), "L4", "L4 のみ");
-  });
-  it("同一 lineUserId の重複は 1 件に畳む", () => {
-    const ids = filterEligibleAll([
-      { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: false },
-      { shopifyCustomerId: "s2", lineUserId: "L1", unfollowed: false, optedOut: false },
-    ]);
-    assertEqual(ids.length, 1, "dedup");
   });
 });
 
@@ -1111,30 +1066,18 @@ describe("runDeliveryOnce: 正常系（順序 claim→ガード→送信）", ()
     assertTrue(iSending >= 0 && iSent > iSending, "Sending→Sent 順");
   });
 
-  it("【P0-7a】unit を台帳 claim と送信ペイロードの両方へ同一値で載せる（multicast）", async () => {
+  it("【P0-7a】unit を台帳 claim と送信ペイロードの両方へ同一値で載せる（broadcast 経路でも付与）", async () => {
     // audienceRaw=全員・now=2026-07-10T05:00Z（JST 07-10）→ unit=s20260710_all
+    // 全員配信は LINE 標準 broadcast（default baseDeps.resolveTargets が broadcast を返す）。
     const page = await makePage({});
     const repo = makeFakeRepo([page]);
     const ledger = makeFakeLedger();
     const sender = createRecordingSender();
-    // 案A: 全員も multicast。resolveTargets を multicast に差し替えて実経路を再現。
-    const res = await runDeliveryOnce(
-      baseDeps({
-        repo,
-        ledger,
-        sender,
-        resolveTargets: async () => ({
-          kind: "multicast",
-          userIds: ["L1", "L2"],
-          batches: [["L1", "L2"]],
-          estimatedRecipients: 2,
-        }),
-      }),
-    );
+    const res = await runDeliveryOnce(baseDeps({ repo, ledger, sender }));
     assertEqual(res.processed[0].disposition, "sent", "sent");
-    // 送信側 unit
-    assertEqual(sender.calls[0].kind, "multicast", "multicast 送信");
-    assertEqual(sender.calls[0].aggregationUnit, "s20260710_all", "送信 unit");
+    // 送信側 unit（broadcast でも customAggregationUnits を付与）
+    assertEqual(sender.calls[0].kind, "broadcast", "broadcast 送信");
+    assertEqual(sender.calls[0].aggregationUnit, "s20260710_all", "broadcast にも送信 unit");
     // 台帳側 unit（同一値で 1:1）
     assertEqual(ledger.rows.length, 1, "claim 1 行");
     assertEqual(ledger.rows[0].aggregationUnit, "s20260710_all", "台帳 unit");
