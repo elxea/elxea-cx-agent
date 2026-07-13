@@ -14,6 +14,17 @@
 
 import type { Env } from "../index";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  BRAND_NAME,
+  BRAND_NAME_READING,
+  COMPANY_NAME,
+  BRAND_STATEMENT_SHORT,
+  BRAND_TAGLINE,
+  TEA_CATEGORIES,
+  SITE_URL_JA,
+  SUPPORT_EMAIL,
+} from "../lib/brand-copy";
+import { guardBrandFacts } from "../lib/brand-guard";
 
 // -------------------------------------------------------------------
 // Types
@@ -203,6 +214,18 @@ export async function runKnowledgeSync(
       result.errorCount++;
       result.errorDetails.push({ source: config.label, error: errMsg });
     }
+  }
+
+  // ブランド正本（About elxea + 公開してよい会社事実）を knowledge に同期する。
+  //   商品系 4 DB には無いブランド事実（社名・ステートメント・タグライン・取扱カテゴリ）を
+  //   RAG に載せ、AI が空欄を幻覚で埋める構造を断つ（ID-6701）。mode 非依存で毎回リフレッシュ。
+  try {
+    await syncBrandKnowledge(supabase, env, result);
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error("Sync error for ブランド正本（About elxea）:", errMsg);
+    result.errorCount++;
+    result.errorDetails.push({ source: "brand", error: errMsg });
   }
 
   // 結果の集計
@@ -414,6 +437,113 @@ async function processPage(
       if (mode === "add") result.addedChunks++;
     }
   }
+}
+
+// -------------------------------------------------------------------
+// Brand Knowledge Sync（ブランド正本 → RAG）
+// -------------------------------------------------------------------
+
+/** About elxea ページ（ブランド正本の一次情報・公開マーケ本文）。 */
+const ABOUT_ELXEA_PAGE_ID = "154f0d9d-e112-457c-83c6-2fb5b56b1788";
+/** ブランド正本チャンクの source_type。 */
+const BRAND_SOURCE_TYPE = "brand";
+
+/**
+ * ブランド正本（About elxea + 公開してよい会社事実）を knowledge_chunks に同期する。
+ *
+ * 公開情報のみ（社名・ブランドステートメント・タグライン・取扱カテゴリ・サイト・問い合わせ）を、
+ * brand-copy.ts の正本から構築して ingest する。Corporate Info DB の生フィールドは引かないため、
+ * 財務・個人情報が構造的に混入しない。About elxea ページ本文は公開マーケ本文として付加する。
+ * 小さいので mode 非依存で毎回フルリフレッシュ（delete → re-insert）する。
+ */
+async function syncBrandKnowledge(
+  supabase: SupabaseClient,
+  env: Env,
+  result: SyncResult,
+): Promise<void> {
+  // (1) brand-copy.ts 正本から「公開してよい会社事実」だけを構築する。
+  const canonicalFacts = [
+    `ブランド名: ${BRAND_NAME}（${BRAND_NAME_READING}）`,
+    `運営会社: ${COMPANY_NAME}`,
+    `ブランドステートメント: ${BRAND_STATEMENT_SHORT}`,
+    `タグライン: ${BRAND_TAGLINE}`,
+    `取扱カテゴリ: ${TEA_CATEGORIES}`,
+    `公式サイト: ${SITE_URL_JA}`,
+    `お問い合わせ: ${SUPPORT_EMAIL}`,
+  ].join("\n");
+
+  // (2) About elxea ページ本文（公開マーケ本文）。取得失敗は正本ファクトのみで続行。
+  let aboutBody = "";
+  try {
+    aboutBody = await getPageContent(ABOUT_ELXEA_PAGE_ID, env);
+  } catch (err) {
+    console.warn(
+      "[sync:brand] About elxea 本文取得に失敗、正本ファクトのみ同期:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // (3) egress と同じ brand-guard で非正本文言を是正してから ingest（多層防御）。
+  const rawText = aboutBody ? `${canonicalFacts}\n\n${aboutBody}` : canonicalFacts;
+  const { text, violations } = guardBrandFacts(rawText);
+  if (violations.length > 0) {
+    console.warn(
+      `[sync:brand] About elxea 本文に非正本文言 ${violations.length} 件を検出し是正: ${violations
+        .map((v) => v.matched)
+        .join(", ")}`,
+    );
+  }
+
+  const title = "elxea について（ブランド正本）";
+
+  // 既存ブランドチャンクを入れ替え（毎回フルリフレッシュ）。
+  const { data: deleted } = await supabase
+    .from("knowledge_chunks")
+    .delete()
+    .eq("source_type", BRAND_SOURCE_TYPE)
+    .select("id");
+  result.deletedChunks += deleted?.length ?? 0;
+
+  const chunks = splitIntoChunks(text, title);
+  result.totalPages += 1;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const embeddingResult = (await env.AI.run("@cf/baai/bge-m3", {
+      text: [chunk],
+    })) as { data: number[][] };
+    const embedding = embeddingResult.data[0];
+
+    const { error } = await supabase.from("knowledge_chunks").upsert(
+      {
+        notion_page_id: ABOUT_ELXEA_PAGE_ID,
+        source_type: BRAND_SOURCE_TYPE,
+        source_title: title,
+        content: chunk,
+        embedding: JSON.stringify(embedding),
+        metadata: {
+          source_db: BRAND_SOURCE_TYPE,
+          chunk_index: i,
+          total_chunks: chunks.length,
+        },
+        notion_last_edited_at: new Date().toISOString(),
+        synced_at: new Date().toISOString(),
+      },
+      { onConflict: "notion_page_id,content" },
+    );
+
+    if (error) {
+      console.error(`Upsert failed for ${title}:`, error.message);
+      result.errorCount++;
+      result.errorDetails.push({ source: title, error: error.message });
+    } else {
+      result.addedChunks++;
+    }
+  }
+
+  console.log(
+    `[sync:brand] ブランド正本を同期: ${chunks.length} chunks (about_body=${aboutBody ? "included" : "missing"})`,
+  );
 }
 
 // -------------------------------------------------------------------
