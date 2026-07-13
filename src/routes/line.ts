@@ -21,6 +21,8 @@ import { resolveUnifiedUserId } from "../lib/identity";
 import { handleTeaMenuFlow } from "../lib/tea-menu";
 import { handleMenuActionFlow } from "../lib/menu-actions";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
+import { logFlowEvent } from "../lib/flow-events";
+import { menuTapValue } from "../lib/menu-tap";
 import {
   getFirestoreEnv,
   updateCustomerProfile,
@@ -711,6 +713,21 @@ async function handleOnboardingMessage(
   let initialAction: string;
   let followUpQuickReplies: QuickReplyItem[] = [];
 
+  // welcome.tap 記録（P0-1・fire-and-forget）: ウェルカム 3 択の探索/について/使い方タップ（H9）。
+  const welcomeTap: Record<string, "explore" | "about" | "howto"> = {
+    [ONBOARDING_EXPLORE_TEXT]: "explore",
+    [ONBOARDING_ABOUT_TEXT]: "about",
+    [ONBOARDING_HOWTO_TEXT]: "howto",
+  };
+  const wtv = welcomeTap[userMessage];
+  if (wtv) {
+    void logFlowEvent(createSupabaseClient(env), {
+      eventName: "welcome.tap",
+      userRef: lineUserId,
+      value: wtv,
+    });
+  }
+
   switch (userMessage) {
     case ONBOARDING_EXPLORE_TEXT:
       initialAction = "explore_tea";
@@ -890,6 +907,17 @@ async function handleTextMessage(
 ): Promise<void> {
   // 空メッセージをスキップ
   if (!userMessage.trim()) return;
+
+  // menu.tap 記録（P0-1・fire-and-forget）: リッチメニュー 5 枠の完全一致タップを flow_events へ。
+  //   下流の各インターセプタは会話保存より前に return するため、ここで先に記録する（H4 枠別タップ分布）。
+  const tapValue = menuTapValue(userMessage);
+  if (tapValue) {
+    void logFlowEvent(createSupabaseClient(env), {
+      eventName: "menu.tap",
+      userRef: lineUserId,
+      value: tapValue,
+    });
+  }
 
   // オンボーディング Quick Reply タップの処理
   const wasOnboarding = await handleOnboardingMessage(lineUserId, userMessage, env, responder);

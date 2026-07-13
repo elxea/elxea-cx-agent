@@ -30,6 +30,7 @@
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
+import { logFlowEvent, type FlowEventInput } from "./flow-events";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
   getFirestoreEnv,
@@ -440,6 +441,48 @@ export async function recordDiagnosisPersona(
 }
 
 // ---------------------------------------------------------------------------
+// 診断ファネル記録（P0-2）: アクション → flow_events 入力（純粋・テスト可能）
+// ---------------------------------------------------------------------------
+
+/**
+ * ユーザー発話（診断トークン）から記録すべき flow_events を導出する（純粋）。
+ *
+ * 設計 §B-5a のイベント名に対応。段の意味に注意（state レスのため「次に見せる画面」= 直前の回答）:
+ *   - start  → diag.start（Q1 提示。entry は現状メニュー由来のため value="menu"）
+ *   - q2     → 直前に Q1 を回答 → diag.answer(step=q1, value=q1_{n})
+ *   - q3     → 直前に Q2 を回答 → diag.answer(step=q2, value=q2_{n})
+ *   - result → 直前に Q3 を回答 → diag.answer(step=q3) + diag.result(value=winner)
+ *   - invalid→ diag.invalid
+ *
+ * これで棚卸しの H1（診断ファネル start→q1→q2→q3→result）・H8（選択分布）が検証可能になる。
+ */
+export function diagnosisFlowEvents(
+  userMessage: string,
+  userRef: string,
+  winner: PersonaType | null,
+): FlowEventInput[] {
+  const action = parsePreferenceAction(userMessage);
+  if (!action) return [];
+  switch (action.kind) {
+    case "start":
+      return [{ eventName: "diag.start", userRef, value: "menu" }];
+    case "q2":
+      return [{ eventName: "diag.answer", userRef, step: "q1", value: `q1_${action.q1}` }];
+    case "q3":
+      return [{ eventName: "diag.answer", userRef, step: "q2", value: `q2_${action.q2}` }];
+    case "result": {
+      const evs: FlowEventInput[] = [
+        { eventName: "diag.answer", userRef, step: "q3", value: `q3_${action.q3}` },
+      ];
+      if (winner) evs.push({ eventName: "diag.result", userRef, value: winner });
+      return evs;
+    }
+    case "invalid":
+      return [{ eventName: "diag.invalid", userRef }];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ本体）
 // ---------------------------------------------------------------------------
 
@@ -465,6 +508,13 @@ export async function handlePreferenceDiagnosis(
 
   // 先に応答を返す（記録の成否に関わらずユーザー体験を完結させる）。
   await responder.text(plan.message.text, plan.message.quickReplies);
+
+  // 診断ファネル記録（P0-2・fire-and-forget・失敗は握りつぶし）。
+  //   診断の本番昇格前に必須（昇格後からでは初期ファネルを失う）。
+  const supabase = createSupabaseClient(env);
+  for (const ev of diagnosisFlowEvents(userMessage, lineUserId, plan.winner)) {
+    void logFlowEvent(supabase, ev);
+  }
 
   // 結果確定時のみ persona を記録（fail-safe: 例外を投げない）。
   if (plan.winner) {
