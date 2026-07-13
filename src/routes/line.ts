@@ -24,6 +24,11 @@ import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { logFlowEvent } from "../lib/flow-events";
 import { menuTapValue } from "../lib/menu-tap";
 import {
+  WELCOME_INTRO,
+  ONBOARDING_EXPLORE_INTRO,
+  ONBOARDING_ABOUT_BODY,
+} from "../lib/brand-copy";
+import {
   getFirestoreEnv,
   updateCustomerProfile,
   addBehaviorEvent,
@@ -528,8 +533,7 @@ async function handleFollowEvent(
   } else {
     // --- 通常の友だち追加ウェルカムメッセージ（既存フロー維持） ---
     const welcomeText =
-      "こんにちは！elxea（エルシア）へようこそ。\n\n" +
-      "鹿児島の茶畑から届くお茶を、あなたにぴったりの一杯としてお届けします。\n\n" +
+      `${WELCOME_INTRO}\n\n` +
       "お便りをお送りするのは月に1〜2回、季節の節目だけです。\n\n" +
       "まずは、何から始めましょうか？";
 
@@ -733,7 +737,7 @@ async function handleOnboardingMessage(
       initialAction = "explore_tea";
       responseText =
         "お茶を探しましょう！\n\n" +
-        "elxea では鹿児島を中心に、各地の生産者から届くお茶を取り揃えています。\n\n" +
+        `${ONBOARDING_EXPLORE_INTRO}\n\n` +
         "どんなシーンで楽しみたいですか？";
       followUpQuickReplies = [
         {
@@ -753,10 +757,7 @@ async function handleOnboardingMessage(
 
     case ONBOARDING_ABOUT_TEXT:
       initialAction = "about";
-      responseText =
-        "elxea は「日常に、静かな豊かさを」をテーマに、鹿児島の生産者と直接つながるブランドです。\n\n" +
-        "茶畑で丁寧に育てられたお茶を、生産者のストーリーと一緒にお届けしています。\n\n" +
-        "お茶だけでなく、茶葉を使ったスキンケアも手がけています。気になることがあれば、何でも聞いてくださいね。";
+      responseText = ONBOARDING_ABOUT_BODY;
       followUpQuickReplies = [
         {
           type: "action",

@@ -112,7 +112,7 @@ export const BROADCAST_TEMPLATES: BroadcastTemplate[] = [
     id: "explorer-winter-01",
     persona: "explorer",
     season: "winter",
-    text: "鹿児島の茶畑では、冬の間も生産者が土づくりに励んでいます。\n\nその手間が、来春の一番茶に結実します。産地を訪ねるような気持ちで、一杯いかがですか。\n\nhttps://elxea.com/ja",
+    text: "日本各地の茶畑では、冬の間も生産者さんが土づくりに励んでいます。\n\nその手間が、来春の一番茶に結実します。産地を訪ねるような気持ちで、一杯いかがですか。\n\nhttps://elxea.com/ja",
   },
   {
     id: "explorer-all-01",

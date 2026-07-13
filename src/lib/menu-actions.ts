@@ -20,6 +20,7 @@ import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import { getCustomerProfile, getFirestoreEnv } from "./firestore";
+import { ABOUT_BLURB } from "./brand-copy";
 
 // ---------------------------------------------------------------------------
 // トリガー（リッチメニュー message text と完全一致）
@@ -92,9 +93,7 @@ export function consultEntryValue(
 /** ⑤ elxea についての紹介（3-4 文・和の静けさ）＋ 配信設定の受け皿を末尾に一言。 */
 export function buildAboutMessage(): string {
   return (
-    "elxea（エルシア）は、「日常に、静かな豊かさを」をテーマにしたお茶のブランドです。\n\n" +
-    "鹿児島を中心に各地の生産者と直接つながり、茶畑で丁寧に育てられたお茶を、つくり手の物語とともにお届けしています。" +
-    "お茶だけでなく、茶葉を活かしたスキンケアも手がけています。\n\n" +
+    `${ABOUT_BLURB}\n\n` +
     `くわしくはこちらをご覧ください。\n${SITE_URL}\n\n` +
     "このトークは、elxea のサポートを担当する AI がお答えしています。お茶えらびのご相談など、気軽に話しかけてくださいね。\n\n" +
     "お便りをお送りするのは月に1〜2回、季節の節目だけです。"

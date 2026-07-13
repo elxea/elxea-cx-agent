@@ -49,6 +49,25 @@ LINE Webhook → Hono → Claude API (tool_use) → LINE Push
 - `--force` や `--no-verify` は原則禁止
 - AI は Notion ナレッジにある情報のみで回答する（一般知識での補完禁止）
 
+## ユーザー向けブランド文言のルール（必須）
+
+ユーザーに表示されるブランド文言（読み仮名・ブランドステートメント・タグライン・会社情報・
+産地/事業領域の説明 等）を**新規作成・変更するときは、必ず正本に突合してから書く**。
+Spec や設計書の「文面案」からの再創作は禁止（文面案は正本ではない）。
+
+- 正本: `elxea-brand-context` skill（`/Users/setaka/github/elxea/agents/_shared/skills/elxea-brand-context/SKILL.md`）
+  と About elxea（https://www.notion.so/154f0d9de112457c83c62fb5b56b1788 ）、
+  会社基本情報は Corporate Info DB（https://www.notion.so/fc8c353f9650453c9707ae0a806ae484 ）。
+- ユーザー向けブランド文言は `src/lib/brand-copy.ts` に集約する（各定数に出典 URL コメント必須）。
+  メッセージビルダーは brand-copy の定数を参照し、ブランド事実をベタ書きしない。
+- 禁止語リグレッションテスト（`tests/unit/brand-copy.test.ts`）が「エルシア／鹿児島を中心／
+  スキンケア／合同会社／静かな豊かさ」等の非正本文言の再混入を機械的に検出する。追加の禁止語が
+  判明したら同テストに追記する。
+
+## Devlog ルール
+
+notion-record スキルに準拠。
+
 ## Devlog ルール
 
 notion-record スキルに準拠。
