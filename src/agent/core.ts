@@ -215,17 +215,10 @@ export async function runAgent(
   // Firestore に behavior event を記録（fire-and-forget: レスポンスをブロックしない）
   if (firestoreCustomerId && fsEnv) {
     try {
-      const messageEvent: BehaviorEvent = {
-        action: "line_message",
-        channel,
-        metadata: { query: userMessage },
-        personaSignal: null,
-        createdAt: new Date().toISOString(),
-      };
-      addBehaviorEvent(firestoreCustomerId, messageEvent, fsEnv).catch((err) => {
-        console.warn("[agent] addBehaviorEvent (message) failed:", err instanceof Error ? err.message : err);
-      });
-
+      // P0-11（§B-7）: 発話全文（metadata.query）の behaviorLog 書き込みを停止する。
+      //   全文は conversations（90日 purge）で参照でき、プロンプト注入用途は抽出済みシグナルで足りる。
+      //   Supabase 会話ログ90日と非対称な「無期限の発話全文」を behaviorLog から無くす。
+      //   → line_message（全文）イベントは記録せず、抽出済みシグナルのみ残す。
       const signalEvents = extractConversationSignals(userMessage, channel);
       for (const event of signalEvents) {
         addBehaviorEvent(firestoreCustomerId, event, fsEnv).catch((err) => {
@@ -697,10 +690,7 @@ export async function runAgentStreaming(
   // Behavior event 記録（fire-and-forget）
   if (firestoreCustomerId && fsEnv) {
     try {
-      addBehaviorEvent(firestoreCustomerId, {
-        action: "line_message", channel, metadata: { query: userMessage },
-        personaSignal: null, createdAt: new Date().toISOString(),
-      }, fsEnv).catch(() => {});
+      // P0-11（§B-7）: 発話全文（metadata.query）の behaviorLog 書き込みを停止（抽出済みシグナルのみ）。
       for (const ev of extractConversationSignals(userMessage, channel)) {
         addBehaviorEvent(firestoreCustomerId, ev, fsEnv).catch(() => {});
       }
