@@ -190,10 +190,16 @@ export interface LineSender {
   multicast(
     batches: string[][],
     messages: LineMessage[],
+    /**
+     * 配信計測の集計単位名（P0-7a）。指定時は customAggregationUnits として送信ペイロードに載せる。
+     * 未指定なら従来どおり付与しない（後方互換）。命名検証は呼び出し側（orchestrator）で済ませる。
+     */
+    aggregationUnit?: string,
   ): Promise<SendOutcome>;
   broadcast(
     messages: LineMessage[],
     estimatedRecipients: number,
+    aggregationUnit?: string,
   ): Promise<SendOutcome>;
 }
 
@@ -207,16 +213,21 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
   const authHeader = { Authorization: `Bearer ${channel.accessToken}` };
 
   return {
-    async multicast(batches, messages) {
+    async multicast(batches, messages, aggregationUnit) {
       let delivered = 0;
       const errors: string[] = [];
+      // P0-7a: unit を付けると LINE が unit 別の開封/クリック統計を保持する（後付け不可）。
+      //   1 リクエスト 1 unit（customAggregationUnits は 1 要素配列）。未指定なら従来どおり付けない。
+      const unitPayload = aggregationUnit
+        ? { customAggregationUnits: [aggregationUnit] }
+        : {};
       for (const batch of batches) {
         if (batch.length === 0) continue;
         try {
           const res = await fetch("https://api.line.me/v2/bot/message/multicast", {
             method: "POST",
             headers: { "Content-Type": "application/json", ...authHeader },
-            body: JSON.stringify({ to: batch, messages }),
+            body: JSON.stringify({ to: batch, messages, ...unitPayload }),
           });
           if (res.ok) {
             delivered += batch.length;
@@ -238,12 +249,17 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
       };
     },
 
-    async broadcast(messages, estimatedRecipients) {
+    async broadcast(messages, estimatedRecipients, aggregationUnit) {
+      // 注: 案A（決定1・P0-4）で全員配信は multicast に統一され、この broadcast 経路は
+      //   resolveTargets からは到達しない（deprecated）。防御的に unit 付与だけ維持する。
+      const unitPayload = aggregationUnit
+        ? { customAggregationUnits: [aggregationUnit] }
+        : {};
       try {
         const res = await fetch("https://api.line.me/v2/bot/message/broadcast", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
-          body: JSON.stringify({ messages }),
+          body: JSON.stringify({ messages, ...unitPayload }),
         });
         if (res.ok) {
           return {
@@ -292,13 +308,23 @@ export const noopSender: LineSender = {
 /** テスト用の記録 sender。呼び出しを記録し、ネットワークに触れない。 */
 export function createRecordingSender(
   outcome?: Partial<SendOutcome>,
-): LineSender & { calls: Array<{ kind: "multicast" | "broadcast"; recipients: number }> } {
-  const calls: Array<{ kind: "multicast" | "broadcast"; recipients: number }> = [];
+): LineSender & {
+  calls: Array<{
+    kind: "multicast" | "broadcast";
+    recipients: number;
+    aggregationUnit?: string;
+  }>;
+} {
+  const calls: Array<{
+    kind: "multicast" | "broadcast";
+    recipients: number;
+    aggregationUnit?: string;
+  }> = [];
   return {
     calls,
-    async multicast(batches, _messages) {
+    async multicast(batches, _messages, aggregationUnit) {
       const count = batches.reduce((s, b) => s + b.length, 0);
-      calls.push({ kind: "multicast", recipients: count });
+      calls.push({ kind: "multicast", recipients: count, aggregationUnit });
       return {
         ok: outcome?.ok ?? true,
         deliveredRecipients: outcome?.deliveredRecipients ?? count,
@@ -306,8 +332,8 @@ export function createRecordingSender(
         error: outcome?.error,
       };
     },
-    async broadcast(_messages, estimatedRecipients) {
-      calls.push({ kind: "broadcast", recipients: estimatedRecipients });
+    async broadcast(_messages, estimatedRecipients, aggregationUnit) {
+      calls.push({ kind: "broadcast", recipients: estimatedRecipients, aggregationUnit });
       return {
         ok: outcome?.ok ?? true,
         deliveredRecipients: outcome?.deliveredRecipients ?? estimatedRecipients,

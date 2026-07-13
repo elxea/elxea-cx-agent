@@ -23,6 +23,7 @@ import {
 import type { DeliveryPage, DeliveryResult } from "./delivery-repository";
 import type { AudienceSpec } from "./delivery-audience";
 import { parseAudience, audienceLabel } from "./delivery-audience";
+import { buildAggregationUnit, isValidAggregationUnit } from "./aggregation-unit";
 import { evaluateScheduledTime } from "./delivery-time";
 import { isApprovalAuthorized } from "./delivery-approval";
 import { computeContentHash, hashesMatch } from "./content-hash";
@@ -294,11 +295,23 @@ async function processPage(
 
   // ==== 以降は sendEnabled=true（実送信モード）のみ到達する ====
 
+  // P0-7a: 配信計測の集計単位（後付け不可）。送信時に付与しないと unit 別統計が永久に取れない。
+  //   台帳（会計）と送信ペイロード（LINE 統計）の両方に同一 unit を載せ 1:1 で紐づける。
+  //   命名不正（LINE 制約違反）は fail-closed で unit を付けない（送信自体は止めない＝計測欠落に留める）。
+  const unit = buildAggregationUnit(audience, now);
+  const aggregationUnit = isValidAggregationUnit(unit) ? unit : undefined;
+
   // (g) 通数ガード + 台帳 claim（真の排他 + 会計）。送信より前に必ず実施。
   const decision = await guardAndClaim(
     deps.ledger,
     deps.consumption,
-    { notionPageId: page.id, month, recipients: estimated, source: "broadcast" },
+    {
+      notionPageId: page.id,
+      month,
+      recipients: estimated,
+      source: "broadcast",
+      aggregationUnit,
+    },
     deps.guardOptions,
   );
   if (!decision.ok) {
@@ -308,11 +321,11 @@ async function processPage(
   // (h) Sending マーク（reaper のための中間状態）。
   await deps.repo.setStatus(page.id, "Sending");
 
-  // (i) 送信（実 sender）。
+  // (i) 送信（実 sender）。案A（P0-4）で通常経路は multicast のみ（broadcast は deprecated）。
   const outcome =
     targets.kind === "broadcast"
-      ? await deps.sender.broadcast(messages, estimated)
-      : await deps.sender.multicast(targets.batches, messages);
+      ? await deps.sender.broadcast(messages, estimated, aggregationUnit)
+      : await deps.sender.multicast(targets.batches, messages, aggregationUnit);
   const delivered = outcome.deliveredRecipients;
   const partial = outcome.partial;
   const sendError = outcome.error;

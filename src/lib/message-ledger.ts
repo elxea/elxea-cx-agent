@@ -66,6 +66,12 @@ export interface LedgerEntry {
   recipients: number;
   /** 消費の出所。 */
   source: LedgerSource;
+  /**
+   * 配信計測の集計単位名（P0-7a）。broadcast(配信) は付与する（例: s20260807_all）。
+   * interactive(push)/other は unit を持たないため未指定（NULL）。
+   * 命名規約は aggregation-unit.ts（半角英数字・_ のみ / 最大30字）。
+   */
+  aggregationUnit?: string;
 }
 
 /**
@@ -266,6 +272,8 @@ export function createSupabaseLedgerStore(supabase: SupabaseClient): LedgerStore
             source: entry.source,
             recipients: entry.recipients,
             notion_page_id: entry.notionPageId,
+            // P0-7a: 配信計測の集計単位（migration 023）。未指定は NULL のまま。
+            aggregation_unit: entry.aggregationUnit ?? null,
           },
           { onConflict: "notion_page_id,month", ignoreDuplicates: true },
         )
