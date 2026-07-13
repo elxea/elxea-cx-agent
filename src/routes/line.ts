@@ -20,6 +20,7 @@ import {
 import { resolveUnifiedUserId } from "../lib/identity";
 import { handleTeaMenuFlow } from "../lib/tea-menu";
 import { handleMenuActionFlow } from "../lib/menu-actions";
+import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import {
   getFirestoreEnv,
   updateCustomerProfile,
@@ -912,6 +913,16 @@ async function handleTextMessage(
   // 対象 3 トリガーは自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
   const wasMenuAction = await handleMenuActionFlow(lineUserId, userMessage, env, responder);
   if (wasMenuAction) return;
+
+  // 好み診断（リッチメニュー②・タップ主体・状態レス・LLM 不使用）。
+  // トリガー「好みに合うお茶を診断してほしいです」と `診断｜*` トークンのみ横取りし、
+  // Q1→Q2→Q3→結果を quick reply で返す。結果確定時に winner を persona へ weight=3 加算（fail-safe）。
+  // ⚠ 順序: tea-menu / menu-actions と同じく onboarding / feedback の pending-state ハンドラより後。
+  //   これにより「改善希望」タップ後のコメント待ち中に `診断｜…` を送っても feedback が優先し
+  //   （既存優先順の正しい挙動）、診断トークンが feedback に吸われる。診断トリガー・トークンは
+  //   自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
+  const wasDiagnosis = await handlePreferenceDiagnosis(lineUserId, userMessage, env, responder);
+  if (wasDiagnosis) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;
