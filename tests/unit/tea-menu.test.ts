@@ -1,11 +1,12 @@
 /**
  * Unit Tests -- tea-menu（選択式お茶メニュー案内・タップ主体・状態レス）
  *
- * 純粋ロジック（Notion / LINE push に触れない）を fixture で検証する:
- *   (a) 種類選択 → 一覧（ページング）→ カード → 温度回答
+ * タップ圧縮版（オーナー確定 2026-07-13「3 タップ以内」）の純粋ロジックを fixture で検証する:
+ *   (a) 一覧（種類選択層なし・ページング）→ カード → 温度回答
  *   (b) 番号直指定（5 桁）
  *   (c) 楽しみ方はデータがある時のみ選択肢に出る（0 件なら出ない）
  *   (d) 無関係な発話は素通り（parseTeaAction=null / planTeaFlow=null）
+ *   (e) 3 タップ以内で回答到達（メニュー → お茶 → 項目）
  *   quick reply 上限 13 を超えないこと
  *
  * 使用方法: npx tsx tests/unit/tea-menu.test.ts
@@ -15,8 +16,7 @@ import { readFileSync } from "node:fs";
 import {
   parseTeaAction,
   planTeaFlow,
-  buildCategoryMessage,
-  buildTeaListMessage,
+  buildEntryMessage,
   buildTeaCard,
   buildBrewAnswer,
   TEA_LIST_PAGE_SIZE,
@@ -76,42 +76,35 @@ const FIXTURE: TeaItem[] = [
 
 const QR_MAX = 13;
 
-console.log("\n--- (a) 種類 → 一覧(ページング) → カード → 温度 ---");
+console.log("\n--- (a) 一覧(種類選択なし・ページング) → カード → 温度 ---");
 
-it("種類選択: DB にある種類だけ件数付きで、上限内", () => {
-  const m = buildCategoryMessage(FIXTURE);
-  assertEqual(m.quickReplies.length, 3, "categories");
-  assert(m.quickReplies.length <= QR_MAX, "qr<=13");
-  // 表示順 緑茶→青茶→紅茶
-  assertEqual(m.quickReplies[0].action.label, "緑茶（12）", "first cat label");
-  assertEqual(m.quickReplies[2].action.label, "紅茶（1）", "third cat label");
-});
-
-it("一覧ページ1: 11件 + 次へ + 種類に戻る = 13（上限ちょうど）", () => {
-  const m = buildTeaListMessage(FIXTURE, "緑茶", 0);
-  assertEqual(m.quickReplies.length, QR_MAX, "page0 qr count");
+it("一覧ページ1: 11件 + 次へ = 12（前へなし・上限内）", () => {
+  const m = buildEntryMessage(FIXTURE, 0);
+  assertEqual(m.quickReplies.length, 12, "page0 qr count");
   assert(m.quickReplies.length <= QR_MAX, "qr<=13");
   const labels = m.quickReplies.map((q) => q.action.label);
   assert(labels.includes("次へ"), "has 次へ");
-  assert(labels.includes("種類に戻る"), "has 種類に戻る");
-  // 先頭 11 件はカード遷移トークン
+  assert(!labels.includes("前へ"), "no 前へ on page0");
+  assert(!labels.includes("種類に戻る"), "no category layer");
+  // 先頭はカード遷移トークン（お茶を直接列挙・種類選択を挟まない）
   assert(m.quickReplies[0].action.text.startsWith("このお茶｜"), "first is card token");
+  assert(m.text.includes("全14種"), "shows total count");
 });
 
-it("一覧ページ2: 残り1件 + 種類に戻る（次へ なし）", () => {
-  const m = buildTeaListMessage(FIXTURE, "緑茶", 1);
+it("一覧ページ2: 前へ + 残り3件（次へ なし）", () => {
+  const m = buildEntryMessage(FIXTURE, 1);
   const labels = m.quickReplies.map((q) => q.action.label);
+  assert(labels.includes("前へ"), "has 前へ on last page");
   assert(!labels.includes("次へ"), "no 次へ on last page");
-  assert(labels.includes("種類に戻る"), "has 種類に戻る");
-  // 12 件中 page size 11 → 2 ページ目は 1 件
-  assertEqual(m.quickReplies.length, 2, "page1 qr count");
+  // 14 件中 page size 11 → 2 ページ目は 3 件 + 前へ = 4
+  assertEqual(m.quickReplies.length, 4, "page1 qr count");
 });
 
-it("PAGE_SIZE は 11（ナビ2枠で上限13に収まる）", () => {
+it("PAGE_SIZE は 11（前へ/次へ 2枠で上限13に収まる）", () => {
   assertEqual(TEA_LIST_PAGE_SIZE, 11, "page size");
 });
 
-it("カード: 温度/味・香り/別のお茶（楽しみ方なし=3択+別のお茶）", () => {
+it("カード: 温度/味・香り/別のお茶（楽しみ方なし=温度+味・香り+別のお茶）", () => {
   const t = FIXTURE.find((x) => x.number === "10101")!;
   const m = buildTeaCard(t);
   const labels = m.quickReplies.map((q) => q.action.label);
@@ -119,6 +112,9 @@ it("カード: 温度/味・香り/別のお茶（楽しみ方なし=3択+別の
   assert(labels.some((l) => l.includes("味・香り")), "has 味・香り");
   assert(!labels.some((l) => l.includes("楽しみ方")), "no 楽しみ方 (0件)");
   assert(labels.some((l) => l.includes("別のお茶")), "has 別のお茶");
+  // 「別のお茶を見る」は一覧 1 ページ目に戻る（種類選択には戻らない）
+  const back = m.quickReplies.find((q) => q.action.label.includes("別のお茶"))!;
+  assertEqual(back.action.text, "お茶を選ぶ｜1", "back to list page1");
 });
 
 it("温度回答: How to Brew 本文を整形して直返し（創作なし）", () => {
@@ -142,13 +138,6 @@ it("5桁のみ 不明番号 → 正直な案内（インターセプトする）
   const plan = planTeaFlow("99999", FIXTURE);
   assert(plan !== null, "planned (not fall-through)");
   assert(plan!.messages[0].text.includes("見つかりませんでした"), "honest not-found");
-});
-
-it("QRリンク相当（文中5桁が既知番号）→ カード", () => {
-  const plan = planTeaFlow("11301", FIXTURE);
-  // 11301 は fixture の緑茶サンプル13...ではない。fixture は 10101..11201。
-  // 既知でない5桁のみ → not-found（インターセプト）
-  assert(plan !== null, "planned");
 });
 
 console.log("\n--- (c) 楽しみ方はデータがある時のみ ---");
@@ -177,17 +166,48 @@ it("文中の既知5桁 → カード（number-loose 一致）", () => {
   assert(plan !== null && plan.messages[0].text.includes("No.40101"), "known loose → card");
 });
 
-it("入口発話（リッチメニュー①）→ 種類選択", () => {
-  const plan = planTeaFlow("お茶のおいしい淹れ方を教えてください", FIXTURE);
+console.log("\n--- (e) 入口 → 一覧 → カード → 項目（3タップ以内で回答到達） ---");
+
+it("入口発話（リッチメニュー①）→ 一覧（種類選択層なし）", () => {
+  const plan = planTeaFlow("お茶の淹れ方を知りたい", FIXTURE);
   assert(plan !== null, "planned");
-  assertEqual(plan!.messages[0].quickReplies.length, 3, "category prompt");
+  // 一覧を直返し（種類 3 択ではなく、お茶のカードトークンが並ぶ）
+  assert(
+    plan!.messages[0].quickReplies[0].action.text.startsWith("このお茶｜"),
+    "entry lists teas directly",
+  );
+});
+
+it("旧①文言も後方互換で入口に入る", () => {
+  const plan = planTeaFlow("お茶のおいしい淹れ方を教えてください", FIXTURE);
+  assert(plan !== null, "legacy entry planned");
+  assert(plan!.messages[0].quickReplies[0].action.text.startsWith("このお茶｜"), "legacy → list");
+});
+
+it("3タップ以内: メニュー[1] → お茶[2] → 温度[3] の各段が plan を返す", () => {
+  // タップ1: メニュー → 一覧
+  const step1 = planTeaFlow("お茶の淹れ方を知りたい", FIXTURE);
+  assert(step1 !== null, "step1 entry");
+  // タップ2: 一覧のお茶ボタン（このお茶｜10101）→ カード
+  const step2 = planTeaFlow("このお茶｜10101", FIXTURE);
+  assert(step2 !== null && step2.messages[0].text.includes("No.10101"), "step2 card");
+  // タップ3: カードの温度ボタン（淹れ方｜10101）→ 回答
+  const step3 = planTeaFlow("淹れ方｜10101", FIXTURE);
+  assert(step3 !== null && step3.messages[0].text.includes("80℃"), "step3 answer");
+});
+
+it("ページング: お茶を選ぶ｜2 → 2ページ目", () => {
+  const plan = planTeaFlow("お茶を選ぶ｜2", FIXTURE);
+  assert(plan !== null, "planned");
+  const labels = plan!.messages[0].quickReplies.map((q) => q.action.label);
+  assert(labels.includes("前へ"), "page2 has 前へ");
 });
 
 it("全メッセージの quick reply が 13 以下", () => {
   const cases = [
     planTeaFlow("お茶を調べる", FIXTURE),
-    planTeaFlow("お茶を選ぶ｜緑茶｜1", FIXTURE),
-    planTeaFlow("お茶を選ぶ｜緑茶｜2", FIXTURE),
+    planTeaFlow("お茶を選ぶ｜1", FIXTURE),
+    planTeaFlow("お茶を選ぶ｜2", FIXTURE),
     planTeaFlow("このお茶｜50101", FIXTURE),
     planTeaFlow("淹れ方｜50101", FIXTURE),
     planTeaFlow("味と香り｜50101", FIXTURE),
@@ -216,13 +236,7 @@ it("handleTextMessage は onboarding / feedback を tea-menu より先に呼ぶ"
 });
 
 it("feedback pending コメントに5桁が混じっても tea トリガーと衝突しない（解析上の独立性）", () => {
-  // フィードバックのコメントは自由文。5桁を含む/含まないに関わらず、tea-menu は
-  // 「先に feedback が pending を消費する」順序で守られる。ここでは、コメント本文が
-  // tea-menu の内部トークン（お茶を選ぶ｜ / 淹れ方｜ 等）と一致し得ないことを確認する
-  // （feedback pending トークン FEEDBACK_* / onboarding: とも別空間）。
   assertEqual(parseTeaAction("味が薄いと感じました"), null, "free comment → not tea");
-  // 5桁のみ / 既知5桁を含むコメントは tea として解釈され得るが、順序保証（上のテスト）で
-  // feedback pending が先に消費するため横取りされない。設計の前提を明示。
   assert(parseTeaAction("11301") !== null, "bare 5-digit is a tea action (guarded by ordering)");
 });
 

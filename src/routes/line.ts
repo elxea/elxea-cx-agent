@@ -19,6 +19,7 @@ import {
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
 import { handleTeaMenuFlow } from "../lib/tea-menu";
+import { handleMenuActionFlow } from "../lib/menu-actions";
 import {
   getFirestoreEnv,
   updateCustomerProfile,
@@ -907,6 +908,12 @@ async function handleTextMessage(
   //   （それらの pending トークンは tea トリガーと衝突しないため後置は安全）。
   const wasTeaMenu = await handleTeaMenuFlow(lineUserId, userMessage, env);
   if (wasTeaMenu) return;
+
+  // リッチメニュー ③相談 / ④定期便 / ⑤elxeaについて の決定的応答（LLM 不使用・完全一致トリガー）。
+  // tea-menu 同様、onboarding / feedback の pending-state ハンドラより後に置く。
+  // 対象 3 トリガーは自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
+  const wasMenuAction = await handleMenuActionFlow(lineUserId, userMessage, env);
+  if (wasMenuAction) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;

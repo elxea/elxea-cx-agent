@@ -11,11 +11,15 @@
  *   Notion Tea Menu List DB を Status=販売中 でフィルタして直接読む。
  *   isolate 内メモリに TTL キャッシュし、タップ毎の再取得を避ける。
  *
- * フロー:
- *   entry（トリガー発話 / リッチメニュー①） → 種類（Category）選択
- *     → お茶一覧（quick reply・13 超はページング「次へ」）→ お茶カード
- *       → 🌡温度・抽出時間 / 👃味・香り /（🍵楽しみ方: データがある時のみ）
+ * フロー（タップ圧縮版・オーナー確定 2026-07-13「3 タップ以内」）:
+ *   entry（トリガー発話 / リッチメニュー①） → 販売中のお茶を一覧で直返し
+ *     （種類選択層は廃止。quick reply・13 以内、13 超はページング「次へ／前へ」）
+ *       → お茶カード → 🌡温度・抽出時間 / 👃味・香り /（🍵楽しみ方: データがある時のみ）
  *   entry②（予備）: 5 桁番号を含むメッセージ → 該当お茶に直行
+ *
+ *   タップ数（メニュータップ含む happy path）:
+ *     ①メニュー → お茶一覧 [1] → お茶タップ → カード [2] → 項目タップ → 回答 [3] = 最大 3 タップ。
+ *     ページング（次へ／前へ）と 5 桁直指定は補助経路（happy path の 3 タップ保証外）。
  *
  * ⚠ 実配信はしない前提の PoC。push は既存 pushTextMessage 経由。
  */
@@ -48,10 +52,10 @@ export interface TeaItem {
   enjoy: string;
 }
 
-/** 種類の表示順（DB に存在するものだけ、この順で出す）。 */
+/** 種類の並び順（一覧を種類ごとにまとめる際のソートキー。DB にあるものだけ有効）。 */
 const CATEGORY_ORDER = ["緑茶", "青茶", "紅茶"] as const;
 
-/** 一覧 1 ページあたりのお茶数。quick reply 上限 13 からナビ 2 枠を引いて 11。 */
+/** 一覧 1 ページあたりのお茶数。quick reply 上限 13 からナビ 2 枠（前へ／次へ）を引いて 11。 */
 export const TEA_LIST_PAGE_SIZE = 11;
 
 /** LINE quick reply ラベル上限（20 文字）。 */
@@ -66,24 +70,27 @@ const SEP = "｜";
 
 /**
  * タップメニューを起動する「入口」発話（完全一致）。
- * リッチメニュー①（setup-richmenu.ts の "お茶のおいしい淹れ方を教えてください"）を含む。
+ * リッチメニュー①（setup-rich-menu.ts の message text "お茶の淹れ方を知りたい"）を含む。
  * 完全一致に限定し、自由入力の淹れ方質問（別文言）は従来どおり AI 対話へ流す。
  */
 const ENTRY_PHRASES = new Set<string>([
-  "お茶のおいしい淹れ方を教えてください",
+  "お茶の淹れ方を知りたい", // リッチメニュー①（5 枠版・2026-07-13 確定）
+  "お茶のおいしい淹れ方を教えてください", // 旧リッチメニュー①（後方互換）
   "淹れ方を教えてください",
   "お茶を調べる",
   "お茶メニュー",
   "お茶を選ぶ",
 ]);
 
+/** 旧「種類選択へ戻る」トークン（後方互換: 旧メニュー由来の発話を一覧へ吸収）。 */
+const LEGACY_TOP_TOKEN = "お茶の種類";
+
 // ---------------------------------------------------------------------------
 // アクション解析（純粋・状態レス）
 // ---------------------------------------------------------------------------
 
 type Action =
-  | { kind: "top" } // 種類選択へ
-  | { kind: "list"; category: string; page: number }
+  | { kind: "entry"; page: number } // 販売中のお茶を一覧表示（種類選択層は廃止）
   | { kind: "card"; number: string }
   | { kind: "brew"; number: string }
   | { kind: "flavor"; number: string }
@@ -93,13 +100,15 @@ type Action =
 
 /** トークン prefix（quick reply の message テキストに埋め込む・可読 + 解析可能）。 */
 const TOK = {
-  list: "お茶を選ぶ" + SEP, // 例: お茶を選ぶ｜緑茶｜1
+  list: "お茶を選ぶ" + SEP, // 一覧ページ送り。例: お茶を選ぶ｜2（1 始まりのページ番号）
   card: "このお茶" + SEP, // 例: このお茶｜11301
   brew: "淹れ方" + SEP, // 例: 淹れ方｜11301
   flavor: "味と香り" + SEP, // 例: 味と香り｜11301
   enjoy: "楽しみ方" + SEP, // 例: 楽しみ方｜11301
-  top: "お茶の種類", // 種類選び直し
 } as const;
+
+/** 「別のお茶を見る／一覧に戻る」= 一覧 1 ページ目に戻る message テキスト。 */
+const BACK_TO_LIST = `${TOK.list}1`;
 
 function firstFiveDigits(s: string): string | null {
   const m = s.match(/\d{5}/);
@@ -114,15 +123,16 @@ export function parseTeaAction(raw: string): Action | null {
   const t = raw.trim();
   if (!t) return null;
 
-  // 種類選び直し / 入口発話 → 種類選択
-  if (t === TOK.top || ENTRY_PHRASES.has(t)) return { kind: "top" };
+  // 入口発話 / 旧「種類」トークン → 一覧 1 ページ目（種類選択層は廃止・一覧へ吸収）
+  if (t === LEGACY_TOP_TOKEN || ENTRY_PHRASES.has(t)) return { kind: "entry", page: 0 };
 
   // トークン系（タップ由来）
   if (t.startsWith(TOK.list)) {
     const parts = t.split(SEP);
-    const category = parts[1] ?? "";
-    const page = Math.max(0, (parseInt(parts[2] ?? "1", 10) || 1) - 1);
-    if (category) return { kind: "list", category, page };
+    // 新形式: お茶を選ぶ｜{page}。旧形式: お茶を選ぶ｜{category}｜{page}（後方互換で末尾をページ扱い）。
+    const pageStr = parts.length >= 3 ? (parts[2] ?? "1") : (parts[1] ?? "1");
+    const page = Math.max(0, (parseInt(pageStr, 10) || 1) - 1);
+    return { kind: "entry", page };
   }
   if (t.startsWith(TOK.card)) {
     const n = firstFiveDigits(t);
@@ -167,58 +177,49 @@ function qr(label: string, text: string): QuickReplyItem {
   return { type: "action", action: { type: "message", label: truncateLabel(label), text } };
 }
 
-/** DB に存在する種類を表示順で返す（件数付き）。 */
-function orderedCategories(teas: TeaItem[]): Array<{ category: string; count: number }> {
-  const counts = new Map<string, number>();
-  for (const t of teas) counts.set(t.category, (counts.get(t.category) ?? 0) + 1);
-  const known = CATEGORY_ORDER.filter((c) => counts.has(c)).map((c) => ({
-    category: c,
-    count: counts.get(c)!,
-  }));
-  // 表示順に無い種類（将来追加）も末尾に拾う
-  const extras = [...counts.keys()]
-    .filter((c) => !CATEGORY_ORDER.includes(c as (typeof CATEGORY_ORDER)[number]))
-    .sort()
-    .map((c) => ({ category: c, count: counts.get(c)! }));
-  return [...known, ...extras];
+/** 一覧の並び順: 種類（CATEGORY_ORDER）→ 番号。種類ごとにまとまり、読みやすい。 */
+function sortForEntry(teas: TeaItem[]): TeaItem[] {
+  const rank = (c: string) => {
+    const i = CATEGORY_ORDER.indexOf(c as (typeof CATEGORY_ORDER)[number]);
+    return i === -1 ? CATEGORY_ORDER.length : i;
+  };
+  return [...teas].sort(
+    (a, b) => rank(a.category) - rank(b.category) || a.number.localeCompare(b.number),
+  );
 }
 
-function sortedByNumber(teas: TeaItem[]): TeaItem[] {
-  return [...teas].sort((a, b) => a.number.localeCompare(b.number));
-}
-
-/** 種類選択メッセージ。 */
-export function buildCategoryMessage(teas: TeaItem[]): OutMessage {
-  const cats = orderedCategories(teas);
-  const quickReplies = cats.map((c) => qr(`${c.category}（${c.count}）`, `${TOK.list}${c.category}${SEP}1`));
-  const text =
-    "どんなお茶をお探しですか？\n種類を選んでください。\n" +
-    "（お手元の 5 桁番号を送っていただくと、そのお茶に直接ご案内します）";
-  return { text, quickReplies };
-}
-
-/** お茶一覧メッセージ（種類 + ページ）。 */
-export function buildTeaListMessage(teas: TeaItem[], category: string, page: number): OutMessage {
-  const inCat = sortedByNumber(teas.filter((t) => t.category === category));
-  if (inCat.length === 0) {
+/**
+ * お茶一覧メッセージ（種類選択層なし・販売中のお茶を直接一覧）。
+ * Status=販売中 の全お茶を「今お選びいただけるお茶（＝今季のお茶）」として直返しする。
+ * 13 超はページング（次へ／前へ）。1 ページ 11 件 + ナビ最大 2 枠で上限 13 に収める。
+ */
+export function buildEntryMessage(teas: TeaItem[], page = 0): OutMessage {
+  const sorted = sortForEntry(teas);
+  if (sorted.length === 0) {
     return {
-      text: `「${category}」のお茶が見つかりませんでした。別の種類をお選びください。`,
-      quickReplies: buildCategoryMessage(teas).quickReplies,
+      text: "申し訳ありません、ただいまご案内できるお茶がありません。少し時間をおいてお試しください。",
+      quickReplies: [],
     };
   }
-  const start = page * TEA_LIST_PAGE_SIZE;
-  const slice = inCat.slice(start, start + TEA_LIST_PAGE_SIZE);
-  const quickReplies = slice.map((t) => qr(t.name, `${TOK.card}${t.number}`));
+  const totalPages = Math.ceil(sorted.length / TEA_LIST_PAGE_SIZE);
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = safePage * TEA_LIST_PAGE_SIZE;
+  const slice = sorted.slice(start, start + TEA_LIST_PAGE_SIZE);
 
-  const hasNext = inCat.length > start + TEA_LIST_PAGE_SIZE;
-  if (hasNext) {
-    quickReplies.push(qr("次へ", `${TOK.list}${category}${SEP}${page + 2}`));
+  const quickReplies: QuickReplyItem[] = [];
+  // 前へ（2 ページ目以降）: 現在 1 始まりページ = safePage+1、その前 = safePage
+  if (safePage > 0) quickReplies.push(qr("前へ", `${TOK.list}${safePage}`));
+  for (const t of slice) quickReplies.push(qr(t.name, `${TOK.card}${t.number}`));
+  // 次へ: 次の 1 始まりページ = safePage+2
+  if (sorted.length > start + TEA_LIST_PAGE_SIZE) {
+    quickReplies.push(qr("次へ", `${TOK.list}${safePage + 2}`));
   }
-  quickReplies.push(qr("種類に戻る", TOK.top));
 
-  const totalPages = Math.ceil(inCat.length / TEA_LIST_PAGE_SIZE);
-  const pageNote = totalPages > 1 ? `（${page + 1}/${totalPages}ページ）` : "";
-  const text = `「${category}」のお茶です（全${inCat.length}種）${pageNote}\n気になるお茶を選んでください。`;
+  const pageNote = totalPages > 1 ? `（${safePage + 1}/${totalPages}ページ）` : "";
+  const text =
+    `今お選びいただけるお茶です（全${sorted.length}種）${pageNote}。\n` +
+    "気になるお茶を選んでください。\n" +
+    "（お手元の 5 桁番号を送っていただくと、そのお茶に直接ご案内します）";
   return { text, quickReplies };
 }
 
@@ -231,7 +232,7 @@ function cardItemQuickReplies(tea: TeaItem, exclude?: "brew" | "flavor" | "enjoy
   if (exclude !== "enjoy" && tea.enjoy.trim()) {
     items.push(qr("🍵 楽しみ方", `${TOK.enjoy}${tea.number}`));
   }
-  items.push(qr("🍃 別のお茶を見る", TOK.top));
+  items.push(qr("🍃 別のお茶を見る", BACK_TO_LIST));
   return items;
 }
 
@@ -291,8 +292,8 @@ export function buildNumberNotFound(teas: TeaItem[], number: string): OutMessage
   return {
     text:
       `恐れ入ります、番号「${number}」のお茶が見つかりませんでした。\n` +
-      `下から種類を選んでお探しください。`,
-    quickReplies: buildCategoryMessage(teas).quickReplies,
+      `下の一覧からお探しください。`,
+    quickReplies: buildEntryMessage(teas).quickReplies,
   };
 }
 
@@ -307,11 +308,8 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
   const find = (n: string) => teas.find((t) => t.number === n) ?? null;
 
   switch (action.kind) {
-    case "top":
-      return { messages: [buildCategoryMessage(teas)] };
-
-    case "list":
-      return { messages: [buildTeaListMessage(teas, action.category, action.page)] };
+    case "entry":
+      return { messages: [buildEntryMessage(teas, action.page)] };
 
     case "card": {
       const tea = find(action.number);

@@ -1,4 +1,9 @@
 /**
+ * ⚠⚠⚠ 廃止（DEPRECATED 2026-07-13）⚠⚠⚠
+ * この 6 分割スクリプトは使用しないこと。リッチメニューの「正」は 5 枠版
+ * scripts/setup-rich-menu.ts（pnpm setup-rich-menu）。二重管理を避けるため本ファイルは
+ * 実行をブロックする（下部の即時 exit を参照）。内容は履歴目的で残置。
+ *
  * LINE リッチメニュー設定スクリプト（構成設計 2026-07-11 準拠 / pull 型「茶室の入口」）。
  *
  * 6 分割メニュー（1200x810px）:
@@ -26,6 +31,14 @@
  *
  * 注: 本構成は全 6 マスが message / uri アクションで完結し、LIFF は使用しない。
  */
+
+// --- DEPRECATED guard: 5 枠版に一本化。誤実行を防ぐため即時停止する ---
+console.error(
+  "⛔ scripts/setup-richmenu.ts は廃止されました（旧 6 分割）。\n" +
+    "   リッチメニューの正は 5 枠版です: pnpm setup-rich-menu（scripts/setup-rich-menu.ts）。\n" +
+    "   どうしても旧 6 分割を再現する必要がある場合のみ、この guard を一時的に外して実行してください。",
+);
+process.exit(1);
 
 const LINE_API_BASE = "https://api.line.me/v2/bot";
 
