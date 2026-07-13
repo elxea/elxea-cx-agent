@@ -19,7 +19,7 @@ import {
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
 import { handleTeaMenuFlow } from "../lib/tea-menu";
-import { handleMenuActionFlow } from "../lib/menu-actions";
+import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { logFlowEvent } from "../lib/flow-events";
 import { menuTapValue } from "../lib/menu-tap";
@@ -916,6 +916,17 @@ async function handleTextMessage(
       eventName: "menu.tap",
       userRef: lineUserId,
       value: tapValue,
+    });
+  }
+
+  // consult.entry 記録（P0-1・fire-and-forget）: ③相談の初手 3 択（order/tea/other）タップ。
+  //   これらは AI 会話へ素通りするため、ここで先に記録してから通常フローへ流す（return しない）。
+  const consultValue = consultEntryValue(userMessage);
+  if (consultValue) {
+    void logFlowEvent(createSupabaseClient(env), {
+      eventName: "consult.entry",
+      userRef: lineUserId,
+      value: consultValue,
     });
   }
 

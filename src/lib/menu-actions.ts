@@ -54,6 +54,13 @@ function qr(label: string, text: string): QuickReplyItem {
  * 2-3 個の quick reply で入口を分かりやすくする。各 quick reply の text は自然発話で、
  * タップ後は本モジュールを素通りして既存の AI 会話フローに乗る（意図的にトリガー非一致）。
  */
+/** ③相談 初手の 3 択が送るテキスト（consult.entry の value 判定 SoT）。 */
+export const CONSULT_ENTRY_TEXTS = {
+  order: "注文状況と定期便について確認したいです",
+  tea: "お茶選びを相談したいです",
+  other: "その他の相談があります",
+} as const;
+
 export function buildConsultationPrompt(): { text: string; quickReplies: QuickReplyItem[] } {
   return {
     text:
@@ -61,11 +68,25 @@ export function buildConsultationPrompt(): { text: string; quickReplies: QuickRe
       "どのようなことをお手伝いしましょうか。\n" +
       "下からお選びいただくか、そのままメッセージでお聞かせください。",
     quickReplies: [
-      qr("ご注文・定期便の確認", "注文状況と定期便について確認したいです"),
-      qr("お茶選びの相談", "お茶選びを相談したいです"),
-      qr("その他の相談", "その他の相談があります"),
+      qr("ご注文・定期便の確認", CONSULT_ENTRY_TEXTS.order),
+      qr("お茶選びの相談", CONSULT_ENTRY_TEXTS.tea),
+      qr("その他の相談", CONSULT_ENTRY_TEXTS.other),
     ],
   };
+}
+
+/**
+ * ③相談 初手の 3 択タップ（consult.entry）の value スラッグを返す（純粋・P0-1）。
+ * これらの発話は AI 会話へ素通りするため、記録は handleMessage で fire-and-forget に行う。
+ */
+export function consultEntryValue(
+  userMessage: string,
+): "order" | "tea" | "other" | null {
+  const t = userMessage.trim();
+  if (t === CONSULT_ENTRY_TEXTS.order) return "order";
+  if (t === CONSULT_ENTRY_TEXTS.tea) return "tea";
+  if (t === CONSULT_ENTRY_TEXTS.other) return "other";
+  return null;
 }
 
 /** ⑤ elxea についての紹介（3-4 文・和の静けさ）＋ 配信設定の受け皿を末尾に一言。 */

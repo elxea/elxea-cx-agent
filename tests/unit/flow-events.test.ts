@@ -21,7 +21,7 @@ import {
 import { diagnosisFlowEvents } from "../../src/lib/preference-diagnosis";
 import { menuTapValue, BREW_RICH_MENU_TRIGGER } from "../../src/lib/menu-tap";
 import { DIAGNOSIS_TRIGGER } from "../../src/lib/preference-diagnosis";
-import { ABOUT_TRIGGER } from "../../src/lib/menu-actions";
+import { ABOUT_TRIGGER, consultEntryValue, CONSULT_ENTRY_TEXTS } from "../../src/lib/menu-actions";
 
 let total = 0;
 let passed = 0;
@@ -192,6 +192,16 @@ it("menuTapValue: サブトークン・自由発話は null（横取りしない
 it("menuTapValue で導出した値は PII ガードを通過（slug 正当）", () => {
   const row = buildFlowEventRow({ eventName: "menu.tap", userRef: "U1", value: menuTapValue(ABOUT_TRIGGER)! });
   assertEqual(row.value, "about", "about slug 保持");
+});
+
+// --- consultEntryValue（P0-1 ③相談初手 3 択） ---
+it("consultEntryValue: order/tea/other を判定", () => {
+  assertEqual(consultEntryValue(CONSULT_ENTRY_TEXTS.order), "order", "order");
+  assertEqual(consultEntryValue(CONSULT_ENTRY_TEXTS.tea), "tea", "tea");
+  assertEqual(consultEntryValue(CONSULT_ENTRY_TEXTS.other), "other", "other");
+});
+it("consultEntryValue: 無関係な発話は null", () => {
+  assertEqual(consultEntryValue("こんにちは"), null, "null");
 });
 
 (async () => {
