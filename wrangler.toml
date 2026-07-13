@@ -5,6 +5,13 @@ compatibility_date = "2025-03-07"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
+# ── 非機密 vars（本番 / default env）──
+# チャット返信モデル（最安クラス Haiku 4.5）。モデル名は機密でないため vars で管理する。
+# 未設定でも core.ts の DEFAULT_REPLY_MODEL に同値でフォールバックするが、本番でも明示して
+# staging（[env.staging.vars]）とパリティを取る（挙動不変）。
+[vars]
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
 [ai]
 binding = "AI"
 
