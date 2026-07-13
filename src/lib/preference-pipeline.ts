@@ -22,6 +22,8 @@ import {
   getCustomerProfile,
   updateTasteProfile,
   updateCustomerProfile,
+  getLineUserProfile,
+  updateLineUserTasteProfile,
   type FirestoreEnv,
 } from "./firestore";
 import { syncAfterProfileUpdate } from "../sync/shopify-metafield";
@@ -73,8 +75,22 @@ export async function runPreferencePipeline(
       .single();
 
     if (!linkage?.shopify_customer_id) {
-      // 未紐付けユーザー — プロファイル更新不可
-      console.log("[preference-pipeline] No linkage found, skipping profile update");
+      // 未紐付けユーザー（P0-6・欠落(d)）: LINE は lineUsers/{lineUserId} に会話由来嗜好を書く
+      //   （診断が既に踏んだ道を会話由来にも広げる・weight は会話由来 +1）。Web は lineUserId を
+      //   持たないため従来どおり skip（連携時に解消）。
+      if (channel === "line") {
+        const existingLine = await getLineUserProfile(userId, fsEnv);
+        await updateLineUserTasteProfile(userId, signals, existingLine, fsEnv);
+        console.log(
+          `[preference-pipeline] Unlinked LINE user — wrote lineUsers/${userId}: ` +
+            `categories=${signals.preferred_categories.length}, ` +
+            `persona_signals=${signals.persona_signals.length}`,
+        );
+      } else {
+        console.log(
+          "[preference-pipeline] No linkage (web) — skipping profile update",
+        );
+      }
       return;
     }
 

@@ -742,6 +742,66 @@ export function mergePersonaScores(
  * @param env Firestore 環境変数
  * @param weight シグナルごとのスコア加算値（デフォルト 1。購入データは 3）
  */
+/**
+ * 嗜好シグナルを既存 taste/persona にマージした更新差分を計算する（純粋・I/O なし）。
+ *
+ * users（連携済み）と lineUsers（未連携・P0-6）の両方が同一ロジックで書けるよう I/O から切り出した。
+ * - tasteProfile: preferredCategories / flavorPreferences は union（上限50・古いものから削除）、
+ *   scenePref は新規があれば先頭を採用。
+ * - persona: signals.persona_signals があれば mergePersonaScores で「別軸に累積加算」（weight 反映）。
+ * - lastActiveAt を常に更新。
+ */
+export function computeTasteProfileUpdates(
+  signals: PreferenceSignals,
+  existingTaste: TasteProfile | undefined,
+  existingPersona: PersonaProfile | undefined,
+  weight = 1,
+): { tasteProfile: TasteProfile; persona?: PersonaProfile; lastActiveAt: string } {
+  const now = new Date().toISOString();
+  const taste = existingTaste ?? {
+    preferredCategories: [],
+    flavorPreferences: [],
+    scenePref: null,
+  };
+  const MAX_ARRAY_SIZE = 50;
+
+  const mergedCategories = [
+    ...new Set([...taste.preferredCategories, ...signals.preferred_categories]),
+  ].slice(-MAX_ARRAY_SIZE);
+  const mergedFlavors = [
+    ...new Set([...taste.flavorPreferences, ...signals.flavor_preferences]),
+  ].slice(-MAX_ARRAY_SIZE);
+  const scenePref =
+    signals.scene_preferences.length > 0
+      ? signals.scene_preferences[0]
+      : taste.scenePref;
+
+  const result: { tasteProfile: TasteProfile; persona?: PersonaProfile; lastActiveAt: string } = {
+    tasteProfile: {
+      preferredCategories: mergedCategories,
+      flavorPreferences: mergedFlavors,
+      scenePref,
+    },
+    lastActiveAt: now,
+  };
+
+  if (signals.persona_signals.length > 0) {
+    const basePersona = existingPersona ?? {
+      primary: null,
+      scores: { serenity: 0, explorer: 0, sensory: 0 },
+      lastUpdated: now,
+    };
+    const { scores, primary } = mergePersonaScores(
+      basePersona.scores,
+      signals.persona_signals,
+      weight,
+    );
+    result.persona = { primary, scores, lastUpdated: now };
+  }
+
+  return result;
+}
+
 export async function updateTasteProfile(
   shopifyCustomerId: string,
   signals: PreferenceSignals,
@@ -749,73 +809,54 @@ export async function updateTasteProfile(
   env: FirestoreEnv,
   weight = 1,
 ): Promise<Partial<CustomerProfile>> {
-  const updates: Partial<CustomerProfile> = {};
-
-  // --- TasteProfile マージ ---
-  const existingTaste = existingProfile?.tasteProfile ?? {
-    preferredCategories: [],
-    flavorPreferences: [],
-    scenePref: null,
+  const merged = computeTasteProfileUpdates(
+    signals,
+    existingProfile?.tasteProfile,
+    existingProfile?.persona,
+    weight,
+  );
+  const updates: Partial<CustomerProfile> = {
+    tasteProfile: merged.tasteProfile,
+    lastActiveAt: merged.lastActiveAt,
   };
-
-  // 配列上限（unbounded growth 防止）
-  const MAX_ARRAY_SIZE = 50;
-
-  // preferredCategories: 既存 + 新規（重複排除、上限50件 — 超過時は古いものから削除）
-  const mergedCategories = [
-    ...new Set([
-      ...existingTaste.preferredCategories,
-      ...signals.preferred_categories,
-    ]),
-  ].slice(-MAX_ARRAY_SIZE);
-
-  // flavorPreferences: 既存 + 新規（重複排除、上限50件 — 超過時は古いものから削除）
-  const mergedFlavors = [
-    ...new Set([
-      ...existingTaste.flavorPreferences,
-      ...signals.flavor_preferences,
-    ]),
-  ].slice(-MAX_ARRAY_SIZE);
-
-  // scenePref: 新しいシーンがあれば最初のものを採用
-  const scenePref =
-    signals.scene_preferences.length > 0
-      ? signals.scene_preferences[0]
-      : existingTaste.scenePref;
-
-  updates.tasteProfile = {
-    preferredCategories: mergedCategories,
-    flavorPreferences: mergedFlavors,
-    scenePref,
-  };
-
-  // --- PersonaProfile マージ ---
-  if (signals.persona_signals.length > 0) {
-    const existingPersona = existingProfile?.persona ?? {
-      primary: null,
-      scores: { serenity: 0, explorer: 0, sensory: 0 },
-      lastUpdated: new Date().toISOString(),
-    };
-
-    // 純粋関数で「上書きせず別軸に累積加算」する（属性整合の要）。
-    const { scores, primary } = mergePersonaScores(
-      existingPersona.scores,
-      signals.persona_signals,
-      weight,
-    );
-
-    updates.persona = {
-      primary,
-      scores,
-      lastUpdated: new Date().toISOString(),
-    };
-  }
-
-  // lastActiveAt を更新
-  updates.lastActiveAt = new Date().toISOString();
+  if (merged.persona) updates.persona = merged.persona;
 
   await updateCustomerProfile(shopifyCustomerId, updates, env);
 
   // 更新後のプロファイルを返す（Shopify 同期トリガー用）
+  return updates;
+}
+
+/**
+ * 未連携ユーザー（LINE userId のみ）の会話由来嗜好を lineUsers/{lineUserId} に書く（P0-6・欠落(d)）。
+ *
+ * 設計 §B-5d / I-5: preference-pipeline の skip を撤廃し、診断が既に踏んだ道（lineUsers 書込）を
+ *   会話由来にも広げる。weight は会話由来 +1 のまま。users とは computeTasteProfileUpdates を共有し
+ *   同一ロジックを保証する。将来 Shopify 連携成立時に lineUsers→users へマージできる同一構造。
+ *
+ * fail-safe を求めない（呼び出し側 preference-pipeline が try/catch で握るため）。
+ */
+export async function updateLineUserTasteProfile(
+  lineUserId: string,
+  signals: PreferenceSignals,
+  existingLineProfile: LineUserProfile | null,
+  env: FirestoreEnv,
+  weight = 1,
+): Promise<Partial<LineUserProfile>> {
+  const merged = computeTasteProfileUpdates(
+    signals,
+    existingLineProfile?.tasteProfile,
+    existingLineProfile?.persona,
+    weight,
+  );
+  const updates: Partial<LineUserProfile> = {
+    lineUserId,
+    tasteProfile: merged.tasteProfile,
+    lastActiveAt: merged.lastActiveAt,
+  };
+  if (merged.persona) updates.persona = merged.persona;
+  if (!existingLineProfile) updates.createdAt = merged.lastActiveAt;
+
+  await updateLineUserProfile(lineUserId, updates, env);
   return updates;
 }
