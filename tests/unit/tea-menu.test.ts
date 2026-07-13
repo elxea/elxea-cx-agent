@@ -19,6 +19,8 @@ import {
   buildEntryMessage,
   buildTeaCard,
   buildBrewAnswer,
+  buildStoryAnswer,
+  teaFlowEvents,
   TEA_LIST_PAGE_SIZE,
   type TeaItem,
 } from "../../src/lib/tea-menu";
@@ -62,6 +64,7 @@ function tea(number: string, category: string, name: string, extra: Partial<TeaI
     time: extra.time ?? "",
     water: extra.water ?? "",
     enjoy: extra.enjoy ?? "",
+    story: extra.story ?? "",
   };
 }
 
@@ -146,6 +149,62 @@ it("楽しみ方あり → カードに 🍵楽しみ方 が出る", () => {
   const t = FIXTURE.find((x) => x.number === "50101")!;
   const m = buildTeaCard(t);
   assert(m.quickReplies.some((q) => q.action.label.includes("楽しみ方")), "has 楽しみ方 when data present");
+});
+
+console.log("\n--- (P0-9) つくり手の物語ボタン ---");
+
+it("農家の物語あり → カードに つくり手の物語 ボタンが出る", () => {
+  const t = tea("40101", "青茶", "香駿の和烏龍茶", { story: "祖父の代から続く茶畑で…" });
+  const m = buildTeaCard(t);
+  assert(m.quickReplies.some((q) => q.action.label.includes("つくり手の物語")), "story button present");
+  assert(m.quickReplies.some((q) => q.action.text === "つくり手の物語｜40101"), "story token");
+});
+it("農家の物語なし → ボタンは出ない（楽しみ方と同方式）", () => {
+  const t = tea("40101", "青茶", "香駿の和烏龍茶", { story: "" });
+  const m = buildTeaCard(t);
+  assert(!m.quickReplies.some((q) => q.action.label.includes("つくり手の物語")), "no story button when empty");
+});
+it("つくり手の物語｜40101 → 物語回答（本文を返す）", () => {
+  const teas = [tea("40101", "青茶", "香駿の和烏龍茶", { story: "祖父の代から続く茶畑で丁寧に育てました。" })];
+  const plan = planTeaFlow("つくり手の物語｜40101", teas);
+  assert(!!plan, "plan exists");
+  assert(plan!.messages[0].text.includes("祖父の代"), "story body returned");
+});
+it("buildStoryAnswer は物語なしで準備中フォールバック", () => {
+  const t = tea("40101", "青茶", "香駿の和烏龍茶", { story: "" });
+  const m = buildStoryAnswer(t);
+  assert(m.text.includes("準備中"), "準備中 fallback");
+});
+
+console.log("\n--- (P0-1) tea.* flow_events 導出 ---");
+
+it("teaFlowEvents: entry → tea.list_view(page1)", () => {
+  const evs = teaFlowEvents("お茶を選ぶ｜1", FIXTURE, "U1");
+  assertEqual(evs[0].eventName, "tea.list_view", "list_view");
+  assertEqual(evs[0].step, "page1", "page1");
+});
+it("teaFlowEvents: card → tea.card_view(list, 5桁)", () => {
+  const evs = teaFlowEvents("このお茶｜40101", FIXTURE, "U1");
+  assertEqual(evs[0].eventName, "tea.card_view", "card_view");
+  assertEqual(evs[0].value, "list", "entry=list");
+  assertEqual(evs[0].productNo, "40101", "product_no");
+});
+it("teaFlowEvents: story タップ → tea.item_view(story, 5桁)", () => {
+  const evs = teaFlowEvents("つくり手の物語｜40101", FIXTURE, "U1");
+  assertEqual(evs[0].eventName, "tea.item_view", "item_view");
+  assertEqual(evs[0].value, "story", "story");
+  assertEqual(evs[0].productNo, "40101", "product_no");
+});
+it("teaFlowEvents: 5桁のみ実在 → tea.card_view(number) / 不在 → tea.number_miss", () => {
+  const hit = teaFlowEvents("40101", FIXTURE, "U1");
+  assertEqual(hit[0].eventName, "tea.card_view", "card_view");
+  assertEqual(hit[0].value, "number", "number");
+  const miss = teaFlowEvents("99999", FIXTURE, "U1");
+  assertEqual(miss[0].eventName, "tea.number_miss", "number_miss");
+  assertEqual(miss[0].value, "99999", "入力番号");
+});
+it("teaFlowEvents: 無関係な発話は空（素通り）", () => {
+  assertEqual(teaFlowEvents("こんにちは", FIXTURE, "U1").length, 0, "empty");
 });
 
 console.log("\n--- (d) 無関係な発話は素通り ---");

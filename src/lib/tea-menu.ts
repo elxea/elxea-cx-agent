@@ -26,6 +26,8 @@
 
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
+import { createSupabaseClient } from "./supabase";
+import { logFlowEvent, type FlowEventInput } from "./flow-events";
 
 // ---------------------------------------------------------------------------
 // データモデル
@@ -50,6 +52,15 @@ export interface TeaItem {
   water: string;
   /** 楽しみ方（Notion「楽しみ方」）。現状 0 件。入り次第、自動で選択肢に出す */
   enjoy: string;
+  /**
+   * つくり手（農家）の物語（Notion「農家の物語」text）。P0-9。
+   * 対応済みメニュー（実話の物語がある農家分）のみ非空。空ならボタンを出さない
+   *   （楽しみ方と同じ「データがある時のみ表示」方式）。
+   * データ源の設計: Tea Menu → Supplier Name リレーション（充足済）→ 農家の物語。
+   *   staging では 3 ホップ解決を避け、スタッフが Notion Tea Menu の本フィールドへ物語要約を直接記入する
+   *   （P0-8 楽しみ方と同一運用・最短経路の option b「本文を要約テキストで直接返す」）。
+   */
+  story: string;
 }
 
 /** 種類の並び順（一覧を種類ごとにまとめる際のソートキー。DB にあるものだけ有効）。 */
@@ -95,6 +106,7 @@ type Action =
   | { kind: "brew"; number: string }
   | { kind: "flavor"; number: string }
   | { kind: "enjoy"; number: string }
+  | { kind: "story"; number: string } // P0-9: つくり手（農家）の物語
   | { kind: "number-exact"; number: string } // 5 桁のみのメッセージ
   | { kind: "number-loose"; number: string }; // 5 桁を含む文中
 
@@ -105,6 +117,7 @@ const TOK = {
   brew: "淹れ方" + SEP, // 例: 淹れ方｜11301
   flavor: "味と香り" + SEP, // 例: 味と香り｜11301
   enjoy: "楽しみ方" + SEP, // 例: 楽しみ方｜11301
+  story: "つくり手の物語" + SEP, // P0-9・例: つくり手の物語｜11301
 } as const;
 
 /** 「別のお茶を見る／一覧に戻る」= 一覧 1 ページ目に戻る message テキスト。 */
@@ -149,6 +162,10 @@ export function parseTeaAction(raw: string): Action | null {
   if (t.startsWith(TOK.enjoy)) {
     const n = firstFiveDigits(t);
     if (n) return { kind: "enjoy", number: n };
+  }
+  if (t.startsWith(TOK.story)) {
+    const n = firstFiveDigits(t);
+    if (n) return { kind: "story", number: n };
   }
 
   // 番号直指定（予備）
@@ -224,13 +241,20 @@ export function buildEntryMessage(teas: TeaItem[], page = 0): OutMessage {
 }
 
 /** カード用の quick reply（項目タップ）。exclude で自分自身の項目を除ける。 */
-function cardItemQuickReplies(tea: TeaItem, exclude?: "brew" | "flavor" | "enjoy"): QuickReplyItem[] {
+function cardItemQuickReplies(
+  tea: TeaItem,
+  exclude?: "brew" | "flavor" | "enjoy" | "story",
+): QuickReplyItem[] {
   const items: QuickReplyItem[] = [];
   if (exclude !== "brew") items.push(qr("🌡 温度・抽出時間", `${TOK.brew}${tea.number}`));
   if (exclude !== "flavor") items.push(qr("👃 味・香り", `${TOK.flavor}${tea.number}`));
   // 楽しみ方はデータがある時のみ表示（無ければ選択肢に出さない）
   if (exclude !== "enjoy" && tea.enjoy.trim()) {
     items.push(qr("🍵 楽しみ方", `${TOK.enjoy}${tea.number}`));
+  }
+  // P0-9 つくり手の物語: データ（農家の物語）がある時のみ表示（楽しみ方と同方式）。
+  if (exclude !== "story" && tea.story.trim()) {
+    items.push(qr("🌱 つくり手の物語", `${TOK.story}${tea.number}`));
   }
   items.push(qr("🍃 別のお茶を見る", BACK_TO_LIST));
   return items;
@@ -287,6 +311,19 @@ export function buildEnjoyAnswer(tea: TeaItem): OutMessage {
   return { text, quickReplies: cardItemQuickReplies(tea, "enjoy") };
 }
 
+/**
+ * 🌱つくり手の物語の回答（P0-9）。データ（農家の物語）がある時はその要約を返し、
+ * 無い場合は「物語は準備中です」フォールバック（設計 §A-3 候補4）。
+ * 通常は物語がある時のみボタンが出るため到達するが、stale トークン対策で fallback を保持する。
+ */
+export function buildStoryAnswer(tea: TeaItem): OutMessage {
+  const body = tea.story.trim()
+    ? `このお茶をつくる農家さんの物語です。\n\n${tea.story.trim()}`
+    : "つくり手の物語は、ただいま準備中です。もう少しお待ちくださいね。";
+  const text = `【${tea.name}（No.${tea.number}）】\n${body}\n\n他に知りたいことがあれば、下からどうぞ。`;
+  return { text, quickReplies: cardItemQuickReplies(tea, "story") };
+}
+
 /** 番号が見つからないときの正直な案内（創作しない）。 */
 export function buildNumberNotFound(teas: TeaItem[], number: string): OutMessage {
   return {
@@ -327,6 +364,10 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
       const tea = find(action.number);
       return { messages: [tea ? buildEnjoyAnswer(tea) : buildNumberNotFound(teas, action.number)] };
     }
+    case "story": {
+      const tea = find(action.number);
+      return { messages: [tea ? buildStoryAnswer(tea) : buildNumberNotFound(teas, action.number)] };
+    }
 
     case "number-exact": {
       const tea = find(action.number);
@@ -339,6 +380,49 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
       // 一致しなければ null を返し、AI 自由対話へ素通りさせる（自由対話を壊さない）。
       return tea ? { messages: [buildTeaCard(tea)] } : null;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// flow_events 導出（P0-1）: tea.* タップ記録（純粋・テスト可能）
+// ---------------------------------------------------------------------------
+
+/**
+ * タップメニューの発話から記録すべき flow_events を導出する（純粋・設計 §B-5a の tea.* 系）。
+ *   entry           → tea.list_view（step=page{n}）
+ *   card            → tea.card_view（value=list・product_no）
+ *   number-exact    → 実在: tea.card_view（value=number）/ 不在: tea.number_miss（value=入力番号）
+ *   number-loose    → 実在時のみ tea.card_view（value=number）。不在は素通りのため記録しない
+ *   brew/flavor/enjoy/story → tea.item_view（value=当該項目・product_no）
+ *
+ * これで棚卸しの H2（番号直指定 vs 一覧）・H3（ページ到達率）・H4 系が検証可能になる。
+ */
+export function teaFlowEvents(
+  userMessage: string,
+  teas: TeaItem[],
+  userRef: string,
+): FlowEventInput[] {
+  const action = parseTeaAction(userMessage);
+  if (!action) return [];
+  const found = (n: string) => teas.some((t) => t.number === n);
+  switch (action.kind) {
+    case "entry":
+      return [{ eventName: "tea.list_view", userRef, step: `page${action.page + 1}` }];
+    case "card":
+      return [{ eventName: "tea.card_view", userRef, value: "list", productNo: action.number }];
+    case "brew":
+    case "flavor":
+    case "enjoy":
+    case "story":
+      return [{ eventName: "tea.item_view", userRef, value: action.kind, productNo: action.number }];
+    case "number-exact":
+      return found(action.number)
+        ? [{ eventName: "tea.card_view", userRef, value: "number", productNo: action.number }]
+        : [{ eventName: "tea.number_miss", userRef, value: action.number }];
+    case "number-loose":
+      return found(action.number)
+        ? [{ eventName: "tea.card_view", userRef, value: "number", productNo: action.number }]
+        : [];
   }
 }
 
@@ -400,6 +484,7 @@ function mapPage(page: NotionPage): TeaItem | null {
     time: propRich(pr["How-to_Time(Sec)"]),
     water: propRich(pr["How-to_Water(ml)"]),
     enjoy: propRich(pr["楽しみ方"]),
+    story: propRich(pr["農家の物語"]),
   };
 }
 
@@ -510,6 +595,12 @@ export async function handleTeaMenuFlow(
   // 複数通の場合、最初の 1 通が reply（無料）、以降は push（有料）にフォールバックする。
   for (const m of plan.messages) {
     await responder.text(m.text, m.quickReplies);
+  }
+
+  // タップ記録（P0-1・fire-and-forget・失敗は握りつぶし）。応答後に投げっぱなし。
+  const supabase = createSupabaseClient(env);
+  for (const ev of teaFlowEvents(userMessage, teas, lineUserId)) {
+    void logFlowEvent(supabase, ev);
   }
   return true;
 }
