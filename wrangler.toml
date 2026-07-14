@@ -11,6 +11,13 @@ workers_dev = true
 # staging（[env.staging.vars]）とパリティを取る（挙動不変）。
 [vars]
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+# 配信対象 OA の固定（本番）。未設定だと delivery-channel.ts が fail-closed で "test" に倒れ、
+# 本番に test トークンが無いため 15分毎 cron が毎 tick resolveDeliveryChannel で例外を投げていた
+# （誤送信ゼロの安全な故障だが監視ノイズ）。本番は本番 OA（@307tzhkw）に明示固定する。
+#   ⚠ 実送信ガードは別レイヤ: DELIVERY_SEND_ENABLED（secret）を "true" にしない限り送らない。
+#     GA まではこの secret を "false" に固定してある（`wrangler secret put DELIVERY_SEND_ENABLED`）。
+#     TARGET_ENV=prod は「dry-run の対象を本番 OA に向ける」だけで、送信可否は変えない。
+DELIVERY_TARGET_ENV = "prod"
 
 [ai]
 binding = "AI"
