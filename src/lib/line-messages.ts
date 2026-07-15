@@ -40,7 +40,6 @@ export const LINE_MAX_MESSAGES = 5;
 export interface DeliveryContent {
   format: "text" | "image";
   body: string | null;
-  imageUrl: string | null;
   /**
    * 順序付きの画像 URL 群（text + 複数画像モード）。
    * 1 件以上あればこちらが優先され、text(任意) + image N を送信順に組む。
@@ -91,17 +90,9 @@ export function buildMessages(content: DeliveryContent): BuildMessagesResult {
   }
 
   if (content.format === "image") {
-    const url = content.imageUrl ?? "";
-    if (!isPermanentHttpsUrl(url)) {
-      return {
-        ok: false,
-        reason: "image 形式だが画像URLが恒久HTTPSでない（Notion署名URL不可）",
-      };
-    }
-    return {
-      ok: true,
-      messages: [{ type: "image", originalContentUrl: url, previewImageUrl: url }],
-    };
+    // 画像は imageUrls（恒久R2 URL 群）経由でのみ送る。imageUrls が空の image は送信不可。
+    // 旧・単一 imageUrl 経路は廃止（Notion「画像URL」プロパティ削除に伴う死経路除去）。
+    return { ok: false, reason: "image 形式だが画像が無い（imageUrls が空）" };
   }
 
   return { ok: false, reason: `未知の形式: ${String(content.format)}` };

@@ -187,40 +187,35 @@ describe("evaluateScheduledTime（日時厳格化）", () => {
 // ---------------------------------------------------------------------------
 describe("computeContentHash / hashesMatch（TOCTOU pinning）", () => {
   it("同一内容は同一ハッシュ", async () => {
-    const a = await computeContentHash({ format: "text", body: "こんにちは", imageUrl: null });
-    const b = await computeContentHash({ format: "text", body: "こんにちは", imageUrl: null });
+    const a = await computeContentHash({ format: "text", body: "こんにちは" });
+    const b = await computeContentHash({ format: "text", body: "こんにちは" });
     assertEqual(a, b, "deterministic");
     assertTrue(hashesMatch(a, b), "match");
   });
   it("本文を編集するとハッシュ不一致（送信中止根拠）", async () => {
-    const snap = await computeContentHash({ format: "text", body: "旧本文", imageUrl: null });
-    const cur = await computeContentHash({ format: "text", body: "新本文（編集後）", imageUrl: null });
-    assertFalse(hashesMatch(snap, cur), "mismatch");
-  });
-  it("画像URLを編集するとハッシュ不一致", async () => {
-    const snap = await computeContentHash({ format: "image", body: null, imageUrl: "https://cdn.example.com/a.jpg" });
-    const cur = await computeContentHash({ format: "image", body: null, imageUrl: "https://cdn.example.com/b.jpg" });
+    const snap = await computeContentHash({ format: "text", body: "旧本文" });
+    const cur = await computeContentHash({ format: "text", body: "新本文（編集後）" });
     assertFalse(hashesMatch(snap, cur), "mismatch");
   });
   it("空スナップショットは常に不一致（fail-closed）", async () => {
-    const cur = await computeContentHash({ format: "text", body: "x", imageUrl: null });
+    const cur = await computeContentHash({ format: "text", body: "x" });
     assertFalse(hashesMatch(null, cur), "null snapshot");
     assertFalse(hashesMatch("", cur), "empty snapshot");
   });
-  it("imageUrls 未指定/空は従来の {format,body,imageUrl} と同一ハッシュ（後方互換）", async () => {
-    const legacy = await computeContentHash({ format: "text", body: "本文", imageUrl: null });
-    const empty = await computeContentHash({ format: "text", body: "本文", imageUrl: null, imageUrls: [] });
+  it("imageUrls 未指定/空は従来の {format,body} と同一ハッシュ（後方互換）", async () => {
+    const legacy = await computeContentHash({ format: "text", body: "本文" });
+    const empty = await computeContentHash({ format: "text", body: "本文", imageUrls: [] });
     assertEqual(legacy, empty, "undefined と [] は同一");
     assertTrue(hashesMatch(legacy, empty), "match");
   });
   it("恒久R2 URL 群の枚数/順序が変わるとハッシュ不一致（TOCTOU: 画像追加/並替検知）", async () => {
     const base = "https://pub-x.r2.dev/broadcast/pg";
-    const one = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`] });
-    const two = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
+    const one = await computeContentHash({ format: "image", body: null, imageUrls: [`${base}/0.jpg`] });
+    const two = await computeContentHash({ format: "image", body: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
     assertFalse(hashesMatch(one, two), "枚数変化で不一致");
-    const swapped = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/1.jpg`, `${base}/0.jpg`] });
+    const swapped = await computeContentHash({ format: "image", body: null, imageUrls: [`${base}/1.jpg`, `${base}/0.jpg`] });
     assertFalse(hashesMatch(two, swapped), "順序変化で不一致");
-    const same = await computeContentHash({ format: "image", body: null, imageUrl: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
+    const same = await computeContentHash({ format: "image", body: null, imageUrls: [`${base}/0.jpg`, `${base}/1.jpg`] });
     assertTrue(hashesMatch(two, same), "同一 URL 群は一致");
   });
 });
@@ -318,7 +313,7 @@ describe("isApprovalAuthorized（承認者必須は常に維持・緩和は独�
 // ---------------------------------------------------------------------------
 describe("buildMessages（text/image 可変化）", () => {
   it("text: 本文があれば text メッセージ 1 件", () => {
-    const r = buildMessages({ format: "text", body: "本文です", imageUrl: null });
+    const r = buildMessages({ format: "text", body: "本文です" });
     assertTrue(r.ok, "ok");
     if (r.ok) {
       assertEqual(r.messages.length, 1, "1 件");
@@ -326,22 +321,22 @@ describe("buildMessages（text/image 可変化）", () => {
     }
   });
   it("text: 本文が空は不可（fail-closed）", () => {
-    const r = buildMessages({ format: "text", body: "  ", imageUrl: null });
+    const r = buildMessages({ format: "text", body: "  " });
     assertFalse(r.ok, "empty body rejected");
   });
   it("image: 恒久 HTTPS なら image メッセージ", () => {
-    const r = buildMessages({ format: "image", body: null, imageUrl: "https://cdn.example.com/a.jpg" });
+    const r = buildMessages({ format: "image", body: null, imageUrls: ["https://cdn.example.com/a.jpg"] });
     assertTrue(r.ok, "ok");
     if (r.ok) assertEqual(r.messages[0].type, "image", "type image");
   });
   it("image: Notion 署名 URL / http は拒否", () => {
-    assertFalse(buildMessages({ format: "image", body: null, imageUrl: "http://cdn.example.com/a.jpg" }).ok, "http");
+    assertFalse(buildMessages({ format: "image", body: null, imageUrls: ["http://cdn.example.com/a.jpg"] }).ok, "http");
     assertFalse(
-      buildMessages({ format: "image", body: null, imageUrl: "https://prod-files-secure.s3.amazonaws.com/x?X-Amz-Signature=abc" }).ok,
+      buildMessages({ format: "image", body: null, imageUrls: ["https://prod-files-secure.s3.amazonaws.com/x?X-Amz-Signature=abc"] }).ok,
       "notion signed",
     );
     assertFalse(
-      buildMessages({ format: "image", body: null, imageUrl: "https://file.notion.so/f/a.jpg" }).ok,
+      buildMessages({ format: "image", body: null, imageUrls: ["https://file.notion.so/f/a.jpg"] }).ok,
       "notion host",
     );
   });
@@ -375,7 +370,6 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const r = buildMessages({
       format: "text",
       body: "本文です",
-      imageUrl: null,
       imageUrls: [img("a"), img("b"), img("c")],
     });
     assertTrue(r.ok, "ok");
@@ -400,7 +394,6 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const r = buildMessages({
       format: "image",
       body: null,
-      imageUrl: null,
       imageUrls: [img("a"), img("b")],
     });
     assertTrue(r.ok, "ok");
@@ -414,7 +407,6 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const r = buildMessages({
       format: "text",
       body: "   ",
-      imageUrl: null,
       imageUrls: [img("a")],
     });
     assertFalse(r.ok, "空本文は不可");
@@ -424,14 +416,12 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const r1 = buildMessages({
       format: "text",
       body: "本文",
-      imageUrl: null,
       imageUrls: [img("a"), "http://cdn.example.com/b.jpg"],
     });
     assertFalse(r1.ok, "http 混入で不可");
     const r2 = buildMessages({
       format: "text",
       body: "本文",
-      imageUrl: null,
       imageUrls: [img("a"), "https://file.notion.so/f/x.jpg"],
     });
     assertFalse(r2.ok, "Notion署名URL 混入で不可");
@@ -442,7 +432,6 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const ok = buildMessages({
       format: "text",
       body: "本文",
-      imageUrl: null,
       imageUrls: [img("a"), img("b"), img("c"), img("d")],
     });
     assertTrue(ok.ok, "text1+image4=5 は OK");
@@ -451,19 +440,18 @@ describe("buildMessages（text + 複数画像 / 送信順・上限）", () => {
     const over = buildMessages({
       format: "text",
       body: "本文",
-      imageUrl: null,
       imageUrls: [img("a"), img("b"), img("c"), img("d"), img("e")],
     });
     assertFalse(over.ok, "6 件は上限超過で不可");
   });
 
-  it("imageUrls 未指定/空なら従来の単一形式で動く（後方互換）", () => {
-    const t = buildMessages({ format: "text", body: "本文", imageUrl: null, imageUrls: [] });
+  it("imageUrls 未指定/空なら text は本文 1 件にフォールバック（後方互換）", () => {
+    const t = buildMessages({ format: "text", body: "本文", imageUrls: [] });
     assertTrue(t.ok, "空配列は単一形式にフォールバック");
     if (t.ok) assertEqual(t.messages.length, 1, "text 1 件");
-    const i = buildMessages({ format: "image", body: null, imageUrl: img("z") });
-    assertTrue(i.ok, "imageUrls 未指定は単一 image");
-    if (i.ok) assertEqual(i.messages.length, 1, "image 1 件");
+    // image 形式は imageUrls（恒久R2 URL 群）必須。空/未指定は送信不可（旧・単一 imageUrl 経路は廃止）。
+    const i = buildMessages({ format: "image", body: null, imageUrls: [] });
+    assertFalse(i.ok, "imageUrls 空の image は不可（fail-closed）");
   });
 });
 
@@ -833,7 +821,6 @@ describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
             { type: "external", external: { url: "https://cdn.example.com/b.jpg" } },
           ],
         },
-        [P.imageUrl]: { url: "https://cdn.example.com/legacy.jpg" },
         [P.scheduled]: { date: { start: "2026-07-10T06:00:00+09:00" } },
         [P.sent]: { checkbox: false },
         [P.contentHash]: { rich_text: [{ plain_text: "abc123" }] },
@@ -853,7 +840,6 @@ describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
       "https://notion-temp/a.jpg?sig=1,https://cdn.example.com/b.jpg",
       "files の一時URLを順序保持で抽出",
     );
-    assertEqual(page.imageUrl, "https://cdn.example.com/legacy.jpg", "旧 imageUrl も読む（後方互換）");
     assertEqual(page.body, null, "empty body → null");
     assertEqual(page.contentHash, "abc123", "hash");
     assertEqual(page.estimate, 38, "estimate");
@@ -1012,7 +998,6 @@ async function makePage(over: Partial<DeliveryPage>): Promise<DeliveryPage> {
     audienceRaw: "全員",
     format: "text",
     body: "配信本文",
-    imageUrl: null,
     scheduledStart: "2026-07-10T04:00:00Z",
     sent: false,
     contentHash: null,
@@ -1027,7 +1012,6 @@ async function makePage(over: Partial<DeliveryPage>): Promise<DeliveryPage> {
     base.contentHash = await computeContentHash({
       format: base.format ?? "text",
       body: base.body,
-      imageUrl: base.imageUrl,
     });
   }
   return base;
@@ -1154,7 +1138,6 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
       audienceRaw: "全員",
       format: "text",
       body: "x",
-      imageUrl: null,
       scheduledStart: "2026-07-10T04:00:00Z",
       sent: false,
       contentHash: "h",
@@ -1459,7 +1442,6 @@ describe("runDeliveryOnce: Notion files 画像（R2 恒久URL・全 audience 適
     const contentHash = await computeContentHash({
       format: "image",
       body: "本文",
-      imageUrl: null,
       imageUrls: imgs,
     });
     const page = await makePage({
@@ -1507,7 +1489,6 @@ describe("runDeliveryOnce: Notion files 画像（R2 恒久URL・全 audience 適
     const pinned = await computeContentHash({
       format: "image",
       body: "本文",
-      imageUrl: null,
       imageUrls: [`${R2}/0.jpg`], // 承認時は 1 枚
     });
     const page = await makePage({

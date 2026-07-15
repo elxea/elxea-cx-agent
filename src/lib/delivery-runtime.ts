@@ -242,7 +242,6 @@ export async function pinDeliveryApproval(
   const contentHash = await computeContentHash({
     format: page.format,
     body: page.body,
-    imageUrl: page.imageUrl,
     imageUrls: r2Urls,
   });
   await pinApproval(request, pageId, contentHash);

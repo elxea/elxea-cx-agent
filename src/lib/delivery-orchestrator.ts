@@ -226,7 +226,6 @@ async function processPage(
   const built = buildMessages({
     format: page.format,
     body: page.body,
-    imageUrl: page.imageUrl,
     imageUrls: extraImageUrls,
   });
   if (!built.ok) return skip(page, `メッセージ不正: ${built.reason}`);
@@ -238,7 +237,6 @@ async function processPage(
   const currentHash = await computeContentHash({
     format: page.format,
     body: page.body,
-    imageUrl: page.imageUrl,
     imageUrls: notionImages,
   });
   if (!page.contentHash) {

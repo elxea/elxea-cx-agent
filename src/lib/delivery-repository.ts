@@ -24,8 +24,6 @@ export const DELIVERY_PROPS = {
   body: "本文",
   /** files 型「画像」。運用者が Notion に直接ドラッグ&ドロップする（URL 手入力は廃止）。 */
   image: "画像",
-  /** 旧・url 型「画像URL」。廃止（view 非表示で残置）。コードは読むが運用者は触らない。 */
-  imageUrl: "画像URL",
   estimate: "通数見積",
   consumed: "消費実績",
   contentHash: "コンテンツハッシュ",
@@ -52,8 +50,6 @@ export interface DeliveryPage {
    */
   format: "text" | "image" | null;
   body: string | null;
-  /** 旧・単一 url「画像URL」の値（後方互換で読むが運用者は触らない）。 */
-  imageUrl: string | null;
   /**
    * files「画像」の Notion 一時URL（署名・約1時間失効）。順序保持。
    * 承認 pin 時に R2 取込のソースとして使う（送信時は使わない）。
@@ -138,9 +134,6 @@ function titleText(p: RawProp | undefined): string {
   const arr = p?.title as Array<{ plain_text?: string }> | undefined;
   return (arr ?? []).map((x) => x.plain_text ?? "").join("") || "Untitled";
 }
-function urlVal(p: RawProp | undefined): string | null {
-  return (p?.url as string | null | undefined) ?? null;
-}
 function numberVal(p: RawProp | undefined): number | null {
   const n = p?.number as number | null | undefined;
   return typeof n === "number" ? n : null;
@@ -190,7 +183,6 @@ export function normalizeDeliveryPage(page: {
     audienceRaw: selectName(p[P.audience]),
     format: imageCount > 0 ? "image" : "text",
     body: richText(p[P.body]),
-    imageUrl: urlVal(p[P.imageUrl]),
     imageSourceUrls,
     imageCount,
     scheduledStart: dateStart(p[P.scheduled]),
@@ -306,7 +298,7 @@ export async function writeDeliveryResult(
 }
 
 /**
- * 承認時のコンテンツ pinning（T12）: 現在の本文＋画像URL のハッシュを
+ * 承認時のコンテンツ pinning（T12）: 現在の本文＋画像（R2 URL 群）のハッシュを
  * 「コンテンツハッシュ」列に保存し、Status=Approved にする。
  *
  * これが承認時スナップショット。送信側はこの値と送信直前のハッシュを照合し、
