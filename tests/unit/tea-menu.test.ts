@@ -19,6 +19,7 @@ import {
   buildEntryMessage,
   buildTeaCard,
   buildBrewAnswer,
+  buildFlavorAnswer,
   buildStoryAnswer,
   teaFlowEvents,
   TEA_LIST_PAGE_SIZE,
@@ -305,6 +306,83 @@ it("全メッセージの quick reply が 13 以下", () => {
     assert(c !== null, "planned");
     for (const m of c!.messages) assert(m.quickReplies.length <= QR_MAX, `qr<=13 (${m.quickReplies.length})`);
   }
+});
+
+console.log("\n--- (ブロック3-A 1a) 診断出所スレッディング（source=diagnosis 継承） ---");
+
+it("診断カードトークン このお茶｜40101｜診断 → card アクション origin=diagnosis", () => {
+  const a = parseTeaAction("このお茶｜40101｜診断");
+  assertEqual(a?.kind, "card", "card");
+  assertEqual((a as { origin?: string }).origin, "diagnosis", "origin=diagnosis");
+});
+
+it("teaFlowEvents: 診断経由カード → tea.card_view(value=diagnosis)（Spec enum 一致）", () => {
+  const evs = teaFlowEvents("このお茶｜40101｜診断", FIXTURE, "U1");
+  assertEqual(evs[0].eventName, "tea.card_view", "card_view");
+  assertEqual(evs[0].value, "diagnosis", "value=diagnosis");
+  assertEqual(evs[0].productNo, "40101", "product_no");
+  // 通常経路（マーカーなし）は従来どおり list
+  assertEqual(teaFlowEvents("このお茶｜40101", FIXTURE, "U1")[0].value, "list", "no-marker=list");
+});
+
+it("診断カード → 感想ボタンが origin を継承（感想｜40101｜診断）", () => {
+  const plan = planTeaFlow("このお茶｜40101｜診断", FIXTURE);
+  assert(!!plan, "plan");
+  const rate = plan!.messages[0].quickReplies.find((q) => q.action.label.includes("感想"))!;
+  assertEqual(rate.action.text, "感想｜40101｜診断", "rate token carries diagnosis marker");
+  // 「別のお茶を見る」= 一覧は出所をリセット（マーカーを付けない）
+  const back = plan!.messages[0].quickReplies.find((q) => q.action.label.includes("別のお茶"))!;
+  assertEqual(back.action.text, "お茶を選ぶ｜1", "back to list has no marker");
+});
+
+it("診断出所の感想プロンプト → rate-good/bad が origin を継承", () => {
+  const a = parseTeaAction("感想｜40101｜診断");
+  assertEqual(a?.kind, "rate", "rate");
+  assertEqual((a as { origin?: string }).origin, "diagnosis", "rate origin");
+  const plan = planTeaFlow("感想｜40101｜診断", FIXTURE);
+  const texts = plan!.messages[0].quickReplies.map((q) => q.action.text);
+  assert(texts.includes("感想よい｜40101｜診断"), "good carries marker");
+  assert(texts.includes("感想いまいち｜40101｜診断"), "bad carries marker");
+});
+
+it("rate-good の origin: 診断経由=diagnosis / 通常=undefined（source 決定の入力）", () => {
+  assertEqual((parseTeaAction("感想よい｜40101｜診断") as { origin?: string }).origin, "diagnosis", "diag");
+  assertEqual((parseTeaAction("感想よい｜40101") as { origin?: string }).origin, undefined, "normal");
+});
+
+console.log("\n--- (ブロック3-A 2) 終端後の1手（網羅的メニュー再掲をやめる） ---");
+
+it("温度回答: 次の1手は 味・香り + お茶の一覧 の2個だけ（全再掲しない）", () => {
+  const t = FIXTURE.find((x) => x.number === "10101")!;
+  const m = buildBrewAnswer(t);
+  const labels = m.quickReplies.map((q) => q.action.label);
+  assertEqual(m.quickReplies.length, 2, "1手=2個");
+  assert(labels.some((l) => l.includes("味・香り")), "sibling=味・香り");
+  assert(labels.some((l) => l.includes("お茶の一覧")), "has お茶の一覧");
+  assert(!labels.some((l) => l.includes("温度")), "no 自分自身（温度）");
+  assert(!labels.some((l) => l.includes("感想")), "no 感想 in terminal");
+  const back = m.quickReplies.find((q) => q.action.label.includes("お茶の一覧"))!;
+  assertEqual(back.action.text, "お茶を選ぶ｜1", "一覧へ");
+});
+
+it("味・香り回答: 次の1手は 温度・抽出時間 + お茶の一覧", () => {
+  const t = FIXTURE.find((x) => x.number === "10101")!;
+  const m = buildFlavorAnswer(t);
+  const labels = m.quickReplies.map((q) => q.action.label);
+  assert(labels.some((l) => l.includes("温度")), "sibling=温度");
+  assert(labels.some((l) => l.includes("お茶の一覧")), "has 一覧");
+  assert(m.quickReplies.length <= 2, "1〜2個");
+});
+
+it("物語回答: 兄弟（味・香り）にデータがあれば 兄弟 + 一覧、無ければ 一覧のみ", () => {
+  const withFlavor = tea("40101", "青茶", "香駿の和烏龍茶", { story: "祖父の代から…", descShort: "華やかな香り" });
+  const mWith = buildStoryAnswer(withFlavor);
+  assert(mWith.quickReplies.some((q) => q.action.label.includes("味・香り")), "sibling present");
+  // 兄弟データ皆無（flavor 情報なし）→ お茶の一覧のみ
+  const noFlavor = tea("40102", "青茶", "無情報茶", { story: "物語", flavorProfiles: [], descShort: "" });
+  const mNo = buildStoryAnswer(noFlavor);
+  assertEqual(mNo.quickReplies.length, 1, "sibling データ無→一覧のみ");
+  assertEqual(mNo.quickReplies[0].action.label.includes("お茶の一覧"), true, "一覧");
 });
 
 console.log("\n--- 回帰: feedback pending 中は tea-menu が横取りしない（インターセプタ順序） ---");

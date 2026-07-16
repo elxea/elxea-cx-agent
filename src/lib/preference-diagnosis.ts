@@ -31,6 +31,7 @@ import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { logFlowEvent, type FlowEventInput } from "./flow-events";
+import { diagnosisCardToken } from "./tea-menu";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
   getFirestoreEnv,
@@ -231,7 +232,12 @@ export function buildQ3(q1: number, q2: number): OutMessage {
   };
 }
 
-/** タイプ別おすすめ（採用 3 種・番号は Tea Menu DB Status=販売中 の title を SoT とする）。 */
+/**
+ * タイプ別おすすめ（採用 3 種・番号は Tea Menu DB Status=販売中 の title を SoT とする）。
+ * おすすめボタンは `diagnosisCardToken`（`このお茶｜{番号}｜診断`）で「診断出所」を乗せる（ブロック3-A 1(a)）:
+ *   到達したお茶カードは tea.card_view value=diagnosis を記録し、そのカードの感想タップは
+ *   product_ratings に source=diagnosis で記録される（飲む前の評価は求めない＝静かで丁寧）。
+ */
 const RESULTS: Record<PersonaType, OutMessage> = {
   serenity: {
     text:
@@ -244,9 +250,9 @@ const RESULTS: Record<PersonaType, OutMessage> = {
       "10501 みなみさやかの萎凋釜炒り茶／花と蜜のような、静かな一杯\n\n" +
       "気になるお茶は、下のボタンか、番号（例 40101）を送ってくださいね。",
     quickReplies: [
-      qr("40101 香駿の和烏龍茶", "このお茶｜40101"),
-      qr("40601 さやまかおりの烏龍", "このお茶｜40601"),
-      qr("10501 みなみさやか", "このお茶｜10501"),
+      qr("40101 香駿の和烏龍茶", diagnosisCardToken("40101")),
+      qr("40601 さやまかおりの烏龍", diagnosisCardToken("40601")),
+      qr("10501 みなみさやか", diagnosisCardToken("10501")),
       qr("もっと相談する", CONSULT_MORE_TEXT),
     ],
   },
@@ -261,9 +267,9 @@ const RESULTS: Record<PersonaType, OutMessage> = {
       "11501 うんかいの萎凋釜炒り茶／白い小花の香りと釜炒りの滋味\n\n" +
       "気になるお茶は、下のボタンか、番号（例 10201）を送ってくださいね。",
     quickReplies: [
-      qr("10201 静七一三二の萎凋煎茶", "このお茶｜10201"),
-      qr("40201 香駿の和烏龍茶", "このお茶｜40201"),
-      qr("11501 うんかいの釜炒り茶", "このお茶｜11501"),
+      qr("10201 静七一三二の萎凋煎茶", diagnosisCardToken("10201")),
+      qr("40201 香駿の和烏龍茶", diagnosisCardToken("40201")),
+      qr("11501 うんかいの釜炒り茶", diagnosisCardToken("11501")),
       qr("もっと相談する", CONSULT_MORE_TEXT),
     ],
   },
@@ -278,9 +284,9 @@ const RESULTS: Record<PersonaType, OutMessage> = {
       "11601 さえみどりの上煎茶／上品な旨みと奥ゆかしい渋み、食後にも\n\n" +
       "気になるお茶は、下のボタンか、番号（例 50401）を送ってくださいね。",
     quickReplies: [
-      qr("50401 春摘みべにふうき紅茶", "このお茶｜50401"),
-      qr("10801 みらいの上煎茶", "このお茶｜10801"),
-      qr("11601 さえみどりの上煎茶", "このお茶｜11601"),
+      qr("50401 春摘みべにふうき紅茶", diagnosisCardToken("50401")),
+      qr("10801 みらいの上煎茶", diagnosisCardToken("10801")),
+      qr("11601 さえみどりの上煎茶", diagnosisCardToken("11601")),
       qr("もっと相談する", CONSULT_MORE_TEXT),
     ],
   },

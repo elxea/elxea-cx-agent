@@ -220,11 +220,13 @@ it("全 winner 結果: quick reply 4個・13以下・ラベル≤20字・お茶�
     for (const q of m.quickReplies) {
       assert(q.action.label.length <= LABEL_MAX, `${w}: label<=20 (${q.action.label})`);
     }
-    // 先頭3つはお茶カードトークン（tea-menu の「このお茶｜{番号}」へ接続）
+    // 先頭3つはお茶カードトークン（tea-menu の「このお茶｜{番号}｜診断」へ接続）。
+    // 末尾の「｜診断」は出所マーカー（ブロック3-A 1(a)）: 到達カードは card_view value=diagnosis を
+    // 記録し、そのカードの感想タップは product_ratings source=diagnosis になる。
     const teaButtons = m.quickReplies.slice(0, 3);
     assert(
-      teaButtons.every((q) => /^このお茶｜\d{5}$/.test(q.action.text)),
-      `${w}: 3 tea card tokens`,
+      teaButtons.every((q) => /^このお茶｜\d{5}｜診断$/.test(q.action.text)),
+      `${w}: 3 diagnosis-origin tea card tokens`,
     );
     // 4つ目は「もっと相談する」→ ③相談入口テキスト
     assertEqual(
