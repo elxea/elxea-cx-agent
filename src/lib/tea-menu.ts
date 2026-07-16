@@ -28,7 +28,19 @@ import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { logFlowEvent, type FlowEventInput } from "./flow-events";
-import { recordProductRating, type RatingValue, type RatingSource } from "./product-ratings";
+import {
+  recordProductRating,
+  getUserRatings,
+  allRatedProductNos,
+  type RatingValue,
+  type RatingSource,
+} from "./product-ratings";
+import { selectNextCup } from "./next-cup";
+import {
+  NEXT_CUP_GOOD_THANKS,
+  NEXT_CUP_DECLINE_MESSAGE,
+  nextCupSuggestionSentence,
+} from "./brand-copy";
 
 // ---------------------------------------------------------------------------
 // データモデル
@@ -443,6 +455,55 @@ export function buildRateThanks(tea: TeaItem, origin?: Origin): OutMessage {
   };
 }
 
+/**
+ * A-2a 「おいしかった」(+1) のお礼 + 似た 1 本の提案（候補があれば）。
+ * suggestion=null（候補ゼロ）のときはお礼のみ（無理に出さない・設計 v2）。
+ * quick reply は「静か」を保つため、提案があればその 1 本のカードへの入口 + 一覧のみ。
+ * 提案が無ければ一覧のみ（押し売りしない）。提案カードは通常経路（origin なし）で開く。
+ */
+export function buildRateThanksGood(
+  tea: TeaItem,
+  suggestion: TeaItem | null,
+): OutMessage {
+  const head = `【${tea.name}（No.${tea.number}）】\n${NEXT_CUP_GOOD_THANKS}`;
+  if (!suggestion) {
+    return { text: head, quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)] };
+  }
+  return {
+    text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}`,
+    quickReplies: [
+      qr(`${suggestion.name}を見る`, `${TOK.card}${suggestion.number}`),
+      qr("🍃 別のお茶を見る", BACK_TO_LIST),
+    ],
+  };
+}
+
+/**
+ * A-2a 「好みと少し違った」(-1) 直後の静かな受け止め（提案ゼロ・設計 v2）。
+ * 別系統への提案・誘導はしない（引く挙動）。一覧への静かな入口 1 個だけ添える。
+ */
+export function buildRateDeclined(tea: TeaItem): OutMessage {
+  return {
+    text: `【${tea.name}（No.${tea.number}）】\n${NEXT_CUP_DECLINE_MESSAGE}`,
+    quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)],
+  };
+}
+
+/**
+ * 感想（rate-good / rate-bad）への応答を組む（A-2a・純粋）。
+ * suggestion は rate-good のときだけ意味を持つ（候補ゼロ or rate-bad は null）。
+ * 選定（selectNextCup）と評価済み除外集合の取得は呼び出し側（handleTeaMenuFlow）が担う。
+ */
+export function buildRateResponse(
+  tea: TeaItem,
+  kind: "rate-good" | "rate-bad",
+  suggestion: TeaItem | null,
+): OutMessage {
+  return kind === "rate-good"
+    ? buildRateThanksGood(tea, suggestion)
+    : buildRateDeclined(tea);
+}
+
 /** 番号が見つからないときの正直な案内（創作しない）。 */
 export function buildNumberNotFound(teas: TeaItem[], number: string): OutMessage {
   return {
@@ -497,11 +558,12 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
     }
     case "rate-good":
     case "rate-bad": {
-      // 記録（product_ratings への書込）は handleTeaMenuFlow が担う（副作用）。
-      // ここでは純粋にお礼メッセージだけを返す。
+      // 記録（product_ratings への書込）と「次の一杯」選定（要 Supabase 読取）は
+      // handleTeaMenuFlow が担う（副作用・非同期）。純粋な planner は候補なし
+      // （suggestion=null）で応答を組む＝ +1 はお礼のみ / -1 は静かな受け止め。
       const tea = find(action.number);
       return {
-        messages: [tea ? buildRateThanks(tea, action.origin) : buildNumberNotFound(teas, action.number)],
+        messages: [tea ? buildRateResponse(tea, action.kind, null) : buildNumberNotFound(teas, action.number)],
       };
     }
 
@@ -753,6 +815,7 @@ export async function handleTeaMenuFlow(
   // P0-3 感想の記録（product_ratings へ・fire-and-forget）。おいしかった=+1 / 好みと違った=-1。
   //   再評価は上書きせず追記（recordProductRating の仕様）。
   //   出所スレッディング（ブロック3-A 1(a)）: 診断のおすすめ由来なら source=diagnosis、通常は tea_card。
+  let messages = plan.messages;
   if (action.kind === "rate-good" || action.kind === "rate-bad") {
     const rating: RatingValue = action.kind === "rate-good" ? 1 : -1;
     const source: RatingSource = action.origin === "diagnosis" ? "diagnosis" : "tea_card";
@@ -763,10 +826,23 @@ export async function handleTeaMenuFlow(
       rating,
       source,
     });
+
+    // A-2a 評価後の「次の一杯」: +1 のときだけ、評価済み銘柄を除外して似た 1 本を選ぶ。
+    //   -1 は提案ゼロ（静かに受け止める）。評価対象そのものは selectNextCup が常に除外する。
+    //   getUserRatings は fail-safe（失敗＝空配列）なので、選定失敗でお礼まで止めない。
+    const ratedTea = teas.find((t) => t.number === action.number);
+    if (ratedTea) {
+      let suggestion: TeaItem | null = null;
+      if (action.kind === "rate-good") {
+        const priorRatings = await getUserRatings(supabase, lineUserId);
+        suggestion = selectNextCup(ratedTea, teas, allRatedProductNos(priorRatings));
+      }
+      messages = [buildRateResponse(ratedTea, action.kind, suggestion)];
+    }
   }
 
   // 返信（最初の 1 通が reply=無料・以降は push=有料フォールバック）。失敗しても記録は済んでいる。
-  for (const m of plan.messages) {
+  for (const m of messages) {
     await responder.text(m.text, m.quickReplies);
   }
   return true;

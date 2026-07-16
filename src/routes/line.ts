@@ -1066,7 +1066,8 @@ async function handleTextMessage(
     effectiveUserId,
     "line",
     env,
-    { isLinked: identity.isLinked },
+    // A-1: 評価・入口の直読みは生の lineUserId をキーにする（product_ratings.user_ref と一致）。
+    { isLinked: identity.isLinked, ratingUserRef: lineUserId },
   );
 
   // Quick Reply を LINE 形式に変換し、フィードバック Quick Reply を追加
@@ -1167,7 +1168,7 @@ async function handleImageMessage(
     effectiveUserId,
     "line",
     env,
-    { isLinked: identity.isLinked, imageContent },
+    { isLinked: identity.isLinked, imageContent, ratingUserRef: lineUserId },
   );
 
   // 応答送信と保存を並列実行（本文は reply〔無料〕で送る）

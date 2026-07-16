@@ -16,9 +16,14 @@ import {
   buildProductRatingRow,
   ratingPersonaSignals,
   recordProductRating,
+  getUserRatings,
+  latestRatingByProduct,
+  allRatedProductNos,
+  positiveRatedProductNos,
   PRODUCT_RATINGS_TABLE,
   PRODUCT_RATING_WEIGHT,
   type ProductRatingRow,
+  type UserRatingRow,
 } from "../../src/lib/product-ratings";
 
 let total = 0;
@@ -122,6 +127,99 @@ it("recordProductRating: insert 失敗/例外でも throw しない（fail-safe�
     threw = true;
   }
   assertTrue(!threw, "例外を握りつぶす");
+});
+
+// --- 読み取り helper（A-1 / A-2a 用）---
+
+it("latestRatingByProduct: 追記式から銘柄ごとの最新評価を取る（後方＝新しい）", () => {
+  const rows: UserRatingRow[] = [
+    { product_no: "11301", rating: -1 },
+    { product_no: "11301", rating: 1 }, // 再評価（新しい）→ 有効
+    { product_no: "20101", rating: 1 },
+    { product_no: "abc", rating: 1 }, // 5 桁でない → 無視
+  ];
+  const m = latestRatingByProduct(rows);
+  assertEqual(m.get("11301"), 1, "最新=+1");
+  assertEqual(m.get("20101"), 1, "20101");
+  assertEqual(m.has("abc"), false, "非5桁除外");
+});
+
+it("allRatedProductNos: +1/-1 いずれも除外対象に含める", () => {
+  const rows: UserRatingRow[] = [
+    { product_no: "11301", rating: 1 },
+    { product_no: "20101", rating: -1 },
+  ];
+  const nos = allRatedProductNos(rows).sort();
+  assertEqual(nos.join(","), "11301,20101", "両方含む");
+});
+
+it("positiveRatedProductNos: +1 の銘柄だけ返す（-1 は含めない）", () => {
+  const rows: UserRatingRow[] = [
+    { product_no: "11301", rating: 1 },
+    { product_no: "20101", rating: -1 },
+    { product_no: "30101", rating: 1 },
+  ];
+  const nos = positiveRatedProductNos(rows).sort();
+  assertEqual(nos.join(","), "11301,30101", "+1 のみ");
+});
+
+it("positiveRatedProductNos: 再評価で -1→+1 は positive に含まれる", () => {
+  const rows: UserRatingRow[] = [
+    { product_no: "11301", rating: -1 },
+    { product_no: "11301", rating: 1 },
+  ];
+  assertEqual(positiveRatedProductNos(rows).join(","), "11301", "最新+1");
+});
+
+it("getUserRatings: 正常時に product_no/rating の配列を返す", async () => {
+  const client = {
+    from(table: string) {
+      assertEqual(table, PRODUCT_RATINGS_TABLE, "table");
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async order() {
+                  return { data: [{ product_no: "11301", rating: 1 }], error: null };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows = await getUserRatings(client as any, "U" + "a".repeat(32));
+  assertEqual(rows.length, 1, "1 行");
+  assertEqual(rows[0].product_no, "11301", "product_no");
+  assertEqual(rows[0].rating, 1, "rating");
+});
+
+it("getUserRatings: 空 userRef / エラー時は空配列（fail-safe）", async () => {
+  const emptyRef = await getUserRatings({} as never, "");
+  assertEqual(emptyRef.length, 0, "空 userRef");
+  const errClient = {
+    from() {
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async order() {
+                  return { data: null, error: { message: "relation does not exist" } };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows = await getUserRatings(errClient as any, "U" + "b".repeat(32));
+  assertEqual(rows.length, 0, "error → 空");
 });
 
 (async () => {

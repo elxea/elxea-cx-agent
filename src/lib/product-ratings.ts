@@ -97,6 +97,69 @@ export function ratingPersonaSignals(
   return extractPersonaSignalsFromTags(productTags);
 }
 
+/** 読み取り時の 1 評価（最小列）。 */
+export interface UserRatingRow {
+  product_no: string;
+  rating: number;
+}
+
+/**
+ * 追記式評価から「銘柄ごとの最新評価」を導出する（純粋）。
+ * 同一 product_no に複数行があるとき、配列後方（＝より新しい）を有効値とする。
+ * 呼び出し側は created_at 昇順で渡す（getUserRatings がそう並べる）。
+ */
+export function latestRatingByProduct(rows: UserRatingRow[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const r of rows) {
+    if (PRODUCT_NO_RE.test(r.product_no)) m.set(r.product_no, r.rating);
+  }
+  return m;
+}
+
+/** 評価済み（+1・-1 いずれも）の銘柄番号（A-2a の除外集合・純粋）。 */
+export function allRatedProductNos(rows: UserRatingRow[]): string[] {
+  return [...latestRatingByProduct(rows).keys()];
+}
+
+/** 最新評価が +1 の銘柄番号（A-1 の positive 事実注入・純粋）。 */
+export function positiveRatedProductNos(rows: UserRatingRow[]): string[] {
+  return [...latestRatingByProduct(rows).entries()]
+    .filter(([, rating]) => rating === 1)
+    .map(([no]) => no);
+}
+
+/**
+ * ユーザーの評価履歴を取得する（fail-safe・created_at 昇順）。
+ * A-2a（除外集合）と A-1（+1 事実）の両方が参照する。失敗時は空配列（フローを止めない）。
+ */
+export async function getUserRatings(
+  supabase: SupabaseClient,
+  userRef: string,
+): Promise<UserRatingRow[]> {
+  if (!userRef) return [];
+  try {
+    const { data, error } = await supabase
+      .from(PRODUCT_RATINGS_TABLE)
+      .select("product_no, rating")
+      .eq("user_ref", userRef)
+      .order("created_at", { ascending: true });
+    if (error) {
+      console.warn("[product-ratings] read failed (non-blocking):", error.message);
+      return [];
+    }
+    return (data ?? []).map((r) => ({
+      product_no: String((r as { product_no: unknown }).product_no),
+      rating: Number((r as { rating: unknown }).rating),
+    }));
+  } catch (err) {
+    console.warn(
+      "[product-ratings] read unexpected error (non-blocking):",
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
+}
+
 /**
  * 評価を product_ratings に追記する（fail-safe・上書きしない）。
  * 無効入力は記録せず ok=false（送信は止めない）。

@@ -12,12 +12,23 @@ import { lookupMyOrders, getOrderDetail, createCartLink, type OrderDetailResult,
 import { setBroadcastOptOut } from "../lib/broadcast-optout";
 import {
   getCustomerProfile,
+  getLineUserProfile,
   addBehaviorEvent,
   getFirestoreEnv,
   type CustomerProfile,
+  type FirestoreEnv,
+  type TasteProfile,
+  type PersonaType,
   type BehaviorEvent,
   type BehaviorChannel,
 } from "../lib/firestore";
+import { getUserRatings, positiveRatedProductNos } from "../lib/product-ratings";
+import { fetchSellingTeas } from "../lib/tea-menu";
+import {
+  buildPersonalizationContext,
+  type EntrySource,
+  type PersonalizationFacts,
+} from "../lib/personalization-context";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
 import { AGENT_TOOLS } from "./tools";
@@ -133,6 +144,11 @@ export async function runAgent(
   options?: {
     isLinked?: boolean;
     imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
+    /**
+     * A-1: product_ratings 等を引くキー（チャネル固有 ID）。
+     * LINE では生の lineUserId（product_ratings.user_ref と一致）。省略時は userId。
+     */
+    ratingUserRef?: string;
   },
 ): Promise<AgentResult> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -320,6 +336,17 @@ export async function runAgent(
   // 入力言語検出: 英語など非日本語の場合、応答言語を強制するリマインダーを生成
   const languageReminder = detectLanguageReminder(userMessage);
 
+  // A-1 文脈接続: positive/neutral な事実 + 境界 4 ルールを注入する断片（fail-safe・空可）。
+  const personalizationBlock = await buildPersonalizationBlock({
+    supabase,
+    env,
+    fsEnv,
+    channel,
+    userId,
+    ratingUserRef: options?.ratingUserRef ?? userId,
+    customerProfile,
+  });
+
   // 会話履歴を Claude のメッセージ形式に変換
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((m) => ({
@@ -381,7 +408,7 @@ export async function runAgent(
           },
           {
             type: "text" as const,
-            text: personaFragment + languageReminder + customerContext + knowledgeContext,
+            text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext,
           },
         ],
         tools: AGENT_TOOLS.map((tool, i) =>
@@ -640,6 +667,8 @@ export async function runAgentStreaming(
   options?: {
     isLinked?: boolean;
     imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
+    /** A-1: product_ratings 等を引くキー（チャネル固有 ID）。省略時は userId。 */
+    ratingUserRef?: string;
   },
 ): Promise<StreamingAgentMeta> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -722,6 +751,17 @@ export async function runAgentStreaming(
   const customerContext = buildCustomerContext(customerProfile, isLinked);
   const languageReminder = detectLanguageReminder(userMessage);
 
+  // A-1 文脈接続: positive/neutral な事実 + 境界 4 ルールを注入する断片（fail-safe・空可）。
+  const personalizationBlock = await buildPersonalizationBlock({
+    supabase,
+    env,
+    fsEnv,
+    channel,
+    userId,
+    ratingUserRef: options?.ratingUserRef ?? userId,
+    customerProfile,
+  });
+
   // メッセージ構築
   const messages: Anthropic.MessageParam[] = [
     ...conversationHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
@@ -752,7 +792,7 @@ export async function runAgentStreaming(
       // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
       // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
       { type: "text" as const, text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" as const } },
-      { type: "text" as const, text: personaFragment + languageReminder + customerContext + knowledgeContext },
+      { type: "text" as const, text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext },
     ],
     tools: AGENT_TOOLS.map((tool, i) =>
       i === AGENT_TOOLS.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
@@ -961,6 +1001,82 @@ function buildCustomerContext(customerProfile: CustomerProfile | null, isLinked:
     return "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
   }
   return "";
+}
+
+/** LINE Messaging API の userId 形式（"U" + 32 hex）。lineUsers 直読みの前提チェック。 */
+const LINE_USER_ID_RE = /^U[0-9a-fA-F]{32}$/;
+
+/** entrySource を正規値（marche/online/other）に絞る。未知は null（ノイズを注入しない）。 */
+function normalizeEntrySource(source: string | null | undefined): EntrySource | null {
+  return source === "marche" || source === "online" || source === "other" ? source : null;
+}
+
+/**
+ * A-1 文脈接続: positive/neutral な事実を収集し、プロンプト断片へ組む（fail-safe）。
+ *
+ * データ源（設計 v2 / Phase 0 as-built）:
+ *   - persona / tasteProfile / 入口: 連携済み=users カルテ（customerProfile）/
+ *     未連携 LINE=lineUsers/{lineUserId} を直読み。
+ *   - +1 評価銘柄: Supabase product_ratings（ratingUserRef で引く）→ 販売中メニューで銘柄名に解決。
+ *
+ * どの取得が失敗しても空文字ではなく「取れた事実だけ」で断片を組み、フローを止めない。
+ * -1 評価・休眠等の負の事実は収集対象にしない（ビルダーへ渡さない＝応答文脈に出さない）。
+ */
+async function buildPersonalizationBlock(params: {
+  supabase: ReturnType<typeof createSupabaseClient>;
+  env: Env;
+  fsEnv: FirestoreEnv | null;
+  channel: Channel;
+  userId: string;
+  ratingUserRef: string;
+  customerProfile: CustomerProfile | null;
+}): Promise<string> {
+  const { supabase, env, fsEnv, channel, userId, ratingUserRef, customerProfile } = params;
+  try {
+    let persona: PersonaType | null = customerProfile?.persona?.primary ?? null;
+    let tasteProfile: TasteProfile | null = customerProfile?.tasteProfile ?? null;
+    let source: string | null | undefined = customerProfile?.onboarding?.source ?? null;
+
+    // 未連携 LINE ユーザー: lineUsers/{lineUserId} を直読みして persona/taste/入口を補う。
+    if (!customerProfile && channel === "line" && fsEnv && LINE_USER_ID_RE.test(userId)) {
+      try {
+        const lineProfile = await getLineUserProfile(userId, fsEnv);
+        persona = lineProfile?.persona?.primary ?? null;
+        tasteProfile = lineProfile?.tasteProfile ?? null;
+        source = lineProfile?.onboarding?.source ?? null;
+      } catch (err) {
+        console.warn("[agent] lineUsers personalization read skipped:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    // +1 評価銘柄 → 販売中メニューで銘柄名に解決（最大 5 件・prompt を肥大させない）。
+    const ratedGoodLabels: string[] = [];
+    try {
+      const ratings = await getUserRatings(supabase, ratingUserRef);
+      const positives = positiveRatedProductNos(ratings);
+      if (positives.length > 0) {
+        const teas = await fetchSellingTeas(env);
+        for (const no of positives) {
+          const tea = teas.find((t) => t.number === no);
+          if (tea) ratedGoodLabels.push(`${tea.name}（No.${tea.number}）`);
+          if (ratedGoodLabels.length >= 5) break;
+        }
+      }
+    } catch (err) {
+      console.warn("[agent] rated-good personalization read skipped:", err instanceof Error ? err.message : err);
+    }
+
+    const facts: PersonalizationFacts = {
+      persona,
+      entrySource: normalizeEntrySource(source),
+      ratedGoodLabels,
+      tasteProfile,
+    };
+    return buildPersonalizationContext(facts);
+  } catch (err) {
+    console.warn("[agent] personalization block skipped:", err instanceof Error ? err.message : err);
+    return "";
+  }
 }
 
 /**

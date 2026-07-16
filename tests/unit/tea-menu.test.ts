@@ -193,12 +193,16 @@ it("感想｜40101 → 2択（おいしかった / 好みと少し違った）�
   assert(texts.includes("感想よい｜40101"), "good choice");
   assert(texts.includes("感想いまいち｜40101"), "bad choice");
 });
-it("感想よい / 感想いまいち → お礼メッセージ（記録は handler 側の副作用）", () => {
+it("感想よい → お礼 / 感想いまいち → 静かな受け止め（A-2a・純粋 planner は提案なし）", () => {
+  // 純粋 planner は Supabase 読取なし＝ +1 はお礼のみ / -1 は静かな一文（提案ゼロ）。
+  //   「次の一杯」の実提案は handleTeaMenuFlow が評価済み除外集合を引いてから付ける。
   const teas = [tea("40101", "青茶", "香駿の和烏龍茶")];
   const good = planTeaFlow("感想よい｜40101", teas);
   const bad = planTeaFlow("感想いまいち｜40101", teas);
   assert(!!good && good.messages[0].text.includes("ありがとう"), "thanks (good)");
-  assert(!!bad && bad.messages[0].text.includes("ありがとう"), "thanks (bad)");
+  // -1 直後は「引く」: お礼ではなく静かな受け止め（提案・演出をしない）。
+  assert(!!bad && bad.messages[0].text.includes("好みは人それぞれ"), "quiet decline (bad)");
+  assert(!!bad && !bad.messages[0].text.includes("ありがとう"), "bad is not a thanks");
 });
 it("感想トークンの解析: rate / rate-good / rate-bad を正しく区別（衝突なし）", () => {
   assertEqual(parseTeaAction("感想｜40101")?.kind, "rate", "rate");
