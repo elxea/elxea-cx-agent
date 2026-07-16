@@ -13,6 +13,7 @@ import {
   DELIVERY_CRON_PATTERN,
   SYNC_CRON_PATTERN,
   STATS_CRON_PATTERN,
+  DORMANT_CRON_PATTERN,
 } from "../../src/lib/cron-routing";
 
 let totalTests = 0;
@@ -58,16 +59,25 @@ it("計測パターン → stats（P0-7b の3種目）", () => {
   assertEqual(classifyCron("0 19 * * *"), "stats");
 });
 
+it("休眠パターン → dormant（ブロック3-B の4種目）", () => {
+  assertEqual(classifyCron(DORMANT_CRON_PATTERN), "dormant");
+  assertEqual(classifyCron("0 20 * * *"), "dormant");
+});
+
 it("想定外パターン → sync（安全網）", () => {
   assertEqual(classifyCron("0 21 1,15 * *"), "sync");
   assertEqual(classifyCron("unknown"), "sync");
   assertEqual(classifyCron(""), "sync");
 });
 
-it("3種のパターンは相互に異なる（両立の前提）", () => {
-  assertEqual(DELIVERY_CRON_PATTERN !== SYNC_CRON_PATTERN, true);
-  assertEqual(DELIVERY_CRON_PATTERN !== STATS_CRON_PATTERN, true);
-  assertEqual(SYNC_CRON_PATTERN !== STATS_CRON_PATTERN, true);
+it("4種のパターンは相互に異なる（両立の前提）", () => {
+  const patterns = [
+    DELIVERY_CRON_PATTERN,
+    SYNC_CRON_PATTERN,
+    STATS_CRON_PATTERN,
+    DORMANT_CRON_PATTERN,
+  ];
+  assertEqual(new Set(patterns).size, patterns.length, "全パターン一意");
 });
 
 console.log("\n" + "=".repeat(60));

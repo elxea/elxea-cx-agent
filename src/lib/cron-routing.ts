@@ -21,8 +21,17 @@ export const SYNC_CRON_PATTERN = "0 18 * * *";
  */
 export const STATS_CRON_PATTERN = "0 19 * * *";
 
+/**
+ * 休眠検知 cron（毎日 20:00 UTC = 05:00 JST）。ブロック3-B。
+ * 休眠中の友だちを抽出し「静かな一通」を送る（既定は送信封鎖 dry-run・runDormantReengagement）。
+ * 既存 cron（配信 15分毎 / 同期 18:00 / 計測 19:00）と時刻が衝突しない 20:00 UTC に置く。
+ * ⚠ wrangler.toml では staging 限定で登録する（[env.staging.triggers]）。本番 [triggers] には入れない
+ *   （本番有効化は broadcast_stats が1サイクル回った後・別途 GA/昇格ゲートで判断）。
+ */
+export const DORMANT_CRON_PATTERN = "0 20 * * *";
+
 /** cron パターンの分類結果。 */
-export type CronKind = "delivery" | "sync" | "stats";
+export type CronKind = "delivery" | "sync" | "stats" | "dormant";
 
 /**
  * cron パターンを処理種別に分類する（純粋）。
@@ -39,6 +48,7 @@ export type CronKind = "delivery" | "sync" | "stats";
 export function classifyCron(pattern: string): CronKind {
   if (pattern === DELIVERY_CRON_PATTERN) return "delivery";
   if (pattern === STATS_CRON_PATTERN) return "stats";
+  if (pattern === DORMANT_CRON_PATTERN) return "dormant";
   // SYNC_CRON_PATTERN と、想定外パターン（安全網）は同期に倒す。
   return "sync";
 }

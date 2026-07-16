@@ -80,7 +80,7 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 [env.staging.ai]
 binding = "AI"
 
-# ── Staging 限定 Cron Triggers（P0-7b 配信計測 fetch の追加）──
+# ── Staging 限定 Cron Triggers（P0-7b 配信計測 fetch + ブロック3-B 休眠検知）──
 # Cloudflare の triggers は継承キー（vars と違い env に継承される）。ここで env 上書きすると
 # top-level [triggers] を「置換」するため、既存の 2 本（配信 15分毎 / 同期 03:00 JST）を
 # 再掲したうえで stats（04:00 JST）を足す。これで staging = 配信+同期+計測、本番 = 配信+同期。
@@ -88,5 +88,16 @@ binding = "AI"
 #   - "0 19 * * *"（04:00 JST）: classifyCron → "stats" → runBroadcastStatsFetch。
 #       読み取り専用（LINE Insight GET + Supabase）。LINE 送信系 API は呼ばない（実配信ゼロ）。
 #       broadcast_stats（migration 024）未適用時は fail-soft（ok:false 理由ログ・例外を投げない）。
+#
+# ── ブロック3-B 休眠検知の cron（専用トリガは付けられないため stats tick に同居）──
+#   Cloudflare の cron trigger はアカウント上限 5 本（本番 2 + staging 3 = 5 で既に上限）。
+#   6 本目（"0 20 * * *"）は 10072「exceeded the limit of 5 cron triggers」で登録拒否される（実測 2026-07-16）。
+#   よって専用トリガを新設せず、staging 限定の stats tick（0 19・本番 triggers に無い）に休眠スキャンを同居させる
+#   （index.ts の "stats" 分岐が runBroadcastStatsFetch と runDormantReengagement を両方 waitUntil する）。
+#   これで「新規トリガ 0 本・staging 限定・本番非実行」を満たす。
+#   ⚠ 既定は送信封鎖（DORMANT_SEND_ENABLED != "true" で dry-run: 候補と本文を dormant_reengagement_log
+#     へ記録するだけ・LINE 送信系 API 非接触）。staging でも DORMANT_SEND_ENABLED は置かない（実送信ゼロ）。
+#   DORMANT_CRON_PATTERN("0 20 * * *") と classifyCron の "dormant" 分岐は、将来 cron 枠が空いたときに
+#   専用トリガへ移すための配線として残す（現状は未登録＝不活性・手動は /api/dormant/run で起動可能）。
 [env.staging.triggers]
 crons = ["*/15 * * * *", "0 18 * * *", "0 19 * * *"]

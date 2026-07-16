@@ -469,6 +469,37 @@ export function buildPersonaPrimaryEqualQuery(
 }
 
 /**
+ * コレクションを __name__ 昇順で全件ページングするための structuredQuery を組む（純粋・where 無し）。
+ *
+ * 用途（ブロック3-B・休眠検知）: lineUsers を全件走査して lastActiveAt を読み、休眠判定を
+ *   アプリ側で行う。where フィルタ（lastActiveAt < cutoff）は使わない — 理由:
+ *   (1) lastActiveAt は stringValue(ISO) と timestampValue が混在し得るため型に依存した比較を避ける。
+ *   (2) `!= null` 等はフィールド欠落行を落とす Firestore 実装挙動（buildPersonaPrimaryEqualQuery の
+ *       注記参照）で取りこぼす。全件走査＋アプリ側判定が最も堅牢（対象は友だち数十人規模で軽量）。
+ *
+ * @param collectionId 対象コレクション（lineUsers 等）。
+ * @param opts.limit ページサイズ。
+ * @param opts.startAfterName 前ページ最終ドキュメント name（cursor・__name__ 昇順の startAt/before:false）。
+ */
+export function buildCollectionListQuery(
+  collectionId: string,
+  opts: { limit: number; startAfterName?: string },
+): Record<string, unknown> {
+  const structuredQuery: Record<string, unknown> = {
+    from: [{ collectionId, allDescendants: false }],
+    orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+    limit: opts.limit,
+  };
+  if (opts.startAfterName) {
+    structuredQuery.startAt = {
+      values: [{ referenceValue: opts.startAfterName }],
+      before: false,
+    };
+  }
+  return structuredQuery;
+}
+
+/**
  * lineUserId が LINE Messaging API の userId 形式（"U" + 32 桁 16 進）であることを検証する。
  * Firestore REST の URL パスにそのまま埋め込むため、パストラバーサル（"/" 等）を構造的に排除する。
  */

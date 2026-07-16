@@ -21,6 +21,7 @@ import {
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
+import { runDormantReengagement } from "./lib/dormant-reengagement";
 import { getAlertStatus } from "./lib/alerts";
 
 /**
@@ -49,6 +50,16 @@ export type Env = {
   DELIVERY_TARGET_ENV?: string;
   /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
   DELIVERY_SEND_ENABLED?: string;
+  /**
+   * 休眠一通（ブロック3-B）の実送信許可フラグ。"true" のときのみ実送信。
+   * 既定 未設定=false（dry-run: 候補と本文を台帳へ記録するだけで LINE には送らない）。
+   * DELIVERY_SEND_ENABLED とは独立（休眠機能だけを別ゲートで制御する）。
+   */
+  DORMANT_SEND_ENABLED?: string;
+  /** 休眠判定のしきい値（日）。未設定・不正は既定 60（dormant-reengagement.DEFAULT_DORMANT_THRESHOLD_DAYS）。 */
+  DORMANT_THRESHOLD_DAYS?: string;
+  /** 休眠一通の 1 実行あたり送信上限（通）。未設定・不正は既定 20。月次予算は line_message_ledger が別途会計。 */
+  DORMANT_PER_RUN_CAP?: string;
   /** broadcast(全員配信) の想定受信者数（無料枠ガード見積用）。 */
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD?: string;
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST?: string;
@@ -374,6 +385,54 @@ app.post("/api/broadcast-stats/fetch", async (c) => {
 });
 
 /**
+ * 休眠再エンゲージ 手動トリガ API（ブロック3-B）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。cron の "dormant" 分岐と同一処理を同期実行する。
+ *
+ * ⚠ 実送信ガード（多層・既定は送らない）:
+ *   - DORMANT_SEND_ENABLED != "true"（既定）: dry-run。候補と本文を台帳に記録するだけで LINE 送信系 API に触れない。
+ *   - 恒久重複防止（1人1回・90日再送間隔）は dormant_reengagement_log、月次予算は line_message_ledger。
+ * staging の疎通確認（対象0でも正常終了・dry-run で送信0）に使う。結果 JSON を同期で返す（証跡化）。
+ */
+app.post("/api/dormant/run", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const result = await runDormantReengagement(c.env).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+    sendEnabled: c.env.DORMANT_SEND_ENABLED === "true",
+    thresholdDays: 0,
+    perRunCap: 0,
+    scanned: 0,
+    candidates: 0,
+    sent: 0,
+    dryRun: 0,
+    budgetBlocked: 0,
+    details: [] as never[],
+  }));
+
+  console.log(
+    "Manual dormant re-engagement completed:",
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      sendEnabled: result.sendEnabled,
+      scanned: result.scanned,
+      candidates: result.candidates,
+      sent: result.sent,
+      dryRun: result.dryRun,
+    }),
+  );
+
+  return c.json({ status: "dormant_reengagement_completed", result });
+});
+
+/**
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
  * - scheduled: Cron Trigger による定期処理
@@ -434,6 +493,66 @@ export default {
             // 二重の安全網（runBroadcastStatsFetch は基本 throw しないが、cron 経路は未処理 reject を残さない）。
             console.error(
               "Scheduled broadcast stats fetch threw (fail-soft):",
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+      );
+
+      // ブロック3-B 休眠検知を stats tick に同居させる（専用 cron を新設できないため・wrangler.toml 参照）。
+      // stats（0 19）は staging 限定トリガ（本番 [triggers] に無い）なので、この同居も staging 限定で発火する
+      // ＝本番では実行されない。既定は送信封鎖（DORMANT_SEND_ENABLED != "true" で dry-run・LINE 送信系 API 非接触）。
+      // stats とは独立の waitUntil（片方の失敗が他方を巻き込まない）。fail-soft でジョブは throw しない。
+      ctx.waitUntil(
+        runDormantReengagement(env)
+          .then((result) => {
+            console.log(
+              "Scheduled dormant re-engagement completed (co-located on stats tick):",
+              JSON.stringify({
+                ok: result.ok,
+                reason: result.reason,
+                sendEnabled: result.sendEnabled,
+                scanned: result.scanned,
+                candidates: result.candidates,
+                sent: result.sent,
+                dryRun: result.dryRun,
+              }),
+            );
+          })
+          .catch((err) => {
+            console.error(
+              "Scheduled dormant re-engagement threw (fail-soft):",
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+      );
+      return;
+    }
+
+    // 休眠再エンゲージ cron（ブロック3-B・"0 20 * * *" = 05:00 JST）。
+    // 休眠中の友だちを抽出し「静かな一通」を送る。
+    // ⚠ 既定は送信封鎖（DORMANT_SEND_ENABLED != "true" で dry-run: 候補と本文を台帳へ記録するだけ・LINE 送信系 API 非接触）。
+    //   migration 025 未適用・Firebase 未設定等は fail-soft（ok:false 理由ログ・ジョブは投げない）。
+    if (cronKind === "dormant") {
+      ctx.waitUntil(
+        runDormantReengagement(env)
+          .then((result) => {
+            console.log(
+              "Scheduled dormant re-engagement completed:",
+              JSON.stringify({
+                ok: result.ok,
+                reason: result.reason,
+                sendEnabled: result.sendEnabled,
+                scanned: result.scanned,
+                candidates: result.candidates,
+                sent: result.sent,
+                dryRun: result.dryRun,
+              }),
+            );
+          })
+          .catch((err) => {
+            // 二重の安全網（runDormantReengagement は基本 throw しないが、cron 経路は未処理 reject を残さない）。
+            console.error(
+              "Scheduled dormant re-engagement threw (fail-soft):",
               err instanceof Error ? err.message : String(err),
             );
           }),
