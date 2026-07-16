@@ -79,3 +79,14 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 [env.staging.ai]
 binding = "AI"
+
+# ── Staging 限定 Cron Triggers（P0-7b 配信計測 fetch の追加）──
+# Cloudflare の triggers は継承キー（vars と違い env に継承される）。ここで env 上書きすると
+# top-level [triggers] を「置換」するため、既存の 2 本（配信 15分毎 / 同期 03:00 JST）を
+# 再掲したうえで stats（04:00 JST）を足す。これで staging = 配信+同期+計測、本番 = 配信+同期。
+#   ⚠ 本番 [triggers] には stats を入れない（本番配信計測の有効化は GA/昇格ゲートで別途判断）。
+#   - "0 19 * * *"（04:00 JST）: classifyCron → "stats" → runBroadcastStatsFetch。
+#       読み取り専用（LINE Insight GET + Supabase）。LINE 送信系 API は呼ばない（実配信ゼロ）。
+#       broadcast_stats（migration 024）未適用時は fail-soft（ok:false 理由ログ・例外を投げない）。
+[env.staging.triggers]
+crons = ["*/15 * * * *", "0 18 * * *", "0 19 * * *"]

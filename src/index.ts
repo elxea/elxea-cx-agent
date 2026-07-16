@@ -20,6 +20,7 @@ import {
   runScheduledDelivery,
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
+import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
 import { getAlertStatus } from "./lib/alerts";
 
 /**
@@ -335,6 +336,44 @@ app.post("/api/delivery/run", async (c) => {
 });
 
 /**
+ * 配信計測 fetch 手動トリガ API（P0-7b）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。cron の "stats" 分岐と同一処理を同期実行する。
+ *
+ * ⚠ 読み取り専用: LINE Insight（GET）+ Supabase の読み書きのみ。LINE 送信系 API は一切呼ばない
+ *   （実 LINE 配信を発生させない）。staging の疎通確認（対象0件でも正常終了）に使う。
+ * cron と違い結果 JSON を同期で返す（証跡化のため待ってから応答する）。
+ */
+app.post("/api/broadcast-stats/fetch", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const result = await runBroadcastStatsFetch(c.env).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+    unitsScanned: 0,
+    snapshotsWritten: 0,
+    details: [] as never[],
+  }));
+
+  console.log(
+    "Manual broadcast stats fetch completed:",
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      unitsScanned: result.unitsScanned,
+      snapshotsWritten: result.snapshotsWritten,
+    }),
+  );
+
+  return c.json({ status: "broadcast_stats_fetch_completed", result });
+});
+
+/**
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
  * - scheduled: Cron Trigger による定期処理
@@ -369,6 +408,35 @@ export default {
             }),
           );
         }),
+      );
+      return;
+    }
+
+    // 配信計測 fetch cron（P0-7b・"0 19 * * *" = 04:00 JST）。
+    // broadcast_stats の 24h/72h/7d スナップショットを LINE Insight から取得して upsert する。
+    // ⚠ 読み取り専用（LINE Insight GET + Supabase）。LINE 送信系 API は一切呼ばない（実配信を発生させない）。
+    //   migration 024 未適用や insight トークン未設定は fail-soft（ok:false で理由ログ・ジョブは投げない）。
+    if (cronKind === "stats") {
+      ctx.waitUntil(
+        runBroadcastStatsFetch(env)
+          .then((result) => {
+            console.log(
+              "Scheduled broadcast stats fetch completed:",
+              JSON.stringify({
+                ok: result.ok,
+                reason: result.reason,
+                unitsScanned: result.unitsScanned,
+                snapshotsWritten: result.snapshotsWritten,
+              }),
+            );
+          })
+          .catch((err) => {
+            // 二重の安全網（runBroadcastStatsFetch は基本 throw しないが、cron 経路は未処理 reject を残さない）。
+            console.error(
+              "Scheduled broadcast stats fetch threw (fail-soft):",
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
       );
       return;
     }
