@@ -20,6 +20,7 @@ import {
 import { resolveUnifiedUserId } from "../lib/identity";
 import { handleTeaMenuFlow } from "../lib/tea-menu";
 import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
+import { handleLinkageFlow } from "../lib/subscriber-linkage";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { logFlowEvent } from "../lib/flow-events";
 import { menuTapValue } from "../lib/menu-tap";
@@ -1000,6 +1001,12 @@ async function handleTextMessage(
   // 対象 3 トリガーは自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
   const wasMenuAction = await handleMenuActionFlow(lineUserId, userMessage, env, responder);
   if (wasMenuAction) return;
+
+  // アカウント連携導線（定期便客限定・ブロック4）。完全一致トリガー「アカウントを連携する」のみ
+  // 横取りし、未連携=案内 / 連携済み定期便=定期便客応答 / 連携済み非定期便=丁寧なお断り を出し分ける。
+  // 読み取りのみ（Shopify 非接触）。tea-menu / menu-actions と同じく onboarding / feedback の後に後置。
+  const wasLinkage = await handleLinkageFlow(lineUserId, userMessage, env, responder);
+  if (wasLinkage) return;
 
   // 好み診断（リッチメニュー②・タップ主体・状態レス・LLM 不使用）。
   // トリガー「好みに合うお茶を診断してほしいです」と `診断｜*` トークンのみ横取りし、

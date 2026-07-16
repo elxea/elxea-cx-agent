@@ -73,6 +73,10 @@ name = "elxea-agent-staging"
 #   （必要な secret 一覧・投入順は docs/deploy-runbook.md の「Staging Bring-Up」を参照）
 [env.staging.vars]
 DELIVERY_TARGET_ENV = "test"
+# 【staging 限定・ブロック4 テスト連携キット】定期便扱いにする合成 LINE userId（U+32hex・非実在）。
+# subscriber-linkage.ts は DELIVERY_TARGET_ENV="test" のときだけこの allowlist を見る（本番 "prod" では常に無効）。
+# 実在ユーザーの ID は絶対に入れない。本番 [vars] には絶対に置かない。
+TEST_SUBSCRIBER_LINE_IDS = "Ub10c4deadbeef0000000000000000000"
 # チャット返信モデル（最安クラス Haiku 4.5）。モデル名は機密でないため vars で管理する。
 # 未設定でも core.ts の DEFAULT_REPLY_MODEL に同値でフォールバックするが、staging では明示する。
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"

@@ -116,6 +116,13 @@ export type Env = {
    * 値はコミットしない（`wrangler secret put SHOPIFY_WEBHOOK_SECRET`）。
    */
   SHOPIFY_WEBHOOK_SECRET?: string;
+  /**
+   * 【staging 限定・テスト用】定期便扱いにする合成 LINE userId の allowlist（カンマ区切り）。
+   * ブロック4 のテスト連携キット用。Shopify を読めない staging で「この合成 ID は定期便」を作る。
+   * ⚠ DELIVERY_TARGET_ENV="test"（=staging）のときだけ有効。本番（"prod"）では設定されても常に無効
+   *   （subscriber-linkage.ts の isStagingSubscriberOverrideEnv でゲート）。本番には絶対に設定しない。
+   */
+  TEST_SUBSCRIBER_LINE_IDS?: string;
   // Notifications
   SLACK_WEBHOOK_URL?: string;
   // Notion Alerts DB
