@@ -18,6 +18,7 @@ import {
   getFirestoreEnv,
   getAccessToken,
   firestoreBaseUrl,
+  LINE_USERS_COLLECTION,
   type FirestoreEnv,
   type PersonaType,
 } from "./firestore";
@@ -57,6 +58,7 @@ import {
   parseAllowlist,
   type LinkageRow,
   type PersonaRow,
+  type LineUserPersonaRow,
   type TargetResolverDeps,
 } from "./target-resolver";
 import {
@@ -163,6 +165,80 @@ async function loadPersonaUsers(fsEnv: FirestoreEnv): Promise<PersonaRow[]> {
       items.push({ shopifyCustomerId: shopifyId, persona });
     }
     // 次ページ cursor: 取得件数が PAGE 未満なら終了。
+    const nextCursor = count >= PAGE ? lastName : undefined;
+    return { items, nextCursor };
+  });
+}
+
+/**
+ * Firestore: lineUsers/{lineUserId}.persona.primary 設定済みを cursor ページングで全件取得（ブロック1・直読み）。
+ * ドキュメント ID がそのまま Messaging API userId（webhook 由来）なので multicast の宛先にそのまま使える。
+ * loadPersonaUsers（users コレクション）と同一パターンだが、対象コレクションと返す ID が異なる。
+ */
+async function loadPersonaLineUsers(
+  fsEnv: FirestoreEnv,
+): Promise<LineUserPersonaRow[]> {
+  const accessToken = await getAccessToken(fsEnv);
+  const url = `${firestoreBaseUrl(fsEnv.FIREBASE_PROJECT_ID)}:runQuery`;
+  const PAGE = 300;
+
+  return collectAllPages<LineUserPersonaRow>(async (cursor) => {
+    const structuredQuery: Record<string, unknown> = {
+      from: [{ collectionId: LINE_USERS_COLLECTION, allDescendants: false }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "persona.primary" },
+          op: "NOT_EQUAL",
+          value: { nullValue: null },
+        },
+      },
+      orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+      limit: PAGE,
+    };
+    if (cursor) {
+      structuredQuery.startAt = {
+        values: [{ referenceValue: cursor }],
+        before: false,
+      };
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ structuredQuery }),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Firestore runQuery (lineUsers) 失敗 (${res.status}): ${await res.text()}`,
+      );
+    }
+    const rows = (await res.json()) as Array<{
+      document?: { name: string; fields?: Record<string, Record<string, unknown>> };
+    }>;
+
+    const items: LineUserPersonaRow[] = [];
+    let lastName: string | undefined;
+    let count = 0;
+    for (const entry of rows) {
+      if (!entry.document?.name) continue;
+      count++;
+      lastName = entry.document.name;
+      const fields = entry.document.fields;
+      const personaMap = fields?.persona as
+        | { mapValue?: { fields?: Record<string, Record<string, unknown>> } }
+        | undefined;
+      const primary = personaMap?.mapValue?.fields?.primary as
+        | { stringValue?: string }
+        | undefined;
+      const persona = primary?.stringValue as PersonaType | undefined;
+      if (!persona || !VALID_PERSONAS.includes(persona)) continue;
+      const lineUserId = entry.document.name.split("/").pop() ?? "";
+      if (!lineUserId) continue;
+      items.push({ lineUserId, persona });
+    }
     const nextCursor = count >= PAGE ? lastName : undefined;
     return { items, nextCursor };
   });
@@ -289,6 +365,11 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
     loadPersonaUsers: async () => {
       if (!fsEnv) throw new Error("Firestore 未設定のためペルソナ対象を解決できない");
       return loadPersonaUsers(fsEnv);
+    },
+    // ブロック1: lineUsers 直読み（未連携ユーザーのペルソナ）を宛先解決の和集合に加える。
+    loadPersonaLineUsers: async () => {
+      if (!fsEnv) throw new Error("Firestore 未設定のため lineUsers 直読みができない");
+      return loadPersonaLineUsers(fsEnv);
     },
     broadcastEstimate: async () => channel.estimatedFriendCount,
     // 社内 allowlist は env が唯一の供給元（PII 非記載）。空/未設定は resolveTargets が fail-closed。

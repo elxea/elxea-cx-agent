@@ -9,6 +9,14 @@
  *
  * segment-broadcast.ts の getSegmentedUsers（module-private）を置き換える汎用版。
  * 純粋な結合・除外・分割ロジックと、実 I/O アダプタを分離してユニットテスト可能にする。
+ *
+ * ブロック1 拡張（LINE単独の個別体験＋ペルソナ配信ループ・Spec 2026-07-16）:
+ *   ペルソナ別解決を「customer_linkages 必須」から
+ *   「lineUsers 直読み（persona.primary が該当タイプ）∪ 連携済み users 経由」の**和集合**へ拡張する。
+ *   lineUsers ドキュメント ID は webhook 由来の Messaging API userId なので、そのまま multicast 可能
+ *   （2種類の LINE ID 橋渡し問題を踏まない）。重複は lineUserId で一意化する。
+ *   これにより customer_linkages が 0 行でもペルソナ配信の宛先が成立する。
+ *   500件バッチ・通数台帳・DELIVERY_SEND_ENABLED ゲート・承認フローは一切変更しない。
  */
 
 import type { PersonaType } from "./firestore";
@@ -32,6 +40,15 @@ export interface LinkageRow {
 /** Firestore のペルソナ行。 */
 export interface PersonaRow {
   shopifyCustomerId: string;
+  persona: PersonaType;
+}
+
+/**
+ * Firestore lineUsers/{lineUserId} のペルソナ行（ブロック1・未連携ユーザーの直読み用）。
+ * lineUserId は webhook 由来の Messaging API userId（= ドキュメント ID）なので multicast にそのまま使える。
+ */
+export interface LineUserPersonaRow {
+  lineUserId: string;
   persona: PersonaType;
 }
 
@@ -112,6 +129,43 @@ export function filterEligible(
 }
 
 /**
+ * 連携経由の対象（filterEligible 済み）と lineUsers 直読みの対象を和集合して
+ * lineUserId で一意化する（純粋・ブロック1 の本丸）。
+ *
+ * @param linkedUserIds users×linkages を filterEligible で除外済みの lineUserId 群（連携経由）。
+ * @param lineUserRows  lineUsers 直読み行（未連携でペルソナを持つユーザーを含む）。
+ * @param persona       対象ペルソナ。lineUserRows 側はここで一致判定する。
+ * @param excludeLineUserIds 退会(unfollow)等で配信不可の lineUserId（linkages 由来）。直読み側にも適用する（安全側）。
+ *
+ * 重複は lineUserId で畳む（連携経由を先に積み、直読みは未出のものだけ足す）。
+ * opt-out(broadcast_opted_out) は 2026-07-13 決定で配信経路から廃止済み（除外しない・列は温存）。
+ * 退会(unfollow=ブロック相当) は安全側として直読み経路にも適用し、ブロック済みユーザーへ送らない。
+ */
+export function unionEligible(
+  linkedUserIds: string[],
+  lineUserRows: LineUserPersonaRow[],
+  persona: PersonaType,
+  excludeLineUserIds: ReadonlySet<string>,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of linkedUserIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  for (const row of lineUserRows) {
+    if (row.persona !== persona) continue;
+    if (!row.lineUserId) continue;
+    if (excludeLineUserIds.has(row.lineUserId)) continue;
+    if (seen.has(row.lineUserId)) continue;
+    seen.add(row.lineUserId);
+    out.push(row.lineUserId);
+  }
+  return out;
+}
+
+/**
  * ページ取得関数を最後まで回して全件を集める（純粋なループ・ページング）。
  * fetchPage は cursor（初回 undefined）を受け、{ items, nextCursor } を返す。
  * nextCursor が undefined/null になるまで繰り返す。安全弁で最大 maxPages。
@@ -143,6 +197,12 @@ export interface TargetResolverDeps {
   loadLinkages(): Promise<LinkageRow[]>;
   /** persona.primary 設定済みユーザーをページングで全件取得。 */
   loadPersonaUsers(): Promise<PersonaRow[]>;
+  /**
+   * lineUsers/{lineUserId}.persona.primary 設定済みユーザーを直読みで全件取得（ブロック1）。
+   * 未連携（customer_linkages 無し）でもペルソナ配信の宛先に含めるための直読み経路。
+   * 省略時（未注入）は空配列扱い＝従来の「連携済み users 経由」だけの解決に縮退する（後方互換）。
+   */
+  loadPersonaLineUsers?(): Promise<LineUserPersonaRow[]>;
   /** broadcast（全員配信）時の想定受信者数（無料枠ガードの見積用）。未設定・取得不能は null。 */
   broadcastEstimate(): Promise<number | null>;
   /**
@@ -234,13 +294,17 @@ export async function resolveTargets(
     };
   }
 
-  // persona = multicast
+  // persona = multicast（ブロック1: lineUsers 直読み ∪ 連携済み users 経由の和集合）
   let linkages: LinkageRow[];
   let personaRows: PersonaRow[];
+  let lineUserRows: LineUserPersonaRow[];
   try {
-    [linkages, personaRows] = await Promise.all([
+    [linkages, personaRows, lineUserRows] = await Promise.all([
       deps.loadLinkages(),
       deps.loadPersonaUsers(),
+      deps.loadPersonaLineUsers
+        ? deps.loadPersonaLineUsers()
+        : Promise.resolve<LineUserPersonaRow[]>([]),
     ]);
   } catch (err) {
     return {
@@ -249,8 +313,24 @@ export async function resolveTargets(
     };
   }
 
+  // 連携経由（users×linkages）: 従来どおり退会/未リンク/別ペルソナを除外する。
   const candidates = joinCandidates(personaRows, linkages);
-  const userIds = filterEligible(candidates, audience.persona);
+  const linkedUserIds = filterEligible(candidates, audience.persona);
+
+  // 退会(unfollow=ブロック相当)の lineUserId は直読み経路にも適用する除外集合（安全側）。
+  //   opt-out(broadcast_opted_out) は 2026-07-13 決定で配信経路から廃止済み（ここには入れない）。
+  const excludeLineUserIds = new Set<string>();
+  for (const l of linkages) {
+    if (l.unfollowed && l.lineUserId) excludeLineUserIds.add(l.lineUserId);
+  }
+
+  // 和集合 + lineUserId 一意化（customer_linkages 0 行でも lineUsers 直読みで非ゼロになりうる）。
+  const userIds = unionEligible(
+    linkedUserIds,
+    lineUserRows,
+    audience.persona,
+    excludeLineUserIds,
+  );
   if (userIds.length === 0) {
     return { kind: "error", reason: "対象ユーザーが 0 件（除外後）" };
   }

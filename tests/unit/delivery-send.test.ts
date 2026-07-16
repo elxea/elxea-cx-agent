@@ -65,11 +65,13 @@ import {
 import {
   joinCandidates,
   filterEligible,
+  unionEligible,
   collectAllPages,
   resolveTargets,
   parseAllowlist,
   type LinkageRow,
   type PersonaRow,
+  type LineUserPersonaRow,
   type TargetResolverDeps,
 } from "../../src/lib/target-resolver";
 import {
@@ -607,6 +609,139 @@ describe("resolveTargets", () => {
       assertEqual(r.estimatedRecipients, 501, "501 件");
       assertEqual(r.batches.length, 2, "2 バッチ");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ブロック1: lineUsers 直読み ∪ 連携済み users 経由（Spec 2026-07-16）
+// ---------------------------------------------------------------------------
+describe("unionEligible（連携経由 ∪ lineUsers 直読み・lineUserId 一意化）", () => {
+  const noExclude: ReadonlySet<string> = new Set<string>();
+
+  it("連携経由が空でも lineUsers 直読みだけで宛先が成立する（非ゼロ）", () => {
+    const rows: LineUserPersonaRow[] = [
+      { lineUserId: "U1", persona: "serenity" },
+      { lineUserId: "U2", persona: "serenity" },
+      { lineUserId: "U3", persona: "explorer" }, // 別ペルソナ→除外
+    ];
+    const ids = unionEligible([], rows, "serenity", noExclude);
+    assertEqual(ids.join(","), "U1,U2", "直読みのみで serenity 2 件");
+  });
+
+  it("連携経由と直読みの和集合を lineUserId で一意化する（重複を畳む）", () => {
+    const rows: LineUserPersonaRow[] = [
+      { lineUserId: "L1", persona: "serenity" }, // 連携経由にも居る→重複
+      { lineUserId: "U9", persona: "serenity" }, // 直読み固有
+    ];
+    const ids = unionEligible(["L1", "L2"], rows, "serenity", noExclude);
+    assertEqual(ids.sort().join(","), "L1,L2,U9", "L1 は重複せず 3 件");
+  });
+
+  it("退会(unfollow)集合に含まれる lineUserId は直読み経路でも除外する（安全側）", () => {
+    const rows: LineUserPersonaRow[] = [
+      { lineUserId: "U1", persona: "serenity" },
+      { lineUserId: "Ublocked", persona: "serenity" },
+    ];
+    const ids = unionEligible([], rows, "serenity", new Set(["Ublocked"]));
+    assertEqual(ids.join(","), "U1", "退会 Ublocked を除外");
+  });
+
+  it("直読みのペルソナ不一致・空 ID は落とす", () => {
+    const rows: LineUserPersonaRow[] = [
+      { lineUserId: "U1", persona: "sensory" }, // 不一致
+      { lineUserId: "", persona: "serenity" }, // 空 ID
+      { lineUserId: "U2", persona: "serenity" },
+    ];
+    const ids = unionEligible([], rows, "serenity", noExclude);
+    assertEqual(ids.join(","), "U2", "一致かつ非空のみ");
+  });
+});
+
+describe("resolveTargets ブロック1（customer_linkages 0 行 + lineUsers 直読み）", () => {
+  const baseDeps = (over: Partial<TargetResolverDeps>): TargetResolverDeps => ({
+    loadLinkages: async () => [],
+    loadPersonaUsers: async () => [],
+    broadcastEstimate: async () => null,
+    loadAllowlistUserIds: async () => [],
+    ...over,
+  });
+
+  it("【受け入れ基準(c)】customer_linkages 0 行のままでもペルソナ宛先が非ゼロ", async () => {
+    const r = await resolveTargets(
+      { kind: "persona", persona: "serenity" },
+      baseDeps({
+        loadLinkages: async () => [], // 連携 0 行
+        loadPersonaUsers: async () => [], // 連携済み persona 0 件
+        loadPersonaLineUsers: async () => [
+          { lineUserId: "U1", persona: "serenity" },
+          { lineUserId: "U2", persona: "serenity" },
+          { lineUserId: "U3", persona: "explorer" },
+        ],
+      }),
+    );
+    assertTrue(r.kind === "multicast", "multicast（非ゼロ）");
+    if (r.kind === "multicast") {
+      assertEqual(r.estimatedRecipients, 2, "serenity 2 件（linkages 0 行）");
+      assertEqual(r.userIds.join(","), "U1,U2", "直読み由来の宛先");
+      assertEqual(r.batches.length, 1, "1 バッチ");
+    }
+  });
+
+  it("連携経由 + 直読みの和集合（重複 lineUserId を一意化）", async () => {
+    const r = await resolveTargets(
+      { kind: "persona", persona: "serenity" },
+      baseDeps({
+        loadLinkages: async () => [
+          { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: false },
+        ],
+        loadPersonaUsers: async () => [{ shopifyCustomerId: "s1", persona: "serenity" }],
+        loadPersonaLineUsers: async () => [
+          { lineUserId: "L1", persona: "serenity" }, // 連携経由と重複
+          { lineUserId: "U9", persona: "serenity" }, // 直読み固有
+        ],
+      }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") {
+      assertEqual(r.estimatedRecipients, 2, "L1 重複せず 2 件");
+      assertEqual(r.userIds.sort().join(","), "L1,U9", "L1,U9");
+    }
+  });
+
+  it("退会(unfollow)ユーザーは連携経由でも直読みでも除外（安全側・二重防御）", async () => {
+    const r = await resolveTargets(
+      { kind: "persona", persona: "serenity" },
+      baseDeps({
+        loadLinkages: async () => [
+          { shopifyCustomerId: "s1", lineUserId: "Lblk", unfollowed: true, optedOut: false },
+        ],
+        loadPersonaUsers: async () => [{ shopifyCustomerId: "s1", persona: "serenity" }],
+        // 同一 lineUserId が lineUsers 直読みにも現れても、退会集合で除外される。
+        loadPersonaLineUsers: async () => [
+          { lineUserId: "Lblk", persona: "serenity" },
+          { lineUserId: "Uok", persona: "serenity" },
+        ],
+      }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") {
+      assertEqual(r.userIds.join(","), "Uok", "退会 Lblk を除外し Uok のみ");
+    }
+  });
+
+  it("直読み未注入（loadPersonaLineUsers 省略）なら従来の連携経由のみに縮退（後方互換）", async () => {
+    const r = await resolveTargets(
+      { kind: "persona", persona: "serenity" },
+      baseDeps({
+        loadLinkages: async () => [
+          { shopifyCustomerId: "s1", lineUserId: "L1", unfollowed: false, optedOut: false },
+        ],
+        loadPersonaUsers: async () => [{ shopifyCustomerId: "s1", persona: "serenity" }],
+        // loadPersonaLineUsers は未注入
+      }),
+    );
+    assertTrue(r.kind === "multicast", "multicast");
+    if (r.kind === "multicast") assertEqual(r.userIds.join(","), "L1", "連携経由のみ");
   });
 });
 
