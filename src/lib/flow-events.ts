@@ -29,6 +29,7 @@ export const FLOW_EVENTS_TABLE = "flow_events";
 export type FlowEventName =
   | "menu.tap"
   | "welcome.tap"
+  | "welcome.source"
   | "tea.list_view"
   | "tea.card_view"
   | "tea.item_view"

@@ -99,6 +99,12 @@ export type LineUserProfile = {
   persona?: PersonaProfile;
   /** 会話由来の嗜好 — CustomerProfile.tasteProfile と同一構造（将来拡張用・現状は persona のみ書く）。 */
   tasteProfile?: TasteProfile;
+  /**
+   * オンボーディング状態 — CustomerProfile.onboarding と同一構造。
+   * 未連携ユーザーの入口質問回答（onboarding.source = marche/online/other）をここに残す。
+   * 将来 Shopify 連携成立時に users/{shopifyId}.onboarding へマージ可能な同一構造。
+   */
+  onboarding?: OnboardingStatus;
   createdAt?: string;
   lastActiveAt?: string;
   /**

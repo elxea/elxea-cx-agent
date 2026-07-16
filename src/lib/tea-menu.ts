@@ -85,13 +85,19 @@ const SEP = "｜";
  * リッチメニュー①（setup-rich-menu.ts の message text "お茶の淹れ方を知りたい"）を含む。
  * 完全一致に限定し、自由入力の淹れ方質問（別文言）は従来どおり AI 対話へ流す。
  */
+/**
+ * 一覧を直接開く安定トリガー（他モジュールから quick reply の入口として参照する正本）。
+ * ENTRY_PHRASES に含まれるため handleTeaMenuFlow が entry(page 0) として横取りする。
+ */
+export const TEA_LIST_ENTRY_TRIGGER = "お茶を選ぶ";
+
 const ENTRY_PHRASES = new Set<string>([
   "お茶の淹れ方を知りたい", // リッチメニュー①（5 枠版・2026-07-13 確定）
   "お茶のおいしい淹れ方を教えてください", // 旧リッチメニュー①（後方互換）
   "淹れ方を教えてください",
   "お茶を調べる",
   "お茶メニュー",
-  "お茶を選ぶ",
+  TEA_LIST_ENTRY_TRIGGER,
 ]);
 
 /** 旧「種類選択へ戻る」トークン（後方互換: 旧メニュー由来の発話を一覧へ吸収）。 */

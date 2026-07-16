@@ -24,16 +24,26 @@ import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { logFlowEvent } from "../lib/flow-events";
 import { menuTapValue } from "../lib/menu-tap";
 import {
-  WELCOME_INTRO,
   ONBOARDING_EXPLORE_INTRO,
   ONBOARDING_ABOUT_BODY,
 } from "../lib/brand-copy";
 import {
+  ONBOARDING_EXPLORE_TEXT,
+  ONBOARDING_ABOUT_TEXT,
+  ONBOARDING_HOWTO_TEXT,
+  buildEntryWelcome,
+  buildSourceResponse,
+  parseWelcomeSourceAnswer,
+  type WelcomeSource,
+} from "../lib/welcome-onboarding";
+import {
   getFirestoreEnv,
   updateCustomerProfile,
+  updateLineUserProfile,
   addBehaviorEvent,
   recordBehaviorEvent,
   type CustomerProfile,
+  type LineUserProfile,
   type BehaviorEvent,
 } from "../lib/firestore";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
@@ -52,10 +62,10 @@ const tastingNoteCTAShown = new Set<string>();
 const TASTING_NOTE_CTA_TEXT =
   "\n\n\u273F 体験を記録する \u2192 https://elxea.com/ja/tasting-note";
 
-/** オンボーディング Quick Reply のトリガーテキスト */
-const ONBOARDING_EXPLORE_TEXT = "onboarding:explore_tea";
-const ONBOARDING_ABOUT_TEXT = "onboarding:about_elxea";
-const ONBOARDING_HOWTO_TEXT = "onboarding:how_to_use";
+/**
+ * オンボーディング Quick Reply のトリガーテキスト（従来 3 択）は
+ * src/lib/welcome-onboarding.ts に集約（入口質問型ウェルカムと共用の正本）。
+ */
 
 /** 商品固有オンボーディング Quick Reply のトリガーテキスト */
 const ONBOARDING_BREWING_TEXT = "onboarding:brewing_guide";
@@ -531,28 +541,11 @@ async function handleFollowEvent(
     await responder.text(welcomeText, quickReplyItems);
     console.log(`[follow] Sent product-specific welcome for ${productSlug} to ${lineUserId}`);
   } else {
-    // --- 通常の友だち追加ウェルカムメッセージ（既存フロー維持） ---
-    const welcomeText =
-      `${WELCOME_INTRO}\n\n` +
-      "お便りをお送りするのは月に1〜2回、季節の節目だけです。\n\n" +
-      "まずは、何から始めましょうか？";
-
-    const quickReplyItems: QuickReplyItem[] = [
-      {
-        type: "action",
-        action: { type: "message", label: "お茶を探す", text: ONBOARDING_EXPLORE_TEXT },
-      },
-      {
-        type: "action",
-        action: { type: "message", label: "elxea について知る", text: ONBOARDING_ABOUT_TEXT },
-      },
-      {
-        type: "action",
-        action: { type: "message", label: "使い方を教えて", text: ONBOARDING_HOWTO_TEXT },
-      },
-    ];
-
-    await responder.text(welcomeText, quickReplyItems);
+    // --- 通常の友だち追加ウェルカム（入口質問型・ブロック2） ---
+    // 「どこで elxea を知ったか」を 1 回だけ質問し、回答で 3 動線へ分岐する。
+    // 回答は handleOnboardingMessage の入口質問ブランチが処理する。
+    const { text: welcomeText, quickReplies } = buildEntryWelcome();
+    await responder.text(welcomeText, quickReplies);
   }
 
   // Firestore にオンボーディング開始 + source を記録（fire-and-forget）
@@ -716,6 +709,33 @@ async function handleOnboardingMessage(
   let responseText: string;
   let initialAction: string;
   let followUpQuickReplies: QuickReplyItem[] = [];
+
+  // 入口質問型ウェルカムの回答（ブロック2）: 流入元の 3 択タップを分岐処理する。
+  // 完全一致のトークンのみ横取りし、それ以外（自由発話・5桁番号・メニュー操作）は
+  // parseWelcomeSourceAnswer が null を返すため下流ハンドラへ素通りする（質問は 1 回だけ・再提示しない）。
+  const welcomeSource = parseWelcomeSourceAnswer(userMessage);
+  if (welcomeSource) {
+    // 記録は送信より前に投げる（fire-and-forget）。回答があった事実は配信成否に依存しないため、
+    // welcome.tap と同じく送信前に記録する（下流で send が失敗しても記録は残る）。
+    // (b) flow_events(welcome.source)（value=marche/online/other）。
+    void logFlowEvent(createSupabaseClient(env), {
+      eventName: "welcome.source",
+      userRef: lineUserId,
+      value: welcomeSource,
+    });
+    // (a) Firestore lineUsers/{id}.onboarding.source。
+    recordWelcomeSource(lineUserId, welcomeSource, env).catch((err) => {
+      console.log(
+        "[onboarding] welcome.source Firestore recording failed:",
+        err instanceof Error ? err.message : err,
+      );
+    });
+
+    const { text, quickReplies } = buildSourceResponse(welcomeSource);
+    await responder.text(text, quickReplies);
+
+    return true;
+  }
 
   // welcome.tap 記録（P0-1・fire-and-forget）: ウェルカム 3 択の探索/について/使い方タップ（H9）。
   const welcomeTap: Record<string, "explore" | "about" | "howto"> = {
@@ -897,6 +917,32 @@ async function recordOnboardingCompletion(
   };
 
   await addBehaviorEvent(shopifyId, event, fsEnv);
+}
+
+/**
+ * 入口質問の回答（流入元）を Firestore lineUsers/{lineUserId}.onboarding.source に記録する（ブロック2）。
+ *
+ * 友だち追加直後の回答は Shopify 未連携が多いため、連携済みカルテ（users/{shopifyId}）ではなく
+ * 未連携カルテ（lineUsers/{lineUserId}）に残す。将来連携成立時に users へマージ可能な同一構造。
+ * completedAt / initialAction は入口質問の段階では未確定のため null（完了は別途 recordOnboardingCompletion）。
+ */
+async function recordWelcomeSource(
+  lineUserId: string,
+  source: WelcomeSource,
+  env: Env,
+): Promise<void> {
+  const fsEnv = getFirestoreEnv(env);
+  await updateLineUserProfile(
+    lineUserId,
+    {
+      onboarding: {
+        completedAt: null,
+        initialAction: null,
+        source,
+      },
+    } as Partial<LineUserProfile>,
+    fsEnv,
+  );
 }
 
 /** テキストメッセージを処理してエージェントに渡す */
