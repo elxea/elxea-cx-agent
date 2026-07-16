@@ -742,12 +742,9 @@ export async function handleTeaMenuFlow(
   const plan = planTeaFlow(userMessage, teas);
   if (!plan) return false; // number-loose 不一致など → 素通り
 
-  // 複数通の場合、最初の 1 通が reply（無料）、以降は push（有料）にフォールバックする。
-  for (const m of plan.messages) {
-    await responder.text(m.text, m.quickReplies);
-  }
-
-  // タップ記録（P0-1・fire-and-forget・失敗は握りつぶし）。応答後に投げっぱなし。
+  // 記録（flow_events / product_ratings）は返信の成否と独立に必ず開始する（fire-and-forget・Spec §B-5）。
+  //   返信より先に void で投げることで、返信 throw（reply token 期限切れ + push 失敗など）に
+  //   記録が道連れにされる回帰を防ぐ（診断ハンドラ runDiagnosisSideEffects と同じ堅牢化・2026-07-16）。
   const supabase = createSupabaseClient(env);
   for (const ev of teaFlowEvents(userMessage, teas, lineUserId)) {
     void logFlowEvent(supabase, ev);
@@ -766,6 +763,11 @@ export async function handleTeaMenuFlow(
       rating,
       source,
     });
+  }
+
+  // 返信（最初の 1 通が reply=無料・以降は push=有料フォールバック）。失敗しても記録は済んでいる。
+  for (const m of plan.messages) {
+    await responder.text(m.text, m.quickReplies);
   }
   return true;
 }
