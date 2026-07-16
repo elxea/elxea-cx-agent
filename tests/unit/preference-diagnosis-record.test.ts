@@ -12,6 +12,7 @@
  */
 import {
   recordDiagnosisPersonaWith,
+  runDiagnosisSideEffects,
   type RecordDiagnosisDeps,
 } from "../../src/lib/preference-diagnosis";
 import type { CustomerProfile, LineUserProfile, PersonaScores } from "../../src/lib/firestore";
@@ -119,6 +120,66 @@ it("(d) 未連携でも既存スコアが上回れば primary は据え置き（
   assertEqual(scores.serenity, 9, "serenity 保持");
   assertEqual(scores.sensory, 3, "sensory +3 累積");
   assertEqual(captured.lineUpdate!.updates.persona!.primary, "serenity", "primary 据え置き");
+});
+
+// ---------------------------------------------------------------------------
+// ブロック1 堅牢化（2026-07-16・QA 指摘②）: 返信失敗が persona 記録を道連れにしない。
+//   旧実装は reply throw で record 未到達だった。runDiagnosisSideEffects が
+//   返信失敗を捕捉→記録完遂→元の例外を再送出することを保証する。
+// ---------------------------------------------------------------------------
+it("(堅牢化) 返信が throw しても persona 記録は完遂し、記録後に元の例外を再送出", async () => {
+  const order: string[] = [];
+  let recorded = false;
+  let rethrown: unknown = null;
+  try {
+    await runDiagnosisSideEffects({
+      reply: async () => {
+        order.push("reply");
+        throw new Error("Invalid reply token");
+      },
+      logFlowEvents: () => order.push("flow"),
+      record: async () => {
+        order.push("record");
+        recorded = true;
+      },
+    });
+  } catch (err) {
+    rethrown = err;
+  }
+  assert(recorded, "返信失敗でも record が実行される");
+  assertEqual(order.join(","), "reply,flow,record", "reply→flow→record の順で完遂");
+  assert(rethrown instanceof Error, "返信失敗は記録完遂後に元の例外として再送出される");
+  assertEqual(
+    (rethrown as Error).message,
+    "Invalid reply token",
+    "元の返信例外がそのまま伝播",
+  );
+});
+
+it("(正常系) 返信成功時は reply→flow→record 実行・再送出なし", async () => {
+  const order: string[] = [];
+  let rethrown: unknown = null;
+  try {
+    await runDiagnosisSideEffects({
+      reply: async () => order.push("reply"),
+      logFlowEvents: () => order.push("flow"),
+      record: async () => order.push("record"),
+    });
+  } catch (err) {
+    rethrown = err;
+  }
+  assertEqual(order.join(","), "reply,flow,record", "reply→flow→record 順");
+  assert(rethrown === null, "正常時は再送出しない");
+});
+
+it("(正常系) winner なし（record=null）でも返信・ファネル記録は走る", async () => {
+  const order: string[] = [];
+  await runDiagnosisSideEffects({
+    reply: async () => order.push("reply"),
+    logFlowEvents: () => order.push("flow"),
+    record: null,
+  });
+  assertEqual(order.join(","), "reply,flow", "record 無しでも reply→flow");
 });
 
 (async () => {

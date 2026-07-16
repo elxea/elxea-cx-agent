@@ -422,6 +422,47 @@ export async function updateCustomerProfile(
 export const LINE_USERS_COLLECTION = "lineUsers";
 
 /**
+ * persona.primary == <targetPersona> の Firestore structuredQuery を組む（純粋・EQUAL・cursor 対応）。
+ *
+ * ⚠ 重要（Firestore 仕様 / ブロック1 ライブ E2E で実証・2026-07-16）:
+ *   `persona.primary != null`（NOT_EQUAL null）は、フィールドが null の行だけでなく
+ *   「フィールド自体が欠落した行」も対象外にする Firestore の実装挙動により、
+ *   ライブでは常に 0 件になった（同一データで EQUAL('serenity')=1 件・全件 listAll=2 件・NE-null=0 件を実測）。
+ *   よって「!= null で全ペルソナ横断」は使わず、対象ペルソナごとの EQUAL クエリに限定する。
+ *   全ペルソナ横断が必要な箇所は、呼び出し側が本クエリを EQUAL×3 で回して和を取る。
+ *
+ * @param collectionId  対象コレクション（users＝連携済み / lineUsers＝直読み）。
+ * @param targetPersona 解決対象ペルソナ（EQUAL 比較値・stringValue で送る）。
+ * @param opts.limit    ページサイズ。
+ * @param opts.startAfterName 前ページ最終ドキュメント name（cursor・__name__ 昇順の startAt/before:false）。
+ */
+export function buildPersonaPrimaryEqualQuery(
+  collectionId: string,
+  targetPersona: PersonaType,
+  opts: { limit: number; startAfterName?: string },
+): Record<string, unknown> {
+  const structuredQuery: Record<string, unknown> = {
+    from: [{ collectionId, allDescendants: false }],
+    where: {
+      fieldFilter: {
+        field: { fieldPath: "persona.primary" },
+        op: "EQUAL",
+        value: { stringValue: targetPersona },
+      },
+    },
+    orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+    limit: opts.limit,
+  };
+  if (opts.startAfterName) {
+    structuredQuery.startAt = {
+      values: [{ referenceValue: opts.startAfterName }],
+      before: false,
+    };
+  }
+  return structuredQuery;
+}
+
+/**
  * lineUserId が LINE Messaging API の userId 形式（"U" + 32 桁 16 進）であることを検証する。
  * Firestore REST の URL パスにそのまま埋め込むため、パストラバーサル（"/" 等）を構造的に排除する。
  */

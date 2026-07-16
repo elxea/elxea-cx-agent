@@ -497,6 +497,45 @@ export function diagnosisFlowEvents(
  *   - Q1→Q2→Q3 の各段は quick reply を返すだけ（state レス）。
  *   - 結果段は winner を採点 → 結果メッセージを返し → persona を記録（fail-safe・非ブロッキング）。
  */
+/**
+ * 診断完了時の副作用（LINE 返信 / ファネル記録 / persona 記録）の実行順を担う純粋オーケストレーション。
+ *
+ * 堅牢化（ブロック1 修正 2026-07-16・QA 指摘②）:
+ *   旧実装は `await responder.text()` を先に呼び、返信が throw（replyToken 無効等）すると
+ *   後続の persona 記録に到達せず、結果文面の「記録した」約束が破れていた。
+ *   本関数は返信失敗を捕捉し、ファネル記録と persona 記録を返信の成否と独立に必ず完遂してから、
+ *   返信の例外を元の形で再送出する（呼び出し側の失敗可視化・既存挙動を保つ）。UX の返信内容は不変。
+ */
+export async function runDiagnosisSideEffects(deps: {
+  /** LINE 返信（reply 優先・無料化）。失敗しても記録は道連れにしない。 */
+  reply: () => Promise<void>;
+  /** 診断ファネル記録（fire-and-forget・失敗は内部で握りつぶす前提）。 */
+  logFlowEvents?: () => void;
+  /** persona 記録（winner があるときのみ・fail-safe）。返信失敗と独立に必ず実行する。 */
+  record?: (() => Promise<void>) | null;
+  /** 返信失敗時のログ等（副作用なし・任意）。 */
+  onReplyError?: (err: unknown) => void;
+}): Promise<void> {
+  let replyError: unknown = null;
+  try {
+    await deps.reply();
+  } catch (err) {
+    replyError = err;
+    deps.onReplyError?.(err);
+  }
+
+  // 返信の成否に関わらずファネル記録（本番昇格前に必須・初期ファネルを失わない）。
+  deps.logFlowEvents?.();
+
+  // 返信失敗と独立に persona 記録を完遂（堅牢化の中核）。record 自体は fail-safe。
+  if (deps.record) {
+    await deps.record();
+  }
+
+  // 返信失敗は記録完遂後に元の例外として再送出（呼び出し側の挙動・失敗可視化を保つ）。
+  if (replyError) throw replyError;
+}
+
 export async function handlePreferenceDiagnosis(
   lineUserId: string,
   userMessage: string,
@@ -506,20 +545,27 @@ export async function handlePreferenceDiagnosis(
   const plan = planPreferenceFlow(userMessage);
   if (!plan) return false;
 
-  // 先に応答を返す（記録の成否に関わらずユーザー体験を完結させる）。
-  await responder.text(plan.message.text, plan.message.quickReplies);
-
-  // 診断ファネル記録（P0-2・fire-and-forget・失敗は握りつぶし）。
-  //   診断の本番昇格前に必須（昇格後からでは初期ファネルを失う）。
   const supabase = createSupabaseClient(env);
-  for (const ev of diagnosisFlowEvents(userMessage, lineUserId, plan.winner)) {
-    void logFlowEvent(supabase, ev);
-  }
 
-  // 結果確定時のみ persona を記録（fail-safe: 例外を投げない）。
-  if (plan.winner) {
-    await recordDiagnosisPersona(lineUserId, plan.winner, env);
-  }
+  await runDiagnosisSideEffects({
+    // 返信は先に試みる（UX: reply 優先）。失敗しても記録を道連れにしない。
+    reply: () => responder.text(plan.message.text, plan.message.quickReplies),
+    // 診断ファネル記録（P0-2・fire-and-forget・失敗は握りつぶし）。
+    logFlowEvents: () => {
+      for (const ev of diagnosisFlowEvents(userMessage, lineUserId, plan.winner)) {
+        void logFlowEvent(supabase, ev);
+      }
+    },
+    // 結果確定時のみ persona を記録（fail-safe: 例外を投げない）。
+    record: plan.winner
+      ? () => recordDiagnosisPersona(lineUserId, plan.winner as PersonaType, env)
+      : null,
+    onReplyError: (err) =>
+      console.warn(
+        "[preference-diagnosis] reply failed (persona 記録は続行):",
+        err instanceof Error ? err.message : err,
+      ),
+  });
 
   return true;
 }

@@ -104,6 +104,10 @@ import {
   type ScheduledDeliveryDeps,
 } from "../../src/lib/delivery-runtime";
 import type { DeliveryPage } from "../../src/lib/delivery-repository";
+import {
+  buildPersonaPrimaryEqualQuery,
+  LINE_USERS_COLLECTION,
+} from "../../src/lib/firestore";
 import type {
   LedgerStore,
   LedgerEntry,
@@ -742,6 +746,49 @@ describe("resolveTargets ブロック1（customer_linkages 0 行 + lineUsers 直
     );
     assertTrue(r.kind === "multicast", "multicast");
     if (r.kind === "multicast") assertEqual(r.userIds.join(","), "L1", "連携経由のみ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ブロック1 CRITICAL 修正（2026-07-16）: ペルソナ宛先 Firestore クエリを EQUAL 化。
+//   旧 NOT_EQUAL null はフィールド欠落行を除外しライブで常に 0 件だった（実測）。
+//   構築される structuredQuery が「EQUAL / stringValue=persona」で、
+//   NOT_EQUAL / nullValue を一切含まないことを機械的に保証する（NE-null 回帰防止）。
+// ---------------------------------------------------------------------------
+describe("buildPersonaPrimaryEqualQuery（NE-null 回帰防止・EQUAL 化）", () => {
+  it("filter op が EQUAL・比較値が対象ペルソナの stringValue", () => {
+    const q = buildPersonaPrimaryEqualQuery("users", "serenity", { limit: 300 }) as {
+      where: { fieldFilter: { op: string; field: { fieldPath: string }; value: { stringValue?: string } } };
+    };
+    assertEqual(q.where.fieldFilter.op, "EQUAL", "op は EQUAL");
+    assertEqual(q.where.fieldFilter.field.fieldPath, "persona.primary", "対象は persona.primary");
+    assertEqual(q.where.fieldFilter.value.stringValue, "serenity", "比較値は対象ペルソナ");
+  });
+
+  it("NOT_EQUAL / nullValue を一切含まない（NE-null 全面排除）", () => {
+    for (const persona of ["serenity", "explorer", "sensory"] as const) {
+      for (const col of ["users", LINE_USERS_COLLECTION]) {
+        const s = JSON.stringify(
+          buildPersonaPrimaryEqualQuery(col, persona, { limit: 300 }),
+        );
+        assertTrue(!s.includes("NOT_EQUAL"), `${col}/${persona}: NOT_EQUAL を含まない`);
+        assertTrue(!s.includes("nullValue"), `${col}/${persona}: nullValue を含まない`);
+        assertTrue(s.includes(`"stringValue":"${persona}"`), `${col}/${persona}: EQUAL 比較値`);
+      }
+    }
+  });
+
+  it("cursor（startAfterName）指定で startAt/before:false を付ける・未指定なら付けない", () => {
+    const withCur = buildPersonaPrimaryEqualQuery("users", "explorer", {
+      limit: 300,
+      startAfterName: "projects/p/databases/(default)/documents/users/abc",
+    }) as { startAt?: { before: boolean; values: Array<{ referenceValue: string }> } };
+    assertTrue(!!withCur.startAt, "cursor ありは startAt を付ける");
+    assertEqual(withCur.startAt!.before, false, "before:false（次ページ）");
+    const noCur = buildPersonaPrimaryEqualQuery("users", "explorer", { limit: 300 }) as {
+      startAt?: unknown;
+    };
+    assertTrue(noCur.startAt === undefined, "cursor なしは startAt を付けない");
   });
 });
 

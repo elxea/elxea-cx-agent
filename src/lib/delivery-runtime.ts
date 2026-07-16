@@ -18,6 +18,7 @@ import {
   getFirestoreEnv,
   getAccessToken,
   firestoreBaseUrl,
+  buildPersonaPrimaryEqualQuery,
   LINE_USERS_COLLECTION,
   type FirestoreEnv,
   type PersonaType,
@@ -104,31 +105,27 @@ async function loadLinkages(env: Env): Promise<LinkageRow[]> {
   );
 }
 
-/** Firestore: persona.primary 設定済みユーザーを cursor ページングで全件取得。 */
-async function loadPersonaUsers(fsEnv: FirestoreEnv): Promise<PersonaRow[]> {
+/**
+ * Firestore: persona.primary == targetPersona のユーザーを cursor ページングで全件取得（連携済み users）。
+ *
+ * ブロック1 修正（2026-07-16・ライブ E2E で実証）: 旧 `persona.primary != null`（NOT_EQUAL null）は
+ * Firestore 仕様でフィールド欠落行も除外し、ライブで常に 0 件になった。よって対象ペルソナごとの
+ * EQUAL クエリ（buildPersonaPrimaryEqualQuery）に変更する。呼び出し側（resolveTargets）は
+ * audience.persona を渡す（横断が要る箇所は EQUAL×3 の和で合成する）。
+ */
+async function loadPersonaUsers(
+  fsEnv: FirestoreEnv,
+  targetPersona: PersonaType,
+): Promise<PersonaRow[]> {
   const accessToken = await getAccessToken(fsEnv);
   const url = `${firestoreBaseUrl(fsEnv.FIREBASE_PROJECT_ID)}:runQuery`;
   const PAGE = 300;
 
   return collectAllPages<PersonaRow>(async (cursor) => {
-    const structuredQuery: Record<string, unknown> = {
-      from: [{ collectionId: "users", allDescendants: false }],
-      where: {
-        fieldFilter: {
-          field: { fieldPath: "persona.primary" },
-          op: "NOT_EQUAL",
-          value: { nullValue: null },
-        },
-      },
-      orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+    const structuredQuery = buildPersonaPrimaryEqualQuery("users", targetPersona, {
       limit: PAGE,
-    };
-    if (cursor) {
-      structuredQuery.startAt = {
-        values: [{ referenceValue: cursor }],
-        before: false,
-      };
-    }
+      startAfterName: cursor,
+    });
 
     const res = await fetch(url, {
       method: "POST",
@@ -171,36 +168,27 @@ async function loadPersonaUsers(fsEnv: FirestoreEnv): Promise<PersonaRow[]> {
 }
 
 /**
- * Firestore: lineUsers/{lineUserId}.persona.primary 設定済みを cursor ページングで全件取得（ブロック1・直読み）。
+ * Firestore: lineUsers/{lineUserId}.persona.primary == targetPersona を cursor ページングで全件取得（ブロック1・直読み）。
  * ドキュメント ID がそのまま Messaging API userId（webhook 由来）なので multicast の宛先にそのまま使える。
  * loadPersonaUsers（users コレクション）と同一パターンだが、対象コレクションと返す ID が異なる。
+ *
+ * ブロック1 修正（2026-07-16・ライブ E2E で実証）: 旧 NOT_EQUAL null はフィールド欠落行を除外し常に 0 件だった。
+ * EQUAL クエリ（buildPersonaPrimaryEqualQuery）へ変更し、対象ペルソナを引数で受ける。
  */
 async function loadPersonaLineUsers(
   fsEnv: FirestoreEnv,
+  targetPersona: PersonaType,
 ): Promise<LineUserPersonaRow[]> {
   const accessToken = await getAccessToken(fsEnv);
   const url = `${firestoreBaseUrl(fsEnv.FIREBASE_PROJECT_ID)}:runQuery`;
   const PAGE = 300;
 
   return collectAllPages<LineUserPersonaRow>(async (cursor) => {
-    const structuredQuery: Record<string, unknown> = {
-      from: [{ collectionId: LINE_USERS_COLLECTION, allDescendants: false }],
-      where: {
-        fieldFilter: {
-          field: { fieldPath: "persona.primary" },
-          op: "NOT_EQUAL",
-          value: { nullValue: null },
-        },
-      },
-      orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
-      limit: PAGE,
-    };
-    if (cursor) {
-      structuredQuery.startAt = {
-        values: [{ referenceValue: cursor }],
-        before: false,
-      };
-    }
+    const structuredQuery = buildPersonaPrimaryEqualQuery(
+      LINE_USERS_COLLECTION,
+      targetPersona,
+      { limit: PAGE, startAfterName: cursor },
+    );
 
     const res = await fetch(url, {
       method: "POST",
@@ -362,14 +350,14 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
 
   const targetDeps: TargetResolverDeps = {
     loadLinkages: () => loadLinkages(env),
-    loadPersonaUsers: async () => {
+    loadPersonaUsers: async (persona) => {
       if (!fsEnv) throw new Error("Firestore 未設定のためペルソナ対象を解決できない");
-      return loadPersonaUsers(fsEnv);
+      return loadPersonaUsers(fsEnv, persona);
     },
     // ブロック1: lineUsers 直読み（未連携ユーザーのペルソナ）を宛先解決の和集合に加える。
-    loadPersonaLineUsers: async () => {
+    loadPersonaLineUsers: async (persona) => {
       if (!fsEnv) throw new Error("Firestore 未設定のため lineUsers 直読みができない");
-      return loadPersonaLineUsers(fsEnv);
+      return loadPersonaLineUsers(fsEnv, persona);
     },
     broadcastEstimate: async () => channel.estimatedFriendCount,
     // 社内 allowlist は env が唯一の供給元（PII 非記載）。空/未設定は resolveTargets が fail-closed。

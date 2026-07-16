@@ -195,14 +195,19 @@ export async function collectAllPages<T>(
 export interface TargetResolverDeps {
   /** 全 LINE 紐付け行を取得（除外フラグ込み）。取得不能は throw（fail-closed）。 */
   loadLinkages(): Promise<LinkageRow[]>;
-  /** persona.primary 設定済みユーザーをページングで全件取得。 */
-  loadPersonaUsers(): Promise<PersonaRow[]>;
   /**
-   * lineUsers/{lineUserId}.persona.primary 設定済みユーザーを直読みで全件取得（ブロック1）。
+   * persona.primary == persona の連携済みユーザーをページングで全件取得。
+   * ブロック1 修正（2026-07-16）: 実 I/O 側は EQUAL クエリで対象ペルソナだけ引く
+   *   （旧 NOT_EQUAL null はライブで常に 0 件だったため）。呼び出し側が対象 persona を渡す。
+   */
+  loadPersonaUsers(persona: PersonaType): Promise<PersonaRow[]>;
+  /**
+   * lineUsers/{lineUserId}.persona.primary == persona のユーザーを直読みで全件取得（ブロック1）。
    * 未連携（customer_linkages 無し）でもペルソナ配信の宛先に含めるための直読み経路。
+   * 実 I/O 側は EQUAL クエリで対象ペルソナだけ引く（2026-07-16 修正）。
    * 省略時（未注入）は空配列扱い＝従来の「連携済み users 経由」だけの解決に縮退する（後方互換）。
    */
-  loadPersonaLineUsers?(): Promise<LineUserPersonaRow[]>;
+  loadPersonaLineUsers?(persona: PersonaType): Promise<LineUserPersonaRow[]>;
   /** broadcast（全員配信）時の想定受信者数（無料枠ガードの見積用）。未設定・取得不能は null。 */
   broadcastEstimate(): Promise<number | null>;
   /**
@@ -301,9 +306,9 @@ export async function resolveTargets(
   try {
     [linkages, personaRows, lineUserRows] = await Promise.all([
       deps.loadLinkages(),
-      deps.loadPersonaUsers(),
+      deps.loadPersonaUsers(audience.persona),
       deps.loadPersonaLineUsers
-        ? deps.loadPersonaLineUsers()
+        ? deps.loadPersonaLineUsers(audience.persona)
         : Promise.resolve<LineUserPersonaRow[]>([]),
     ]);
   } catch (err) {
