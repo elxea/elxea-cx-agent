@@ -16,6 +16,19 @@
  *   npx tsx scripts/test-linkage-kit.ts setup      # 合成の連携済み定期便状態を作成
  *   npx tsx scripts/test-linkage-kit.ts status     # 現在の解決結果を表示（読み取り）
  *   npx tsx scripts/test-linkage-kit.ts teardown   # 合成データを完全削除
+ *
+ * オーナー連携（実 LINE ID を staging で「連携済み・定期便扱い」にセット・Phase 0-5）:
+ *   npx tsx scripts/test-linkage-kit.ts link-owner   <LINE_USER_ID>  # 実IDを連携済み定期便化（冪等）
+ *   npx tsx scripts/test-linkage-kit.ts status-owner <LINE_USER_ID>  # 実IDの解決結果を表示（読み取り）
+ *   npx tsx scripts/test-linkage-kit.ts unlink-owner <LINE_USER_ID>  # 実IDの合成連携を完全削除
+ *
+ *   - setup の合成ID版を「実 LINE ID」で行う。Shopify 顧客 ID は実IDから決定的に導出した
+ *     合成値（reserved band 9009…）で、実在の Shopify 顧客とは衝突しない。Shopify 非接触は同じ。
+ *   - 参照する認証情報は必ず *_STAGING（fail-closed）。本番データには構造的に触れない。
+ *   - **オーナーの LINE ユーザー ID を推測してはいけない**。ID の特定手順は Phase 0 報告に記す
+ *     （要旨: オーナーがテスト OA に発話した直後、staging の conversations.user_id /
+ *      flow_events.user_ref の最新 created_at、または Firestore lineUsers の最新 lastActiveAt
+ *      から実 LINE userId を確認する）。
  */
 
 import dotenv from "dotenv";
@@ -137,12 +150,149 @@ async function status() {
   console.log(JSON.stringify(r, null, 2));
 }
 
+// ---------------------------------------------------------------------------
+// オーナー連携（実 LINE ID を staging で連携済み・定期便扱いにする）— Phase 0-5
+// ---------------------------------------------------------------------------
+
+/** LINE Messaging API の userId 形式（"U" + 32 桁 16 進）。firestore.ts の validateLineUserId と同一規約。 */
+const LINE_USER_ID_RE = /^U[0-9a-fA-F]{32}$/;
+
+/**
+ * 実 LINE userId を CLI 引数から検証つきで取り出す（純粋・fail-closed）。
+ * 形式不正は即中断（合成 KIT.lineUserId との取り違え・パストラバーサルを構造的に排除）。
+ */
+export function requireLineUserIdArg(raw: string | undefined): string {
+  const id = (raw ?? "").trim();
+  if (!LINE_USER_ID_RE.test(id)) {
+    console.error(
+      `[FATAL] 実 LINE userId（"U" + 32桁hex）を引数で渡してください。渡された値: ${JSON.stringify(raw)}`,
+    );
+    process.exit(1);
+  }
+  return id;
+}
+
+/**
+ * 実 LINE userId から「合成 Shopify 顧客 ID」を決定的に導出する（純粋・冪等・数値のみ）。
+ *
+ * - 先頭 12 桁 hex を BigInt 化し、reserved band "9009" を前置する。数値のみ（validateShopifyCustomerId 準拠）。
+ * - 決定的なので teardown（unlink-owner）は同じ LINE ID から同じ Shopify ID を再計算して削除できる。
+ * - band 9009… は KIT.shopifyCustomerId（900800400001）とも実在の低位番号とも重ならないテスト帯。
+ */
+export function ownerSyntheticShopifyId(lineUserId: string): string {
+  if (!LINE_USER_ID_RE.test(lineUserId)) {
+    throw new Error(`Invalid lineUserId for owner synthetic id: ${lineUserId.slice(0, 8)}...`);
+  }
+  const hex12 = lineUserId.slice(1, 13); // "U" を除いた先頭 12 桁 hex（48bit）
+  const dec = BigInt("0x" + hex12).toString();
+  return "9009" + dec;
+}
+
+/** owner link/unlink/status が使う staging Env を組む（共通・*_STAGING fail-closed）。 */
+function ownerStagingEnv(): import("../src/index").Env {
+  return {
+    SUPABASE_URL: requireEnv("SUPABASE_URL_STAGING"),
+    SUPABASE_SERVICE_ROLE_KEY: requireEnv("SUPABASE_SERVICE_ROLE_KEY_STAGING"),
+    FIREBASE_PROJECT_ID: requireEnv("FIREBASE_PROJECT_ID_STAGING"),
+    FIREBASE_CLIENT_EMAIL: requireEnv("FIREBASE_CLIENT_EMAIL_STAGING"),
+    FIREBASE_PRIVATE_KEY: requireEnv("FIREBASE_PRIVATE_KEY_STAGING"),
+    DELIVERY_TARGET_ENV: "test",
+  } as unknown as import("../src/index").Env;
+}
+
+async function linkOwner(rawId: string | undefined) {
+  const lineUserId = requireLineUserIdArg(rawId);
+  const shopifyId = ownerSyntheticShopifyId(lineUserId);
+  console.log("=== テスト連携キット: link-owner（staging のみ・Shopify 非接触）===");
+  console.log(`  LINE userId    : ${lineUserId}`);
+  console.log(`  合成 Shopify ID: ${shopifyId}（reserved band 9009…・決定的導出）`);
+
+  const supabase = stagingSupabase();
+  const nowIso = new Date().toISOString();
+
+  // 1. customer_linkages に「実 LINE ID ↔ 合成 Shopify ID」を upsert（冪等）。
+  const { error: linkErr } = await supabase.from("customer_linkages").upsert(
+    {
+      line_user_id: lineUserId,
+      shopify_customer_id: shopifyId,
+      shopify_email: "owner-test+staging@example.com",
+      linked_at: nowIso,
+      updated_at: nowIso,
+    },
+    { onConflict: "line_user_id" },
+  );
+  if (linkErr) { console.error("[FAIL] customer_linkages upsert:", linkErr.message); process.exit(1); }
+  console.log(`[ok] customer_linkages upsert: line=${lineUserId} shopify=${shopifyId}`);
+
+  // 2. Firestore users/{shopifyId} に isSubscriber=true の合成カルテを upsert（定期便扱い）。
+  const fsEnv = stagingFirestoreEnv();
+  await updateCustomerProfile(shopifyId, {
+    displayName: "[OWNER-TEST] Subscriber",
+    membershipTier: "standard",
+    isSubscriber: true,
+    subscriberUpdatedAt: nowIso,
+    lastActiveAt: nowIso,
+  }, fsEnv);
+  console.log(`[ok] Firestore users/${shopifyId} isSubscriber=true 作成`);
+
+  // 3. 解決結果を検証表示（読み取り・connected+subscriber になっているか）。
+  const { resolveLinkedSubscriber } = await import("../src/lib/subscriber-linkage");
+  const r = await resolveLinkedSubscriber(lineUserId, ownerStagingEnv());
+  console.log("\n--- 解決結果（resolveLinkedSubscriber）---");
+  console.log(JSON.stringify(r, null, 2));
+  if (!(r.linked && r.isSubscriber)) {
+    console.error("[WARN] linked && isSubscriber になっていない。上のログを確認してください。");
+  }
+  console.log("\n削除は: npx tsx scripts/test-linkage-kit.ts unlink-owner " + lineUserId);
+}
+
+async function statusOwner(rawId: string | undefined) {
+  const lineUserId = requireLineUserIdArg(rawId);
+  console.log("=== テスト連携キット: status-owner（読み取り）===");
+  const { resolveLinkedSubscriber } = await import("../src/lib/subscriber-linkage");
+  const r = await resolveLinkedSubscriber(lineUserId, ownerStagingEnv());
+  console.log(`  LINE userId    : ${lineUserId}`);
+  console.log(`  合成 Shopify ID: ${ownerSyntheticShopifyId(lineUserId)}`);
+  console.log(JSON.stringify(r, null, 2));
+}
+
+async function unlinkOwner(rawId: string | undefined) {
+  const lineUserId = requireLineUserIdArg(rawId);
+  const shopifyId = ownerSyntheticShopifyId(lineUserId);
+  console.log("=== テスト連携キット: unlink-owner（合成連携を完全削除）===");
+  const supabase = stagingSupabase();
+  const { error: delErr } = await supabase.from("customer_linkages").delete().eq("line_user_id", lineUserId);
+  if (delErr) console.error("[warn] customer_linkages delete:", delErr.message);
+  else console.log(`[ok] customer_linkages 削除: line=${lineUserId}`);
+
+  const fsEnv = stagingFirestoreEnv();
+  const token = await getAccessToken(fsEnv);
+  const url = `${firestoreBaseUrl(fsEnv.FIREBASE_PROJECT_ID)}/users/${shopifyId}`;
+  const res = await fetch(url, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok && res.status !== 404) console.error(`[warn] Firestore delete (${res.status})`);
+  else console.log(`[ok] Firestore users/${shopifyId} 削除（status ${res.status}）`);
+}
+
 // CLI 実行時のみディスパッチ（他モジュールから KIT を import しても起動しない）。
 import { fileURLToPath } from "node:url";
 const isDirect = process.argv[1] === fileURLToPath(import.meta.url);
 if (isDirect) {
   const cmd = process.argv[2];
-  const run = cmd === "setup" ? setup : cmd === "teardown" ? teardown : cmd === "status" ? status : null;
-  if (!run) { console.error("usage: test-linkage-kit.ts <setup|status|teardown>"); process.exit(1); }
+  const arg = process.argv[3];
+  const run: (() => Promise<void>) | null =
+    cmd === "setup" ? setup
+    : cmd === "teardown" ? teardown
+    : cmd === "status" ? status
+    : cmd === "link-owner" ? () => linkOwner(arg)
+    : cmd === "status-owner" ? () => statusOwner(arg)
+    : cmd === "unlink-owner" ? () => unlinkOwner(arg)
+    : null;
+  if (!run) {
+    console.error(
+      "usage: test-linkage-kit.ts <setup|status|teardown> | " +
+        "<link-owner|status-owner|unlink-owner> <LINE_USER_ID>",
+    );
+    process.exit(1);
+  }
   run().catch((e) => { console.error("[FATAL]", e instanceof Error ? e.message : e); process.exit(1); });
 }
