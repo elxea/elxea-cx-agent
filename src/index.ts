@@ -10,7 +10,11 @@ import {
   webChatEventHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
-import { identityLinkHandler, identityLinkLineHandler } from "./routes/identity";
+import {
+  identityLinkHandler,
+  identityLinkLineHandler,
+  identityLinkLiffHandler,
+} from "./routes/identity";
 import { shopifyOrderWebhook } from "./routes/shopify-webhook";
 import { classifyCron } from "./lib/cron-routing";
 import { runKnowledgeSync } from "./sync/knowledge";
@@ -179,6 +183,8 @@ app.post("/api/survey", surveyHandler);
 // Identity link routes
 app.post("/api/identity/link", identityLinkHandler);
 app.post("/api/identity/link-line", identityLinkLineHandler);
+// 案A（LIFF 連携）: customer_linkages への冪等 upsert（web-app サーバから X-API-Key 付きで呼ぶ）
+app.post("/api/identity/link-liff", identityLinkLiffHandler);
 
 /**
  * LIFF Follow Ref API。

@@ -15,8 +15,14 @@ import {
   mergeAnonymousSession,
   linkLineByEmail,
 } from "../lib/identity";
-import { validateSessionId, validateShopifyCustomerId } from "../lib/web-auth";
+import {
+  validateSessionId,
+  validateShopifyCustomerId,
+  validateLineMessagingUserId,
+  normalizeShopifyCustomerId,
+} from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
+import { upsertCustomerLinkage } from "../lib/customer-linkage";
 
 /**
  * POST /api/identity/link-line
@@ -196,6 +202,96 @@ export async function identityLinkHandler(c: Context<{ Bindings: Env }>) {
     });
   } catch (err) {
     console.error("[identity/link] error:", err);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+}
+
+/**
+ * POST /api/identity/link-liff
+ *
+ * 案A（LIFF 連携）第1弾の中心。LINE Bot ランタイムが読む Supabase `customer_linkages`
+ * に「トーク用（Messaging）userId ↔ Shopify 顧客」の 1 行を冪等に作る、これまで存在しなかった
+ * 書き込み経路。既存の identity/link（user_identity_map への書き込み）は一切変更しない
+ * （別テーブル・別ハンドラ）。
+ *
+ * 認証（server-to-server・SYNC_API_SECRET 維持）:
+ *   このエンドポイントは web-app の route handler（サーバ）から X-API-Key 付きで呼ばれる。
+ *   ブラウザから直叩きさせない（SYNC_API_SECRET をブラウザに置かない）。fail-closed。
+ *
+ * なりすまし不能性（設計の要点）:
+ *   1. line_messaging_user_id は web-app が「LINE 署名済み LIFF id_token」を LINE の verify API で
+ *      検証して取り出した `sub`。ブラウザは sub を詐称できない（LINE の署名鍵が要る）。
+ *   2. shopify_customer_id は web-app のサーバ認証済み Shopify セッション（requireAuth）由来。
+ *      ブラウザ自己申告の customer_id は使わない（他人の顧客IDで連携する穴を塞ぐ）。
+ *   3. 本エンドポイントは X-API-Key（SYNC_API_SECRET）でゲートし、web-app サーバ以外から
+ *      呼べないようにする。
+ *   → 形式ゲート（下記バリデータ）は多層防御の 1 枚目に過ぎず、真正性の本体は上記 1–3。
+ *
+ * リクエストボディ:
+ * {
+ *   line_messaging_user_id: string,   // 必須。`U` + 32 hex（Messaging userId）
+ *   shopify_customer_id: string,      // 必須。GID or 数値。内部で数値へ正規化
+ *   shopify_email?: string | null,    // 任意。分かれば保存
+ * }
+ *
+ * レスポンス:
+ * { success: true, line_user_id: string, shopify_customer_id: string }
+ */
+export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
+  // C: server-to-server 認証（SYNC_API_SECRET）。fail-closed。ブラウザ直叩き不可。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
+  let body: {
+    line_messaging_user_id?: string;
+    shopify_customer_id?: string;
+    shopify_email?: string | null;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { line_messaging_user_id, shopify_customer_id, shopify_email } = body;
+
+  // line_messaging_user_id バリデーション（Messaging userId 形式）
+  const lineError = validateLineMessagingUserId(line_messaging_user_id);
+  if (lineError) {
+    return c.json({ error: lineError }, 400);
+  }
+
+  // shopify_customer_id を数値へ正規化（GID / 数値のどちらでも受ける）
+  const normalized = normalizeShopifyCustomerId(shopify_customer_id);
+  if ("error" in normalized) {
+    return c.json({ error: normalized.error }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+
+  try {
+    const result = await upsertCustomerLinkage(supabase, {
+      lineUserId: line_messaging_user_id as string,
+      shopifyCustomerId: normalized.numericId,
+      shopifyEmail: shopify_email ?? null,
+    });
+
+    if (!result.ok) {
+      console.error("[identity/link-liff] upsert failed:", result.error);
+      return c.json({ error: "Failed to persist linkage" }, 500);
+    }
+
+    console.log(
+      `[identity/link-liff] linked messaging user ${result.lineUserId} <-> shopify ${result.shopifyCustomerId}`,
+    );
+
+    return c.json({
+      success: true,
+      line_user_id: result.lineUserId,
+      shopify_customer_id: result.shopifyCustomerId,
+    });
+  } catch (err) {
+    console.error("[identity/link-liff] error:", err);
     return c.json({ error: "Internal server error" }, 500);
   }
 }

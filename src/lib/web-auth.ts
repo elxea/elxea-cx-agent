@@ -109,6 +109,61 @@ export function validateShopifyCustomerId(
 }
 
 /**
+ * Shopify Customer ID を「数値文字列」に正規化する。
+ *
+ * customer_linkages.shopify_customer_id は数値文字列で格納される（注文 webhook が
+ * shopify-order-webhook.ts で GID から数値部を取り出して upsert するのと同じ表現）。
+ * よって連携行の作成でも GID / 数値のどちらで渡されても数値へ寄せる。
+ *
+ * 受理する形:
+ *   - `gid://shopify/Customer/<digits>` → `<digits>`
+ *   - `<digits>`（既に数値文字列）        → そのまま
+ * それ以外（空・非数値混入・型不一致）は error を返す（fail-closed）。
+ *
+ * @returns { numericId } なら有効。{ error } なら拒否理由。
+ */
+export function normalizeShopifyCustomerId(
+  raw: unknown,
+): { numericId: string } | { error: string } {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return { error: "shopify_customer_id is required" };
+  }
+  const stripped = raw.replace(/^gid:\/\/shopify\/Customer\//, "").trim();
+  if (!/^\d+$/.test(stripped)) {
+    return {
+      error:
+        "shopify_customer_id must be a numeric Shopify customer id or a gid://shopify/Customer/<id>",
+    };
+  }
+  return { numericId: stripped };
+}
+
+/**
+ * LINE Messaging API の userId 形式バリデーション。
+ *
+ * Bot / customer_linkages が使う「トーク用（Messaging）userId」は `U` + 32 桁 hex の
+ * 33 文字。LINE Login userId（別名前空間）や任意文字列の混入をここで弾く。
+ * 連携行の line_user_id はこの形式のみを受理する（偽装・誤混入の一次防波堤）。
+ *
+ * 注: なりすまし不能性の本質は「この userId が LINE 署名済み id_token の検証結果 `sub`
+ * であること」で担保する（web-app 側で LINE verify を通してから渡す）。本関数はあくまで
+ * 形式ゲートで、単体では真正性を保証しない。
+ *
+ * @returns null なら有効。文字列ならエラーメッセージ。
+ */
+const LINE_MESSAGING_USER_ID_REGEX = /^U[0-9a-f]{32}$/;
+
+export function validateLineMessagingUserId(userId: unknown): string | null {
+  if (typeof userId !== "string" || userId.length === 0) {
+    return "line_messaging_user_id is required";
+  }
+  if (!LINE_MESSAGING_USER_ID_REGEX.test(userId)) {
+    return "line_messaging_user_id must be a LINE Messaging userId (U followed by 32 hex chars)";
+  }
+  return null;
+}
+
+/**
  * Cloudflare Workers のリクエストからクライアント IP を取得する。
  *
  * 既定 (直叩き) では cf.connectingIp / CF-Connecting-IP を使う。これは Cloudflare が
