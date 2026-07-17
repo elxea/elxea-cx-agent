@@ -190,20 +190,21 @@ async function main() {
     body: liffBody,
   }).catch(() => null);
   check("link-liff 200", liffRes?.status === 200, `HTTP ${liffRes?.status}`);
-  // 連携行（source 列は 026 未適用の staging では存在しないため select しない）。
-  let linkRow: { shopify_customer_id?: string } | null = null;
+  // 連携行 + source 列（migration 026 適用後は select=source が 200・値は 'liff'）。
+  let linkRow: { shopify_customer_id?: string; source?: string | null } | null = null;
   for (let i = 0; i < 8; i++) {
-    const r = await sb(`customer_linkages?line_user_id=eq.${ID_LIFF}&select=shopify_customer_id`);
+    const r = await sb(`customer_linkages?line_user_id=eq.${ID_LIFF}&select=shopify_customer_id,source`);
     if (r.ok) {
-      const rows = (await r.json()) as Array<{ shopify_customer_id?: string }>;
+      const rows = (await r.json()) as Array<{ shopify_customer_id?: string; source?: string | null }>;
       if (rows.length > 0) { linkRow = rows[0]; break; }
     }
     await new Promise((r) => setTimeout(r, 800));
   }
   check("customer_linkages 行が作られる", !!linkRow, linkRow ? `shopify=${linkRow.shopify_customer_id}` : "no row");
-  // source 列は migration 026 適用後に 'liff' が入る（現 staging は未適用＝列なし・fail-safe で連携は成立）。
+  // 026 適用済み: select=source が 200 で返り、値が 'liff' であること。
   const srcProbe = await sb(`customer_linkages?line_user_id=eq.${ID_LIFF}&select=source`);
-  console.log(`    source 列 select HTTP ${srcProbe.status}（400/42703 = 026 未適用・適用後は 200 で 'liff'）`);
+  check("source 列が select 可能（026 適用済み）", srcProbe.status === 200, `HTTP ${srcProbe.status}`);
+  check("source='liff' が書かれている", linkRow?.source === "liff", `source=${JSON.stringify(linkRow?.source ?? null)}`);
   const cC = await countFlowEvents(ID_LIFF, "link.completed");
   check("link.completed が記録される", cC >= 1, `count=${cC}`);
 
