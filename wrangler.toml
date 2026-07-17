@@ -73,6 +73,12 @@ name = "elxea-agent-staging"
 #   （必要な secret 一覧・投入順は docs/deploy-runbook.md の「Staging Bring-Up」を参照）
 [env.staging.vars]
 DELIVERY_TARGET_ENV = "test"
+# 【staging 限定・ブロック4 連携導線】トーク内入り口の「連携ボタン」の遷移先 LIFF URL。
+# 設定時のみ、未連携ユーザーの連携文脈（完全一致トリガー / ④定期便の未連携分岐）に
+# 「便益1行 + 連携ボタン（この URL を開く URI アクション）」を出す。
+# ⚠ 本番 [vars] には絶対に置かない（未設定=fail-safe: ボタンを出さず従来テキスト elxea.com/ja に倒す）。
+#   本番での有効化は GA/昇格ゲートで別途判断（そのとき本番 [vars] か secret で明示投入する）。
+LIFF_LINKAGE_URL = "https://liff.line.me/2009473839-ubrqGbMF"
 # 【staging 限定・ブロック4 テスト連携キット】定期便扱いにする合成 LINE userId（U+32hex・非実在）。
 # subscriber-linkage.ts は DELIVERY_TARGET_ENV="test" のときだけこの allowlist を見る（本番 "prod" では常に無効）。
 # 実在ユーザーの ID は絶対に入れない。本番 [vars] には絶対に置かない。

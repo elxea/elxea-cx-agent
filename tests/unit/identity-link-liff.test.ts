@@ -14,6 +14,7 @@
  *   npx tsx tests/unit/identity-link-liff.test.ts
  */
 
+import { readFileSync } from "node:fs";
 import type { Context } from "hono";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../../src/index";
@@ -221,6 +222,25 @@ describe("upsertCustomerLinkage", () => {
     assertTrue(!("shopify_email" in calls[0].row), "shopify_email must be absent");
   });
 
+  it("source 指定あり → source 列を書く（migration 026・発生源記録）", async () => {
+    const { client, calls } = makeMockSupabase(null);
+    await upsertCustomerLinkage(client, {
+      lineUserId: VALID_LINE_ID,
+      shopifyCustomerId: "900800400001",
+      source: "liff",
+    });
+    assertEqual(calls[0].row.source, "liff");
+  });
+
+  it("source 指定なし → source 列を書かない（既存 source を null で消さない）", async () => {
+    const { client, calls } = makeMockSupabase(null);
+    await upsertCustomerLinkage(client, {
+      lineUserId: VALID_LINE_ID,
+      shopifyCustomerId: "900800400001",
+    });
+    assertTrue(!("source" in calls[0].row), "source must be absent when not provided");
+  });
+
   it("Supabase エラー → ok:false でエラー理由を返す（throw しない）", async () => {
     const { client } = makeMockSupabase("duplicate key value");
     const res = await upsertCustomerLinkage(client, {
@@ -229,6 +249,61 @@ describe("upsertCustomerLinkage", () => {
     });
     assertEqual(res.ok, false);
     assertTrue(!res.ok && res.error.includes("duplicate key"));
+  });
+
+  it("source 列未適用（42703）→ source を落として再試行し連携は成立（expand/contract 保険）", async () => {
+    // 1回目（source あり）は 42703 で失敗、2回目（source なし）で成功する mock。
+    const rows: Array<Record<string, unknown>> = [];
+    let call = 0;
+    const client = {
+      from() {
+        return {
+          upsert(row: Record<string, unknown>) {
+            call++;
+            rows.push(row);
+            if (call === 1) {
+              return Promise.resolve({
+                error: { code: "42703", message: "column customer_linkages.source does not exist" },
+              });
+            }
+            return Promise.resolve({ error: null });
+          },
+        };
+      },
+    } as unknown as SupabaseClient;
+
+    const res = await upsertCustomerLinkage(client, {
+      lineUserId: VALID_LINE_ID,
+      shopifyCustomerId: "900800400001",
+      source: "liff",
+    });
+    assertTrue(res.ok, "linkage should still succeed");
+    assertEqual(call, 2, "retried once");
+    assertTrue("source" in rows[0], "first attempt included source");
+    assertTrue(!("source" in rows[1]), "retry dropped source");
+  });
+
+  it("source 列未適用でも source 未指定なら再試行しない（無関係な列エラーは伝播）", async () => {
+    let call = 0;
+    const client = {
+      from() {
+        return {
+          upsert() {
+            call++;
+            return Promise.resolve({
+              error: { code: "42703", message: "column customer_linkages.source does not exist" },
+            });
+          },
+        };
+      },
+    } as unknown as SupabaseClient;
+    const res = await upsertCustomerLinkage(client, {
+      lineUserId: VALID_LINE_ID,
+      shopifyCustomerId: "900800400001",
+      // source 未指定 → row に source を積まないので、この 42703 は別要因。再試行せず伝播。
+    });
+    assertEqual(res.ok, false, "no retry when source not requested");
+    assertEqual(call, 1, "single attempt");
   });
 });
 
@@ -310,6 +385,34 @@ describe("identityLinkLiffHandler -- 入力検証（認証通過後）", () => {
     };
     const res = await identityLinkLiffHandler(ctx);
     assertEqual(statusOf(res), 400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. ハンドラ成功経路の配線（source=liff / link.completed 記録）
+//    成功経路は handler 内で createSupabaseClient(c.env) を生成し実 I/O へ向かうため、
+//    実データ側面（source='liff' 行・link.completed）は staging E2E で観測する。
+//    ここでは「配線されていること」をソース検査で固定回帰する（実装漏れ・逆行を検出）。
+// ---------------------------------------------------------------------------
+
+describe("identityLinkLiffHandler -- 成功経路の配線（source / link.completed）", () => {
+  const src = readFileSync(
+    new URL("../../src/routes/identity.ts", import.meta.url),
+    "utf8",
+  );
+  const fn = src.slice(src.indexOf("export async function identityLinkLiffHandler"));
+
+  it("upsertCustomerLinkage に source: \"liff\" を渡す", () => {
+    assertTrue(fn.includes('source: "liff"'), "source liff passed to upsert");
+  });
+  it("成功時に flow_events(link.completed, metadata.source=liff) を記録する", () => {
+    assertTrue(fn.includes("logFlowEvent"), "logFlowEvent called");
+    assertTrue(fn.includes('eventName: "link.completed"'), "link.completed event");
+    assertTrue(fn.includes("source: \"liff\""), "metadata.source liff");
+  });
+  it("記録は waitUntil 優先・executionCtx 不在なら await（応答を落とさない）", () => {
+    assertTrue(fn.includes("waitUntil"), "waitUntil path");
+    assertTrue(fn.includes("await linkCompletedLog"), "await fallback path");
   });
 });
 

@@ -11,6 +11,7 @@
  */
 
 import type { Env } from "../../src/index";
+import type { LineResponder } from "../../src/lib/line";
 import {
   LINKAGE_TRIGGER,
   TEST_SUBSCRIBER_ENV_KEY,
@@ -22,13 +23,48 @@ import {
   buildLinkageInviteMessage,
   buildSubscriberLinkedMessage,
   buildNonSubscriberDeclineMessage,
+  resolveLiffLinkageUrl,
+  buildLinkageInviteFlex,
+  emitLinkageButton,
+  sendLinkageInvite,
   type LinkageResolution,
 } from "../../src/lib/subscriber-linkage";
 import {
   LINKAGE_INVITE_BODY,
   SUBSCRIBER_LINKED_BODY,
   NON_SUBSCRIBER_DECLINE_BODY,
+  LINKAGE_BENEFIT_LINE,
+  LINKAGE_BUTTON_LABEL,
+  SITE_URL_JA,
 } from "../../src/lib/brand-copy";
+
+const LIFF_URL = "https://liff.line.me/2009473839-ubrqGbMF";
+
+/** 送信を記録する mock responder（flex/text の呼び出しを観測する）。 */
+function mockResponder(): {
+  responder: LineResponder;
+  calls: Array<{ kind: "text" | "flex"; altOrText: string; payload?: unknown }>;
+} {
+  const calls: Array<{ kind: "text" | "flex"; altOrText: string; payload?: unknown }> = [];
+  const responder: LineResponder = {
+    async text(text, quickReplyItems) {
+      calls.push({ kind: "text", altOrText: text, payload: quickReplyItems });
+    },
+    async flex(altText, contents) {
+      calls.push({ kind: "flex", altOrText: altText, payload: contents });
+    },
+  };
+  return { responder, calls };
+}
+
+/** Flex bubble の footer button の uri を取り出す（存在しなければ null）。 */
+function extractButtonUri(contents: unknown): string | null {
+  const c = contents as {
+    footer?: { contents?: Array<{ action?: { type?: string; uri?: string } }> };
+  };
+  const action = c.footer?.contents?.[0]?.action;
+  return action?.type === "uri" ? action.uri ?? null : null;
+}
 
 let total = 0, passed = 0, failed = 0;
 const failures: Array<{ name: string; error: string }> = [];
@@ -174,6 +210,59 @@ async function run() {
   it("案内・お断りは URL を含む", () => {
     assert(buildLinkageInviteMessage().includes("https://"), "invite url");
     assert(buildNonSubscriberDeclineMessage().includes("https://elxea.com/ja/subscription"), "decline url");
+  });
+
+  console.log("\n--- (e) LIFF 連携ボタン導線（トーク内入り口・ブロック4） ---");
+  it("resolveLiffLinkageUrl: 設定あり→URL / 未設定・空→null（prod fail-safe）", () => {
+    assertEqual(resolveLiffLinkageUrl({ LIFF_LINKAGE_URL: LIFF_URL }), LIFF_URL, "set");
+    assertEqual(resolveLiffLinkageUrl({ LIFF_LINKAGE_URL: "  " }), null, "whitespace");
+    assertEqual(resolveLiffLinkageUrl({}), null, "unset");
+  });
+  it("buildLinkageInviteMessage: liffUrl 指定→LIFF 着地 / 未指定→従来 elxea.com/ja（点4 fail-safe）", () => {
+    assert(buildLinkageInviteMessage(LIFF_URL).includes(LIFF_URL), "liff landing");
+    assert(!buildLinkageInviteMessage(LIFF_URL).includes(SITE_URL_JA), "no legacy url when liff set");
+    assert(buildLinkageInviteMessage(null).includes(SITE_URL_JA), "legacy url when unset");
+    assert(buildLinkageInviteMessage().includes(SITE_URL_JA), "legacy url when arg absent");
+  });
+  it("buildLinkageInviteFlex: 便益1行 + LIFF を開く URI ボタン（ラベル一致・絵文字なし）", () => {
+    const flex = buildLinkageInviteFlex(LIFF_URL);
+    assertEqual(extractButtonUri(flex.contents), LIFF_URL, "button uri");
+    assert(flex.altText.includes(LINKAGE_BENEFIT_LINE.slice(0, 12)), "altText = benefit");
+    const json = JSON.stringify(flex.contents);
+    assert(json.includes(LINKAGE_BENEFIT_LINE), "benefit line present");
+    assert(json.includes(LINKAGE_BUTTON_LABEL), "button label present");
+    assert(!EMOJI_RE.test(json), "no emoji in flex");
+  });
+  it("buildLinkageInviteFlex: leadText を先頭に添えられる", () => {
+    const flex = buildLinkageInviteFlex(LIFF_URL, { leadText: "先頭のリード文" });
+    assert(JSON.stringify(flex.contents).includes("先頭のリード文"), "leadText present");
+  });
+  await it("emitLinkageButton: LIFF 設定時→flex 送信 + true（surface 記録は fire-and-forget）", async () => {
+    const { responder, calls } = mockResponder();
+    const shown = await emitLinkageButton(SYN_LINE, envWith({ LIFF_LINKAGE_URL: LIFF_URL }), responder, "trigger");
+    assertEqual(shown, true, "shown");
+    assertEqual(calls.length, 1, "one send");
+    assertEqual(calls[0].kind, "flex", "flex");
+    assertEqual(extractButtonUri(calls[0].payload), LIFF_URL, "button uri sent");
+  });
+  await it("emitLinkageButton: LIFF 未設定時→何も送らず false（prod fail-safe）", async () => {
+    const { responder, calls } = mockResponder();
+    const shown = await emitLinkageButton(SYN_LINE, envWith({ LIFF_LINKAGE_URL: undefined }), responder, "menu4");
+    assertEqual(shown, false, "not shown");
+    assertEqual(calls.length, 0, "nothing sent");
+  });
+  await it("sendLinkageInvite: LIFF 設定時→ボタン flex のみ（fallback text 非送信）", async () => {
+    const { responder, calls } = mockResponder();
+    await sendLinkageInvite(SYN_LINE, envWith({ LIFF_LINKAGE_URL: LIFF_URL }), responder, "FALLBACK");
+    assertEqual(calls.length, 1, "one send");
+    assertEqual(calls[0].kind, "flex", "flex");
+  });
+  await it("sendLinkageInvite: LIFF 未設定時→fallback テキストのみ（従来動作）", async () => {
+    const { responder, calls } = mockResponder();
+    await sendLinkageInvite(SYN_LINE, envWith({ LIFF_LINKAGE_URL: undefined }), responder, "FALLBACK");
+    assertEqual(calls.length, 1, "one send");
+    assertEqual(calls[0].kind, "text", "text");
+    assertEqual(calls[0].altOrText, "FALLBACK", "fallback text");
   });
 
   console.log(`\n==================================================`);

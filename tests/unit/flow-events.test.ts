@@ -70,6 +70,23 @@ it("buildFlowEventRow: 正常入力を DB 行に正規化（channel 既定 line�
   assertEqual(row.product_no, null, "product_no null");
 });
 
+it("buildFlowEventRow: 連携ファネル link.* は metadata(surface/source) を保持（ブロック4）", () => {
+  const shown = buildFlowEventRow({
+    eventName: "link.invite_shown",
+    userRef: "U1",
+    metadata: { surface: "trigger" },
+  });
+  assertEqual(shown.event_name, "link.invite_shown", "invite_shown name");
+  assertEqual((shown.metadata as { surface?: string })?.surface, "trigger", "surface metadata");
+  const done = buildFlowEventRow({
+    eventName: "link.completed",
+    userRef: "U1",
+    metadata: { source: "liff" },
+  });
+  assertEqual(done.event_name, "link.completed", "completed name");
+  assertEqual((done.metadata as { source?: string })?.source, "liff", "source metadata");
+});
+
 it("buildFlowEventRow: tea.card_view は5桁 product_no を保持", () => {
   const row = buildFlowEventRow({
     eventName: "tea.card_view",

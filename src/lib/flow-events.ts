@@ -40,7 +40,12 @@ export type FlowEventName =
   | "diag.result"
   | "consult.entry"
   | "optout.request"
-  | "optout.confirm";
+  | "optout.confirm"
+  // 連携ファネル（ブロック4・売上重大1対応）: 招待ボタン提示 → 連携完了。
+  //   link.invite_shown: 未連携ユーザーの連携文脈で便益+ボタンを出したとき（metadata.surface = trigger|menu4）。
+  //   link.completed:    identity/link-liff の連携成功時（metadata.source = liff 等）。
+  | "link.invite_shown"
+  | "link.completed";
 
 /** 記録する 1 イベントの入力。 */
 export interface FlowEventInput {

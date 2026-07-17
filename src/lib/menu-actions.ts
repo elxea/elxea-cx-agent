@@ -17,10 +17,8 @@
 
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
-import { createSupabaseClient } from "./supabase";
-import { resolveCallerShopifyCustomerId } from "./shopify";
-import { getCustomerProfile, getFirestoreEnv } from "./firestore";
 import { ABOUT_BLURB } from "./brand-copy";
+import { resolveLinkedSubscriber, emitLinkageButton } from "./subscriber-linkage";
 
 // ---------------------------------------------------------------------------
 // トリガー（リッチメニュー message text と完全一致）
@@ -124,36 +122,6 @@ export function buildSubscriptionMessage(kind: "subscriber" | "generic"): string
 }
 
 // ---------------------------------------------------------------------------
-// ④ 出し分け判定（deterministic・LLM 不使用）
-// ---------------------------------------------------------------------------
-
-/**
- * 定期便の出し分け種別を解決する。
- *   1. customer_linkages に Shopify 顧客 ID が無い（未連携）→ "generic"
- *   2. 連携済みで Firestore の isSubscriber === true → "subscriber"
- *   3. それ以外 / 取得失敗 → "generic"（安全側: 案内を出す）
- */
-export async function resolveSubscriptionKind(
-  lineUserId: string,
-  env: Env,
-): Promise<"subscriber" | "generic"> {
-  try {
-    const supabase = createSupabaseClient(env);
-    const shopifyId = await resolveCallerShopifyCustomerId(lineUserId, "line", supabase);
-    if (!shopifyId) return "generic"; // 未連携
-
-    const profile = await getCustomerProfile(shopifyId, getFirestoreEnv(env));
-    return profile?.isSubscriber === true ? "subscriber" : "generic";
-  } catch (err) {
-    console.warn(
-      "[menu] subscription kind resolve failed, fallback to generic:",
-      err instanceof Error ? err.message : err,
-    );
-    return "generic";
-  }
-}
-
-// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ本体）
 // ---------------------------------------------------------------------------
 
@@ -184,10 +152,33 @@ export async function handleMenuActionFlow(
     return true;
   }
 
-  // ④ 定期便 — Shopify 連携 × isSubscriber で出し分け
+  // ④ 定期便 — 連携状態 × isSubscriber で出し分け（読み取りのみ・LLM 不使用）。
+  //   - 連携済み定期便       → subscriber 応答（従来どおり）
+  //   - 連携済み非定期便       → generic 紹介（従来どおり・すでに連携済みなので連携ボタンは出さない）
+  //   - 未連携                → generic 紹介 + 便益 1 行 + 連携ボタン（LIFF 設定時）/ generic のみ（未設定・fail-safe）
   if (t === SUBSCRIPTION_TRIGGER) {
-    const kind = await resolveSubscriptionKind(lineUserId, env);
-    await responder.text(buildSubscriptionMessage(kind));
+    const resolution = await resolveLinkedSubscriber(lineUserId, env);
+    if (resolution.isSubscriber) {
+      await responder.text(buildSubscriptionMessage("subscriber"));
+    } else if (resolution.linked) {
+      // 連携済み非定期便: 従来どおり generic 紹介のみ（連携済みなので連携導線は不要）。
+      await responder.text(buildSubscriptionMessage("generic"));
+    } else {
+      // 未連携: 従来の generic 紹介（テキスト・URL は LINE が自動リンク）を送り、
+      //   LIFF 設定時のみ続けて便益 + 連携ボタン（Flex）を出す（surface=menu4・invite_shown 記録）。
+      //   LIFF 未設定（prod・fail-safe）は generic 紹介のみ（従来動作・ボタンなし）。
+      //   generic 紹介の送信失敗が「連携ボタン提示（ファネルの本命）」を巻き込まないよう best-effort で保護する
+      //   （invite_shown は emitLinkageButton が送信前に記録するため、ボタン提示は send 成否に依存しない）。
+      try {
+        await responder.text(buildSubscriptionMessage("generic"));
+      } catch (err) {
+        console.warn(
+          "[menu] ④ generic intro send failed (continuing to linkage button):",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      await emitLinkageButton(lineUserId, env, responder, "menu4");
+    }
     return true;
   }
 

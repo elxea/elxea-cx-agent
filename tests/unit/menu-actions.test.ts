@@ -130,6 +130,29 @@ it("handleMenuActionFlow は onboarding / feedback の後に配線される", ()
   assert(iFeedback > -1 && iFeedback < iMenu, "feedback precedes menu-action");
 });
 
+console.log("\n--- (f) ④定期便: 未連携分岐に便益+連携ボタンを追加（ブロック4） ---");
+
+it("④分岐は resolveLinkedSubscriber で 3 態（subscriber / 連携済み非定期便 / 未連携）を出し分ける", () => {
+  const src = readFileSync(new URL("../../src/lib/menu-actions.ts", import.meta.url), "utf8");
+  // 旧 resolveSubscriptionKind（2 態）は撤去され、resolveLinkedSubscriber へ移行している。
+  assert(!src.includes("resolveSubscriptionKind"), "old 2-way resolver removed");
+  assert(src.includes("resolveLinkedSubscriber"), "uses linked-subscriber resolver");
+  const branch = src.slice(src.indexOf("if (t === SUBSCRIPTION_TRIGGER)"));
+  assert(branch.includes("resolution.isSubscriber"), "subscriber branch");
+  assert(branch.includes("resolution.linked"), "linked (non-subscriber) branch");
+});
+
+it("未連携分岐は generic 紹介テキストの後に emitLinkageButton(surface=menu4) を出す", () => {
+  const src = readFileSync(new URL("../../src/lib/menu-actions.ts", import.meta.url), "utf8");
+  const branch = src.slice(src.indexOf("if (t === SUBSCRIPTION_TRIGGER)"));
+  const iText = branch.indexOf('buildSubscriptionMessage("generic")');
+  const iButton = branch.indexOf("emitLinkageButton(");
+  assert(iText > -1, "generic intro sent");
+  assert(iButton > -1, "linkage button emitted");
+  assert(iText < iButton, "generic text precedes button (URL auto-links in text)");
+  assert(branch.includes('"menu4"'), "surface=menu4 tag");
+});
+
 console.log("\n" + "=".repeat(60));
 console.log("Menu Actions Unit Test Results");
 console.log("=".repeat(60));

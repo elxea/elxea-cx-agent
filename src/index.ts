@@ -52,6 +52,14 @@ export type Env = {
   LINE_CHANNEL_ACCESS_TOKEN_TEST?: string;
   /** 配信の対象環境。"prod" | "test"（未設定・不正は "test" に倒す）。 */
   DELIVERY_TARGET_ENV?: string;
+  /**
+   * アカウント連携導線の LIFF URL（トーク内入り口の「連携ボタン」の遷移先・ブロック4）。
+   * 設定時のみ、未連携ユーザーの連携文脈（完全一致トリガー / ④定期便の未連携分岐）に
+   * 「便益1行 + 連携ボタン（この URL を開く URI アクション）」を出す。
+   * ⚠ 未設定（prod・空）は fail-safe: ボタンを出さず従来の案内テキスト（elxea.com/ja）に倒す。
+   *   本番へは GA 判断まで値を置かない（wrangler.toml の [env.staging.vars] にのみ設定）。
+   */
+  LIFF_LINKAGE_URL?: string;
   /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
   DELIVERY_SEND_ENABLED?: string;
   /**

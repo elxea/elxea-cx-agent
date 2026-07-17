@@ -39,6 +39,7 @@ import {
   firestoreBaseUrl,
   type FirestoreEnv,
 } from "../src/lib/firestore";
+import { upsertCustomerLinkage } from "../src/lib/customer-linkage";
 
 dotenv.config({ path: ".dev.vars" });
 
@@ -85,18 +86,15 @@ async function setup() {
   const supabase = stagingSupabase();
   const nowIso = new Date().toISOString();
 
-  // 1. customer_linkages（Supabase・staging）に合成連携行を upsert。
-  const { error: linkErr } = await supabase.from("customer_linkages").upsert(
-    {
-      line_user_id: KIT.lineUserId,
-      shopify_customer_id: KIT.shopifyCustomerId,
-      shopify_email: KIT.email,
-      linked_at: nowIso,
-      updated_at: nowIso,
-    },
-    { onConflict: "line_user_id" },
-  );
-  if (linkErr) { console.error("[FAIL] customer_linkages upsert:", linkErr.message); process.exit(1); }
+  // 1. customer_linkages（Supabase・staging）に合成連携行を upsert（lib 経由で source 列 fail-safe 付き）。
+  //    source="owner_kit"（migration 026）。列未適用の staging でも lib が source を落として再試行する。
+  const link = await upsertCustomerLinkage(supabase, {
+    lineUserId: KIT.lineUserId,
+    shopifyCustomerId: KIT.shopifyCustomerId,
+    shopifyEmail: KIT.email,
+    source: "owner_kit",
+  });
+  if (!link.ok) { console.error("[FAIL] customer_linkages upsert:", link.error); process.exit(1); }
   console.log(`[ok] customer_linkages upsert: line=${KIT.lineUserId} shopify=${KIT.shopifyCustomerId}`);
 
   // 2. Firestore（staging）users/{shopifyId} に isSubscriber=true の合成カルテを作成。
@@ -210,18 +208,14 @@ async function linkOwner(rawId: string | undefined) {
   const supabase = stagingSupabase();
   const nowIso = new Date().toISOString();
 
-  // 1. customer_linkages に「実 LINE ID ↔ 合成 Shopify ID」を upsert（冪等）。
-  const { error: linkErr } = await supabase.from("customer_linkages").upsert(
-    {
-      line_user_id: lineUserId,
-      shopify_customer_id: shopifyId,
-      shopify_email: "owner-test+staging@example.com",
-      linked_at: nowIso,
-      updated_at: nowIso,
-    },
-    { onConflict: "line_user_id" },
-  );
-  if (linkErr) { console.error("[FAIL] customer_linkages upsert:", linkErr.message); process.exit(1); }
+  // 1. customer_linkages に「実 LINE ID ↔ 合成 Shopify ID」を upsert（lib 経由・source 列 fail-safe 付き）。
+  const link = await upsertCustomerLinkage(supabase, {
+    lineUserId,
+    shopifyCustomerId: shopifyId,
+    shopifyEmail: "owner-test+staging@example.com",
+    source: "owner_kit", // 発生源（migration 026）: テスト連携キット（owner 系）由来の印。
+  });
+  if (!link.ok) { console.error("[FAIL] customer_linkages upsert:", link.error); process.exit(1); }
   console.log(`[ok] customer_linkages upsert: line=${lineUserId} shopify=${shopifyId}`);
 
   // 2. Firestore users/{shopifyId} に isSubscriber=true の合成カルテを upsert（定期便扱い）。

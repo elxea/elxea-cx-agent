@@ -39,8 +39,11 @@ import {
   LINKAGE_INVITE_BODY,
   SUBSCRIBER_LINKED_BODY,
   NON_SUBSCRIBER_DECLINE_BODY,
+  LINKAGE_BENEFIT_LINE,
+  LINKAGE_BUTTON_LABEL,
   SITE_URL_JA,
 } from "./brand-copy";
+import { logFlowEvent } from "./flow-events";
 
 // ---------------------------------------------------------------------------
 // トリガー / リンク
@@ -218,9 +221,14 @@ export async function resolveLinkedSubscriber(
 // 出し分け文言（純粋・テスト可能・絵文字禁止・押し売りなし）
 // ---------------------------------------------------------------------------
 
-/** 未連携のお客さまへの案内（マイページからの連携を促す）。 */
-export function buildLinkageInviteMessage(): string {
-  return `${LINKAGE_INVITE_BODY}\n${SITE_URL_JA}`;
+/**
+ * 未連携のお客さまへの案内（マイページからの連携を促す・テキスト版）。
+ * 着地先（体験重大3対応）: liffUrl があれば LIFF（マイページ相当）へ、無ければ従来の elxea.com/ja へ。
+ *   prod（LIFF 未設定）では従来どおり SITE_URL_JA（fail-safe・文言不変）。
+ */
+export function buildLinkageInviteMessage(liffUrl?: string | null): string {
+  const url = liffUrl && liffUrl.length > 0 ? liffUrl : SITE_URL_JA;
+  return `${LINKAGE_INVITE_BODY}\n${url}`;
 }
 
 /** 連携済み＋定期便のお客さまへの応答（定期便客としての受け止め）。 */
@@ -246,6 +254,113 @@ export function selectLinkageMessage(resolution: LinkageResolution): string {
 }
 
 // ---------------------------------------------------------------------------
+// トーク内入り口の「便益 + 連携ボタン」（LIFF 導線・staging 先行・ブロック4）
+// ---------------------------------------------------------------------------
+
+/** 連携ボタンを出した文脈（flow_events link.invite_shown の metadata.surface）。 */
+export type LinkageSurface = "trigger" | "menu4";
+
+/**
+ * LIFF 連携 URL を env から解決する（純粋）。
+ * 未設定・空白のみは null（＝ prod fail-safe: ボタンを出さず従来テキストに倒す）。
+ */
+export function resolveLiffLinkageUrl(env: { LIFF_LINKAGE_URL?: string }): string | null {
+  const raw = env.LIFF_LINKAGE_URL?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+/**
+ * 連携招待の Flex（便益 1 行 + LIFF を開く URI ボタン）を組む（純粋・テスト可能）。
+ * leadText があれば便益行の前に添える（④定期便の generic 紹介を先頭に置く用途）。
+ * 絵文字・感嘆符は使わない（体験原則）。altText は通知プレビュー用の素文。
+ */
+export function buildLinkageInviteFlex(
+  liffUrl: string,
+  opts?: { leadText?: string },
+): { altText: string; contents: Record<string, unknown> } {
+  const bodyContents: Array<Record<string, unknown>> = [];
+  if (opts?.leadText) {
+    bodyContents.push({
+      type: "text",
+      text: opts.leadText,
+      wrap: true,
+      size: "sm",
+      color: "#555555",
+    });
+  }
+  bodyContents.push({
+    type: "text",
+    text: LINKAGE_BENEFIT_LINE,
+    wrap: true,
+    size: "sm",
+    color: "#333333",
+  });
+
+  const contents: Record<string, unknown> = {
+    type: "bubble",
+    body: { type: "box", layout: "vertical", spacing: "md", contents: bodyContents },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      contents: [
+        {
+          type: "button",
+          style: "primary",
+          height: "sm",
+          action: { type: "uri", label: LINKAGE_BUTTON_LABEL, uri: liffUrl },
+        },
+      ],
+    },
+  };
+  return { altText: LINKAGE_BENEFIT_LINE, contents };
+}
+
+/**
+ * LIFF 設定時のみ「便益 1 行 + 連携ボタン（LIFF を開く URI アクション）」の Flex を送り、
+ * flow_events(link.invite_shown, metadata.surface) を fire-and-forget で記録する（入り口 1a/1b 共通の核）。
+ *
+ * @param leadText Flex の便益行の前に添える文（任意）。
+ * @returns 出したら true（＝ボタンを提示）。LIFF 未設定（prod）なら false（何も送らない・呼び出し側が fail-safe を担う）。
+ */
+export async function emitLinkageButton(
+  lineUserId: string,
+  env: Env,
+  responder: LineResponder,
+  surface: LinkageSurface,
+  leadText?: string,
+): Promise<boolean> {
+  const liffUrl = resolveLiffLinkageUrl(env);
+  if (!liffUrl) return false;
+
+  // 便益 + ボタンを出す事実を先に記録する（fire-and-forget・送信前）。
+  //   既存の welcome.tap / welcome.source と同じ流儀: 「提示した」という導線事実は配信成否に依存させない
+  //   （下流の send が失敗しても記録は残す）。ファネル計測の欠測を防ぐ。
+  void logFlowEvent(createSupabaseClient(env), {
+    eventName: "link.invite_shown",
+    userRef: lineUserId,
+    metadata: { surface },
+  });
+  const flex = buildLinkageInviteFlex(liffUrl, { leadText });
+  await responder.flex(flex.altText, flex.contents);
+  return true;
+}
+
+/**
+ * トリガー経路（1a）の未連携ユーザーへ「連携招待」を送る。
+ *   - LIFF 設定あり（staging）: 便益 + 連携ボタン（Flex）＋ invite_shown 記録。
+ *   - LIFF 未設定（prod・fail-safe）: ボタンは出さず fallbackText（従来の案内テキスト）を送る。
+ */
+export async function sendLinkageInvite(
+  lineUserId: string,
+  env: Env,
+  responder: LineResponder,
+  fallbackText: string,
+): Promise<void> {
+  const shown = await emitLinkageButton(lineUserId, env, responder, "trigger");
+  if (!shown) await responder.text(fallbackText);
+}
+
+// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ）
 // ---------------------------------------------------------------------------
 
@@ -254,6 +369,11 @@ export function selectLinkageMessage(resolution: LinkageResolution): string {
  *
  * トリガー「アカウントを連携する」の完全一致のみ反応する。無関係発話は false を返して素通りさせ、
  * 既存の AI 会話・診断・注文照会・feedback を一切壊さない（menu-actions.ts と同じ後置・非侵襲設計）。
+ *
+ * 出し分け:
+ *   - 未連携 → 便益 + 連携ボタン（LIFF 設定時）/ 従来の案内テキスト（未設定時・fail-safe）。surface=trigger。
+ *   - 連携済み定期便 → 定期便客としての応答（従来どおり）。
+ *   - 連携済み非定期便 → 丁寧なお断り（従来どおり）。
  *
  * @returns 処理したら true（ここで応答完結）。トリガー非一致なら false。
  */
@@ -266,6 +386,17 @@ export async function handleLinkageFlow(
   if (userMessage.trim() !== LINKAGE_TRIGGER) return false;
 
   const resolution = await resolveLinkedSubscriber(lineUserId, env);
+  if (!resolution.linked) {
+    // 未連携: 便益 + ボタン（LIFF 設定時）。fail-safe は従来の案内テキスト（着地先も env 連動）。
+    await sendLinkageInvite(
+      lineUserId,
+      env,
+      responder,
+      buildLinkageInviteMessage(resolveLiffLinkageUrl(env)),
+    );
+    return true;
+  }
+  // 連携済み（定期便客 / 非定期便）は従来どおりテキスト応答。
   await responder.text(selectLinkageMessage(resolution));
   return true;
 }

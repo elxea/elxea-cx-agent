@@ -23,6 +23,7 @@ import {
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
 import { upsertCustomerLinkage } from "../lib/customer-linkage";
+import { logFlowEvent } from "../lib/flow-events";
 
 /**
  * POST /api/identity/link-line
@@ -274,6 +275,8 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
       lineUserId: line_messaging_user_id as string,
       shopifyCustomerId: normalized.numericId,
       shopifyEmail: shopify_email ?? null,
+      // 発生源（migration 026）: この経路の連携は必ず LIFF 由来。
+      source: "liff",
     });
 
     if (!result.ok) {
@@ -284,6 +287,20 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     console.log(
       `[identity/link-liff] linked messaging user ${result.lineUserId} <-> shopify ${result.shopifyCustomerId}`,
     );
+
+    // 連携完了を flow_events に記録（売上重大1対応・link.completed / metadata.source=liff）。
+    //   fire-and-forget。logFlowEvent は決して throw しない。応答（200）を遅らせないため
+    //   executionCtx があれば waitUntil に載せ、無い環境（テスト等）では即 await に倒す。
+    const linkCompletedLog = logFlowEvent(supabase, {
+      eventName: "link.completed",
+      userRef: result.lineUserId,
+      metadata: { source: "liff" },
+    });
+    try {
+      c.executionCtx.waitUntil(linkCompletedLog);
+    } catch {
+      await linkCompletedLog;
+    }
 
     return c.json({
       success: true,

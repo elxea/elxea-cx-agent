@@ -97,11 +97,25 @@ export const DORMANT_REENGAGEMENT_MESSAGE =
 
 /**
  * 未連携のお客さまが「アカウント連携」に触れたときの案内文（定期便の確認は連携が前提）。
- * URL は builder（subscriber-linkage.ts）が末尾に付す。
+ * URL は builder（subscriber-linkage.ts の buildLinkageInviteMessage）が末尾に付す。
+ * 着地先（体験重大3対応・2026-07-17）: LIFF_LINKAGE_URL が設定されていれば LIFF（マイページ相当）へ、
+ *   未設定（prod・fail-safe）は従来どおり elxea.com/ja へ。builder が env を見て URL を選ぶ。
  */
 export const LINKAGE_INVITE_BODY =
   "ご注文や定期便の状況をこのトークで確認いただくには、ご購入時のアカウントとの連携が必要です。" +
   "お手数ですが、マイページからアカウント連携をお願いします。連携後、このトークでご確認いただけます。";
+
+/**
+ * 連携の便益を伝える 1 行（トーク内入り口 = 完全一致トリガー / ④定期便の未連携分岐で共通・ブロック4）。
+ * 体験原則（統合設計書 §B / リポ CLAUDE.md）: 静か・絵文字/感嘆符なし・押し売りなし。
+ *   連携で「何ができるようになるか」を 1 文で伝えるにとどめ、緊急性・お得さの演出はしない。
+ * SoT: 本定数。文面は正本のブランド識別に、体験原則に沿う便益 1 文を足したもの。
+ */
+export const LINKAGE_BENEFIT_LINE =
+  "連携すると、お届けの状況や、あなたの好みに合わせたご案内を、このトークで受け取れるようになります。";
+
+/** 連携ボタンのラベル（LIFF を開く URI アクション・トリガー LINKAGE_TRIGGER と同一表記）。 */
+export const LINKAGE_BUTTON_LABEL = "アカウントを連携する";
 
 /**
  * 連携が完了し、定期便のご契約が確認できたお客さまへの応答（定期便客としての受け止め）。
