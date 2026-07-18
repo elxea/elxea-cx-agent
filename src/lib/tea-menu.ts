@@ -40,6 +40,7 @@ import {
   NEXT_CUP_GOOD_THANKS,
   NEXT_CUP_DECLINE_MESSAGE,
   nextCupSuggestionSentence,
+  TEA_SHOP_REFERRAL_LINE,
 } from "./brand-copy";
 
 // ---------------------------------------------------------------------------
@@ -369,7 +370,8 @@ function nextStepQuickReplies(
 /** お茶カード。origin=diagnosis なら card→感想 チェーンに出所を継承する。 */
 export function buildTeaCard(tea: TeaItem, origin?: Origin): OutMessage {
   const desc = tea.descShort.trim() ? `\n${tea.descShort.trim()}` : "";
-  const text = `${tea.name}（No.${tea.number}）${desc}\n\n知りたいことをどうぞ。`;
+  // 送客リンク 1 本（Sales S-1）: 高インテント地点（カード末尾）に静かに添える。押し売りしない。
+  const text = `${tea.name}（No.${tea.number}）${desc}\n\n知りたいことをどうぞ。\n\n${TEA_SHOP_REFERRAL_LINE}`;
   return { text, quickReplies: cardItemQuickReplies(tea, undefined, origin) };
 }
 
@@ -469,8 +471,9 @@ export function buildRateThanksGood(
   if (!suggestion) {
     return { text: head, quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)] };
   }
+  // 送客リンク 1 本（Sales S-1）: 「おいしかった」直後の高インテント地点に、次の一杯と併せて静かに添える。
   return {
-    text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}`,
+    text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}\n\n${TEA_SHOP_REFERRAL_LINE}`,
     quickReplies: [
       qr(`${suggestion.name}を見る`, `${TOK.card}${suggestion.number}`),
       qr("🍃 別のお茶を見る", BACK_TO_LIST),

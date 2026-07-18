@@ -24,6 +24,7 @@ import {
 import { requireSyncApiKey } from "../lib/sync-auth";
 import { upsertCustomerLinkage } from "../lib/customer-linkage";
 import { logFlowEvent } from "../lib/flow-events";
+import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 
 /**
  * POST /api/identity/link-line
@@ -280,6 +281,16 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     });
 
     if (!result.ok) {
+      // 世帯共有/付け替え（N:1）で shopify_customer_id の UNIQUE と衝突した場合は 500 でなく 409。
+      //   staging は migration 027 で UNIQUE を緩めるためこの経路には入らない。prod は 027 未適用の間の
+      //   fail-safe（別の LINE が同じ Shopify 顧客に連携しようとしたときに 500 を返さない）。
+      if (result.conflict === "shopify_customer_id") {
+        console.warn(
+          "[identity/link-liff] shopify_customer_id already linked (N:1 blocked by pre-027 UNIQUE):",
+          result.error,
+        );
+        return c.json({ error: "shopify_customer_already_linked" }, 409);
+      }
       console.error("[identity/link-liff] upsert failed:", result.error);
       return c.json({ error: "Failed to persist linkage" }, 500);
     }
@@ -287,6 +298,32 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     console.log(
       `[identity/link-liff] linked messaging user ${result.lineUserId} <-> shopify ${result.shopifyCustomerId}`,
     );
+
+    // QA S-1: 連携成立時に未連携カルテ（lineUsers）の好みを users へ累積統合する（冪等・best-effort）。
+    //   併せて「連携先に注文/定期便があるか」を判定し、web-app の完了画面コピー分岐（CX S2）に渡す。
+    //   Firestore 未設定・失敗でも連携は成立済み（200）を返す。過大約束を避けるため既定は false。
+    let hasPurchaseActivity = false;
+    try {
+      const fsEnv = getFirestoreEnv(c.env);
+      const mergeTask = (async () => {
+        const merged = await mergeLineUserIntoShopify(
+          result.lineUserId,
+          result.shopifyCustomerId,
+          fsEnv,
+        );
+        return (
+          merged?.isSubscriber === true ||
+          (merged?.lastPurchaseAt != null && merged.lastPurchaseAt !== "")
+        );
+      })();
+      // 応答を遅らせないよう merge/判定は待つが、失敗しても連携成立は保つ。
+      hasPurchaseActivity = await mergeTask;
+    } catch (err) {
+      console.warn(
+        "[identity/link-liff] preference merge / activity check skipped:",
+        err instanceof Error ? err.message : err,
+      );
+    }
 
     // 連携完了を flow_events に記録（売上重大1対応・link.completed / metadata.source=liff）。
     //   fire-and-forget。logFlowEvent は決して throw しない。応答（200）を遅らせないため
@@ -306,6 +343,8 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
       success: true,
       line_user_id: result.lineUserId,
       shopify_customer_id: result.shopifyCustomerId,
+      // 連携先に注文/定期便があるか（web-app 完了画面の過大約束回避に使う・CX S2）。
+      has_purchase_activity: hasPurchaseActivity,
     });
   } catch (err) {
     console.error("[identity/link-liff] error:", err);

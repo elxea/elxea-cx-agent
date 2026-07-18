@@ -457,19 +457,22 @@ async function handleFollowEvent(
       // 注: 直接的なマッチングは困難なため、line_user_id が null のレコードのうち
       // 最近作成されたものに line_user_id を設定するのではなく、
       // customer_linkages テーブルも活用する
+      // QA M-2: customer_linkages に `email` 列は存在しない（実列は migrations/002:8 の `shopify_email`）。
+      //   誤って email を select すると Supabase が列不在エラーを返し、この email 橋渡し経路が常に失敗していた。
+      //   なお値の実体は LIFF id_token 由来の「LINE 登録メール」（shopify.ts:186 等も同じく shopify_email を使う）。
       const { data: linkage } = await supabase
         .from("customer_linkages")
-        .select("shopify_customer_id, email")
+        .select("shopify_customer_id, shopify_email")
         .eq("line_user_id", lineUserId)
         .single();
 
-      if (linkage?.email) {
-        // customer_linkages 経由で email が取得できた場合、
+      if (linkage?.shopify_email) {
+        // customer_linkages 経由でメール（LINE 登録メール）が取得できた場合、
         // user_identity_map で同じ email のレコードに line_user_id を設定
         const { data: identityByEmail } = await supabase
           .from("user_identity_map")
           .select("id, unified_user_id, line_user_id")
-          .eq("email", linkage.email)
+          .eq("email", linkage.shopify_email)
           .single();
 
         if (identityByEmail && !identityByEmail.line_user_id) {

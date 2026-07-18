@@ -71,7 +71,7 @@ async function main() {
     console.log(`Applied ${file} (idempotent).`);
   }
 
-  // 検証: customer_linkages.source 列が存在するか。
+  // 検証(1・smoke): customer_linkages.source 列が存在するか（026 由来・全実行共通のヘルスチェック）。
   const { rows } = await client.query(
     `SELECT column_name, data_type FROM information_schema.columns
      WHERE table_schema='public' AND table_name='customer_linkages' AND column_name='source'`,
@@ -82,6 +82,28 @@ async function main() {
     console.error("[FAIL] customer_linkages.source 列が見つからない。");
     await client.end();
     process.exit(1);
+  }
+
+  // 検証(2): 027（カーディナリティ緩和）を適用したときは、shopify_customer_id の単一列 UNIQUE が
+  //   消えている（= N:1 が許可された）ことを確認する。
+  if (files.some((f) => /027/.test(f))) {
+    const { rows: uniq } = await client.query(
+      `SELECT con.conname
+       FROM pg_constraint con
+       JOIN pg_class rel ON rel.oid = con.conrelid
+       JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+       JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = ANY (con.conkey)
+       WHERE nsp.nspname='public' AND rel.relname='customer_linkages'
+         AND con.contype='u' AND att.attname='shopify_customer_id'
+         AND array_length(con.conkey, 1) = 1`,
+    );
+    if (uniq.length === 0) {
+      console.log("[OK] customer_linkages.shopify_customer_id の単一列 UNIQUE は無し（N:1 許可・027 適用済）。");
+    } else {
+      console.error(`[FAIL] shopify_customer_id の UNIQUE がまだ存在する: ${JSON.stringify(uniq)}`);
+      await client.end();
+      process.exit(1);
+    }
   }
 
   await client.end();

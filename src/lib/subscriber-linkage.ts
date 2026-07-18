@@ -32,8 +32,10 @@ import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
   getCustomerProfile,
   getFirestoreEnv,
+  getLineUserProfile,
   type CustomerProfile,
   type FirestoreEnv,
+  type LineUserProfile,
 } from "./firestore";
 import {
   LINKAGE_INVITE_BODY,
@@ -41,6 +43,7 @@ import {
   NON_SUBSCRIBER_DECLINE_BODY,
   LINKAGE_BENEFIT_LINE,
   LINKAGE_BUTTON_LABEL,
+  MARCHE_LINKAGE_SOFT_ACK,
   SITE_URL_JA,
 } from "./brand-copy";
 import { logFlowEvent } from "./flow-events";
@@ -361,6 +364,46 @@ export async function sendLinkageInvite(
 }
 
 // ---------------------------------------------------------------------------
+// マルシェ流入ゲート（空振り連携の抑止・CX S1/S2）
+// ---------------------------------------------------------------------------
+
+/** isMarcheSourceUser のテスト用依存注入（本番は未指定で実 Firestore を読む）。 */
+export type MarcheSourceDeps = {
+  getLineProfile?: (
+    lineUserId: string,
+    fsEnv: FirestoreEnv,
+  ) => Promise<LineUserProfile | null>;
+};
+
+/**
+ * この LINE ユーザーが「マルシェ・イベント流入」（welcome.source=marche）かを判定する（CX S1/S2）。
+ *
+ * 判定源: lineUsers/{lineUserId}.onboarding.source（welcome-onboarding が友だち追加直後に永続記録済み）。
+ * これを「設計要件『マルシェ客には連携ボタンを出さない』を運用でなくコードのゲートに格上げ」する材料にする。
+ *
+ * best-effort（安全側 = 従来動作を保つ）: Firestore 未設定・取得失敗・source 未回答のときは false を返す。
+ *   → false のときは従来どおり連携導線を出す（マルシェと確証が取れないユーザーを取りこぼさない）。
+ */
+export async function isMarcheSourceUser(
+  lineUserId: string,
+  env: Env,
+  deps?: MarcheSourceDeps,
+): Promise<boolean> {
+  try {
+    const fsEnv = getFirestoreEnv(env);
+    const getLine = deps?.getLineProfile ?? getLineUserProfile;
+    const profile = await getLine(lineUserId, fsEnv);
+    return profile?.onboarding?.source === "marche";
+  } catch (err) {
+    console.warn(
+      "[subscriber-linkage] marche-source check skipped (treating as non-marche):",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ）
 // ---------------------------------------------------------------------------
 
@@ -387,6 +430,13 @@ export async function handleLinkageFlow(
 
   const resolution = await resolveLinkedSubscriber(lineUserId, env);
   if (!resolution.linked) {
+    // マルシェ流入のお客さまには連携ボタンを出さない（空振り連携の抑止・CX S1/S2）。
+    //   マルシェ客はオンラインのご購入アカウントを持たないことが多く、連携を促すと袋小路になる。
+    //   明示トリガーでも押し売りにせず、静かな受け止めに着地する（沈黙にはしない）。
+    if (await isMarcheSourceUser(lineUserId, env)) {
+      await responder.text(MARCHE_LINKAGE_SOFT_ACK);
+      return true;
+    }
     // 未連携: 便益 + ボタン（LIFF 設定時）。fail-safe は従来の案内テキスト（着地先も env 連動）。
     await sendLinkageInvite(
       lineUserId,

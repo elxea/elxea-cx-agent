@@ -18,7 +18,11 @@
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { ABOUT_BLURB } from "./brand-copy";
-import { resolveLinkedSubscriber, emitLinkageButton } from "./subscriber-linkage";
+import {
+  resolveLinkedSubscriber,
+  emitLinkageButton,
+  isMarcheSourceUser,
+} from "./subscriber-linkage";
 
 // ---------------------------------------------------------------------------
 // トリガー（リッチメニュー message text と完全一致）
@@ -177,7 +181,11 @@ export async function handleMenuActionFlow(
           err instanceof Error ? err.message : err,
         );
       }
-      await emitLinkageButton(lineUserId, env, responder, "menu4");
+      // マルシェ流入のお客さまには連携ボタンを出さない（空振り連携の抑止・CX S1/S2）。
+      //   マルシェ客は generic 紹介のみで着地（連携の袋小路に誘導しない）。設計要件をコードのゲートに格上げ。
+      if (!(await isMarcheSourceUser(lineUserId, env))) {
+        await emitLinkageButton(lineUserId, env, responder, "menu4");
+      }
     }
     return true;
   }

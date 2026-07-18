@@ -803,6 +803,128 @@ export function mergePersonaScores(
 }
 
 // ---------------------------------------------------------------------------
+// 連携時の好み引き継ぎ（lineUsers → users マージ）— QA S-1（連携で好みが消える問題）
+// ---------------------------------------------------------------------------
+
+/** ペルソナ scores を「軸ごとに累積加算」する（純粋・mergePersonaScores と同じ流儀・上書きしない）。 */
+function addPersonaScores(a: PersonaScores, b: PersonaScores): PersonaScores {
+  return {
+    serenity: (a.serenity ?? 0) + (b.serenity ?? 0),
+    explorer: (a.explorer ?? 0) + (b.explorer ?? 0),
+    sensory: (a.sensory ?? 0) + (b.sensory ?? 0),
+  };
+}
+
+/**
+ * 2 つの PersonaProfile を累積統合する（純粋・I/O なし）。
+ * scores は軸ごとに加算（`mergePersonaScores` 流儀・どちらも上書きしない）、primary は加算後の最大軸で再計算。
+ * どちらか一方が未定義ならもう一方をそのまま返す（統合すべき好みが無いときは base を返す）。
+ */
+export function mergePersonaProfiles(
+  base: PersonaProfile | undefined,
+  incoming: PersonaProfile | undefined,
+): PersonaProfile | undefined {
+  if (!incoming) return base;
+  if (!base) return incoming;
+  const scores = addPersonaScores(base.scores, incoming.scores);
+  const primary = (
+    Object.entries(scores) as Array<[PersonaType, number]>
+  ).reduce((x, y) => (y[1] > x[1] ? y : x))[0];
+  return { primary, scores, lastUpdated: new Date().toISOString() };
+}
+
+/**
+ * 2 つの TasteProfile を union 統合する（純粋・I/O なし・computeTasteProfileUpdates と同じ union 流儀）。
+ * 配列は重複排除して結合（上限50・古いものから削除）、scenePref は既存が空なら incoming を採る。
+ */
+export function mergeTasteProfiles(
+  base: TasteProfile | undefined,
+  incoming: TasteProfile | undefined,
+): TasteProfile | undefined {
+  if (!incoming) return base;
+  if (!base) return incoming;
+  const MAX = 50;
+  return {
+    preferredCategories: [
+      ...new Set([...base.preferredCategories, ...incoming.preferredCategories]),
+    ].slice(-MAX),
+    flavorPreferences: [
+      ...new Set([...base.flavorPreferences, ...incoming.flavorPreferences]),
+    ].slice(-MAX),
+    scenePref: base.scenePref ?? incoming.scenePref ?? null,
+  };
+}
+
+/**
+ * 連携成立時に未連携カルテ（lineUsers/{lineUserId}）の好み（persona / tasteProfile）を
+ * 連携済みカルテ（users/{shopifyCustomerId}）へ **累積統合** する（QA S-1 の恒久修正）。
+ *
+ * 冪等性（二重加算の防止）:
+ *   - lineUsers.mergedToShopify === true なら即 no-op（既に統合済み）。統合が済んだら true を立てる。
+ *   - 統合は「加算」なので本質的に非冪等だが、この mergedToShopify フラグでガードすることで
+ *     書き込み経路（連携ハンドラ）と読み取り経路（core.ts のフォールバック）が何度呼んでも
+ *     実際の加算は 1 回だけになる。
+ *
+ * fail-safe: 呼び出し側（連携ハンドラ / personalization）が try/catch で握る前提。ここでは
+ *   握らず、Firestore エラーはそのまま投げる（呼び出し側が best-effort に倒す）。
+ *
+ * @returns 統合後の users プロファイル（読み取り時フォールバックがそのまま使えるよう返す）。
+ *          統合不要（未マージの好みが無い / 既に統合済み）のときは既存 users プロファイルを返す。
+ */
+export async function mergeLineUserIntoShopify(
+  lineUserId: string,
+  shopifyCustomerId: string,
+  env: FirestoreEnv,
+  opts?: {
+    existingShopify?: CustomerProfile | null;
+    existingLine?: LineUserProfile | null;
+  },
+): Promise<CustomerProfile | null> {
+  const lineProfile =
+    opts?.existingLine !== undefined
+      ? opts.existingLine
+      : await getLineUserProfile(lineUserId, env);
+
+  const resolveShopify = async (): Promise<CustomerProfile | null> =>
+    opts?.existingShopify !== undefined
+      ? opts.existingShopify
+      : await getCustomerProfile(shopifyCustomerId, env);
+
+  // 既に統合済み / lineUsers が無い → 何もしない（users をそのまま返す）。
+  if (!lineProfile || lineProfile.mergedToShopify === true) {
+    return resolveShopify();
+  }
+
+  const shopifyProfile = await resolveShopify();
+
+  // 統合すべき好みが無い → フラグだけ立てて以降の二度読みを止める。
+  if (!lineProfile.persona && !lineProfile.tasteProfile) {
+    await updateLineUserProfile(lineUserId, { mergedToShopify: true }, env);
+    return shopifyProfile;
+  }
+
+  const mergedPersona = mergePersonaProfiles(
+    shopifyProfile?.persona,
+    lineProfile.persona,
+  );
+  const mergedTaste = mergeTasteProfiles(
+    shopifyProfile?.tasteProfile,
+    lineProfile.tasteProfile,
+  );
+
+  const updates: Partial<CustomerProfile> = {};
+  if (mergedPersona) updates.persona = mergedPersona;
+  if (mergedTaste) updates.tasteProfile = mergedTaste;
+  if (Object.keys(updates).length > 0) {
+    await updateCustomerProfile(shopifyCustomerId, updates, env);
+  }
+  // 二重加算を防ぐため lineUsers 側に統合済みフラグを立てる（users 書込の後に立てる）。
+  await updateLineUserProfile(lineUserId, { mergedToShopify: true }, env);
+
+  return { ...(shopifyProfile ?? {}), ...updates };
+}
+
+// ---------------------------------------------------------------------------
 // TasteProfile / PersonaProfile 更新（嗜好抽出パイプライン用）
 // ---------------------------------------------------------------------------
 
