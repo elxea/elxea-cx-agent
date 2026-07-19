@@ -105,6 +105,26 @@ function categoryMatches(teaCategory: string, preferred: string[] | undefined | 
 }
 
 /**
+ * preferredCategories（購入/会話由来の明示カテゴリ slug または日本語ラベル）から、対応する
+ * 表示用の日本語カテゴリラベル（緑茶 / 青茶 / 紅茶）を 1 つ返す（純粋・大小無視・トリム）。
+ *
+ * 用途: 休眠再エンゲージ #②-3 の個別最適で「以前お好みだった{ラベル}に近いお茶」という文言を作るため、
+ *   カルテの「好きなカテゴリ」を人が読める日本語ラベルへ逆引きする。CATEGORY_FAMILY を SoT として再利用し
+ *   （次の一杯 #2 / 一覧の出し分け #②-2 と同じ語彙）、カテゴリ語彙のドリフトを防ぐ。
+ * 複数一致時は CATEGORY_FAMILY の宣言順（緑茶 → 青茶 → 紅茶）で最初の一致を返す（決定的）。
+ * 一致なし・空・null は null（＝個別最適の手がかり無し → 呼び出し側は generic に倒す）。
+ */
+export function categoryLabelForPreferred(
+  preferred: string[] | undefined | null,
+): string | null {
+  if (!preferred || preferred.length === 0) return null;
+  for (const label of Object.keys(CATEGORY_FAMILY)) {
+    if (categoryMatches(label, preferred)) return label;
+  }
+  return null;
+}
+
+/**
  * flavorPreferences から香り軸(aroma)の希望を導く（純粋）。classifyAroma と同語彙で対応づける。
  *   甘い/sweet/まろやか/mellow → rich。dry 側は flavor 語彙に明確な対応がないため導出しない（null）。
  */

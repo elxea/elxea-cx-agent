@@ -44,7 +44,15 @@ import {
 } from "./message-ledger";
 import { resolveDeliveryChannel } from "./delivery-channel";
 import { jstYyyymmdd, isValidAggregationUnit } from "./aggregation-unit";
-import { DORMANT_REENGAGEMENT_MESSAGE } from "./brand-copy";
+import {
+  DORMANT_REENGAGEMENT_MESSAGE,
+  buildDormantReengagementMessage,
+  dormantCategoryReferencePhrase,
+  DORMANT_TASTE_REFERENCE_SERENITY,
+  DORMANT_TASTE_REFERENCE_SENSORY,
+} from "./brand-copy";
+import { categoryLabelForPreferred, type NextCupKarte } from "./next-cup";
+import { loadCustomerKarte } from "./customer-karte";
 
 // -------------------------------------------------------------------
 // 定数
@@ -230,6 +238,45 @@ export function dormantAggregationUnit(date: Date = new Date()): string {
 }
 
 // -------------------------------------------------------------------
+// カルテ個別最適（純粋・監査 punch-list #②-3）
+//   休眠一通を「その人のたまったカルテ」で出し分ける。会話側 core.ts / 次の一杯 #2 / 一覧の出し分け
+//   #②-2 と同じ persona / tasteProfile を読み、好みに合う参照（カテゴリ / 味の傾き）を本文に織り込む。
+//   カルテが空・手がかり無しなら generic に倒す（no-karte ユーザーは完全に従来挙動＝無回帰）。
+// -------------------------------------------------------------------
+
+/**
+ * カルテ（persona / tasteProfile）から休眠一通の「参照句」を導く（純粋・#②-3）。
+ *
+ * 重み付けは次の一杯 #2（karteAffinity）と同じ思想を再利用し一貫させる:
+ *   優先1（強い明示シグナル）: tasteProfile.preferredCategories → 日本語カテゴリラベル
+ *     （next-cup.categoryLabelForPreferred・CATEGORY_FAMILY 由来）。#2 の「カテゴリ一致 +2」に対応。
+ *   優先2（弱い prior）: persona の傾き。serenity→まろやかな甘み / sensory→しっかりしたコク
+ *     （next-cup の personaAromaLean / personaBodyLean と同根拠）。#2 の「persona 傾き +1」に対応。
+ *   explorer（動機/新規性軸で味の傾きが定まらない）・カルテ空は参照句を作らない → null。
+ *
+ * @returns 末尾が「お茶」で終わる名詞句（buildDormantReengagementMessage に渡す）。手がかり無しは null。
+ */
+export function deriveDormantReferencePhrase(
+  karte: NextCupKarte | null | undefined,
+): string | null {
+  if (!karte) return null;
+  const label = categoryLabelForPreferred(karte.tasteProfile?.preferredCategories);
+  if (label) return dormantCategoryReferencePhrase(label);
+  if (karte.persona === "serenity") return DORMANT_TASTE_REFERENCE_SERENITY;
+  if (karte.persona === "sensory") return DORMANT_TASTE_REFERENCE_SENSORY;
+  return null;
+}
+
+/**
+ * 休眠候補 1 人に送る本文を、その人のカルテで組む（純粋・#②-3）。
+ * カルテに手がかりが無い（null / explorer / 未診断・未収集）ときは generic 版へ倒す（無回帰）。
+ * 出力トーン・骨格・長さは generic と共有し、真ん中の 1 文だけがカルテで変わる（explainable）。
+ */
+export function buildDormantBody(karte: NextCupKarte | null | undefined): string {
+  return buildDormantReengagementMessage(deriveDormantReferencePhrase(karte));
+}
+
+// -------------------------------------------------------------------
 // オーケストレーション（DI・テストは fake を注入し純粋に保つ）
 // -------------------------------------------------------------------
 
@@ -243,6 +290,12 @@ export interface DormantReengagementDeps {
   loadLineUsers(): Promise<LineUserActivity[]>;
   /** sent=true かつ sent_at>=now-90日 の line_user_id 集合（再送ガード）。 */
   loadRecentlySent(): Promise<Set<string>>;
+  /**
+   * 候補 1 人のカルテ（persona / tasteProfile）を読む（個別最適 #②-3）。
+   * 省略時は本文が generic 固定（後方互換）。既定（runDormantReengagement）は loadCustomerKarte で、
+   * 会話側 core.ts / 次の一杯 #2 と同じ源を読む。fail-safe（Firebase 未設定・失敗は空カルテ）が期待仕様。
+   */
+  loadKarte?(lineUserId: string): Promise<NextCupKarte>;
   /** 決定行を冪等 upsert（同一 line_user_id×decision_date は 1 行）。 */
   recordDecision(input: DecisionRecord): Promise<void>;
   /** 実送信の予算/台帳ガード＋claim（message-ledger 経由）。dry-run では呼ばれない。 */
@@ -259,10 +312,14 @@ export interface DormantReengagementDeps {
  * 手順:
  *   1. lineUsers 全走査 + 再送ガード集合を並列取得。
  *   2. 休眠候補を選定（上限クリップ）。
- *   3. 候補ごとに: 決定行を必ず記録（冪等）。
- *      - sendEnabled=false（既定）: dry-run（送らず記録だけ）。
- *      - sendEnabled=true: 予算 claim → LINE push → sent 記録。予算不足は budget_blocked。
+ *   3. 候補ごとに: 個別最適本文を組む（#②-3）→ 決定行を必ず記録（冪等）。
+ *      - 本文: deps.loadKarte があればカルテで出し分け（buildDormantBody・手がかり無しは generic）。
+ *        loadKarte 省略時は引数 body 固定（後方互換）。個別最適は「本文の中身」だけを変える。
+ *      - sendEnabled=false（既定）: dry-run（送らず個別最適本文を記録だけ）。
+ *      - sendEnabled=true: 予算 claim → LINE push（個別最適本文）→ sent 記録。予算不足は budget_blocked。
  *   候補ごとの例外は握って continue（1 件の失敗で全体を止めない）。
+ *
+ * @param body カルテの手がかりが無い / loadKarte 未指定のときに使う generic 本文（既定 = ブランド正本）。
  */
 export async function runDormantReengagementWith(
   deps: DormantReengagementDeps,
@@ -294,13 +351,28 @@ export async function runDormantReengagementWith(
   for (const c of candidates) {
     const masked = maskUserRef(c.lineUserId);
     try {
-      // 決定は常に記録（dry-run でも観測できるように・冪等）。
+      // 個別最適 #②-3: この候補のカルテで本文を出し分ける。
+      //   - deps.loadKarte 省略 → generic body 固定（後方互換・既存ユニットテスト経路）。
+      //   - loadKarte 由来のカルテを buildDormantBody に通す（手がかり無し＝空カルテは generic に倒れる）。
+      //   - 万一 loadKarte が throw しても generic に倒して送信/記録を止めない（fail-safe・no-karte 相当）。
+      //   本文は「dry-run でも実送信でも同じ personalizedBody」を使う。送信可否は sendEnabled だけが握る
+      //   （個別最適は本文の中身を変えるだけで、送信ゲート＝DORMANT_SEND_ENABLED には一切触れない）。
+      let personalizedBody = body;
+      if (deps.loadKarte) {
+        try {
+          personalizedBody = buildDormantBody(await deps.loadKarte(c.lineUserId));
+        } catch {
+          personalizedBody = body;
+        }
+      }
+
+      // 決定は常に記録（dry-run でも観測できるように・冪等）。台帳には「送るはずだった個別最適本文」を残す。
       await deps.recordDecision({
         lineUserId: c.lineUserId,
         decisionDate,
         lastActiveAt: c.lastActiveAt,
         dryRun: !deps.sendEnabled,
-        bodyPreview: body,
+        bodyPreview: personalizedBody,
         aggregationUnit: unit,
       });
 
@@ -317,7 +389,7 @@ export async function runDormantReengagementWith(
         details.push({ userRefMasked: masked, action: "budget_blocked", reason: claim.reason });
         continue;
       }
-      await deps.sendMessage(c.lineUserId, body, unit);
+      await deps.sendMessage(c.lineUserId, personalizedBody, unit);
       await deps.markSent(c.lineUserId, decisionDate, now.toISOString());
       sent++;
       details.push({ userRefMasked: masked, action: "sent" });
@@ -556,6 +628,13 @@ export async function runDormantReengagement(
             (data ?? []).map((r: { line_user_id: string }) => r.line_user_id),
           );
         }),
+      // 個別最適 #②-3: 候補のカルテを会話側 core.ts / 次の一杯 #2 と同じ源（loadCustomerKarte）から読む。
+      //   fail-safe: Firebase 未設定・リンク解決失敗・Firestore 読取失敗は空カルテ（generic に倒れる）。
+      //   これは read-only（送信ではない）。送信ゲート（DORMANT_SEND_ENABLED）とは独立で、dry-run でも
+      //   「送るはずだった個別最適本文」を台帳に残すために読む（本番でも fail-safe に無回帰）。
+      loadKarte:
+        overrides?.loadKarte ??
+        ((lineUserId: string) => loadCustomerKarte(lineUserId, env, sb)),
       recordDecision:
         overrides?.recordDecision ??
         (async (input) => {
