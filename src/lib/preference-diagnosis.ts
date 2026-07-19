@@ -31,7 +31,8 @@ import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { logFlowEvent, type FlowEventInput } from "./flow-events";
-import { diagnosisCardToken } from "./tea-menu";
+import { diagnosisCardToken, fetchSellingTeas, type TeaItem } from "./tea-menu";
+import { karteAffinity, type NextCupKarte } from "./next-cup";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
   getFirestoreEnv,
@@ -42,6 +43,7 @@ import {
   mergePersonaScores,
   type PersonaType,
   type PersonaScores,
+  type TasteProfile,
   type CustomerProfile,
   type LineUserProfile,
 } from "./firestore";
@@ -232,69 +234,130 @@ export function buildQ3(q1: number, q2: number): OutMessage {
   };
 }
 
+
+// ---------------------------------------------------------------------------
+// 結果おすすめ（動的解決・監査 #6）: persona/味の好み × 販売中カタログ → おすすめ銘柄
+// ---------------------------------------------------------------------------
+
 /**
- * タイプ別おすすめ（採用 3 種・番号は Tea Menu DB Status=販売中 の title を SoT とする）。
- * おすすめボタンは `diagnosisCardToken`（`このお茶｜{番号}｜診断`）で「診断出所」を乗せる（ブロック3-A 1(a)）:
- *   到達したお茶カードは tea.card_view value=diagnosis を記録し、そのカードの感想タップは
- *   product_ratings に source=diagnosis で記録される（飲む前の評価は求めない＝静かで丁寧）。
+ * タイプ別の受け止め文（persona reveal・純粋）。おすすめ銘柄はここに書かず、販売中カタログから動的解決する。
+ * 監査 #6 是正: 旧実装は 5 桁番号をハードコードしており、販売終了・番号変更で「見つかりません」化した。
+ *   受け止め（あなたは〇〇な人）はブランド体験の核なので定数として保持し、銘柄だけを動的化する。
  */
-const RESULTS: Record<PersonaType, OutMessage> = {
-  serenity: {
-    text:
-      "あなたは【静けさを愉しむ人】。\n" +
-      "一日のあわいに、そっと心をほどく時間を大切にされる方ですね。\n" +
-      "まろやかな甘みと穏やかな香りのお茶が、よく似合います。\n\n" +
-      "おすすめは、この3つ。\n" +
-      "40101 春摘み香駿の和烏龍茶／ミルキーな香りと柔らかな甘み\n" +
-      "40601 さやまかおりの和烏龍茶／重なる香りと上品な甘みの余韻\n" +
-      "10501 みなみさやかの萎凋釜炒り茶／花と蜜のような、静かな一杯\n\n" +
-      "気になるお茶は、下のボタンか、番号（例 40101）を送ってくださいね。",
-    quickReplies: [
-      qr("40101 香駿の和烏龍茶", diagnosisCardToken("40101")),
-      qr("40601 さやまかおりの烏龍", diagnosisCardToken("40601")),
-      qr("10501 みなみさやか", diagnosisCardToken("10501")),
-      qr("もっと相談する", CONSULT_MORE_TEXT),
-    ],
-  },
-  explorer: {
-    text:
-      "あなたは【お茶の世界を旅する人】。\n" +
-      "一杯ごとの違いや、つくり手の物語に心が動く方ですね。\n" +
-      "珍しい品種や、ひと手間かけた製法のお茶を、ぜひ。\n\n" +
-      "おすすめは、この3つ。\n" +
-      "10201 静七一三二の萎凋煎茶／珍しい品種を萎凋させた、桜のような香り\n" +
-      "40201 香駿の和烏龍茶／黄桃のような香り、何煎も変わる表情\n" +
-      "11501 うんかいの萎凋釜炒り茶／白い小花の香りと釜炒りの滋味\n\n" +
-      "気になるお茶は、下のボタンか、番号（例 10201）を送ってくださいね。",
-    quickReplies: [
-      qr("10201 静七一三二の萎凋煎茶", diagnosisCardToken("10201")),
-      qr("40201 香駿の和烏龍茶", diagnosisCardToken("40201")),
-      qr("11501 うんかいの釜炒り茶", diagnosisCardToken("11501")),
-      qr("もっと相談する", CONSULT_MORE_TEXT),
-    ],
-  },
-  sensory: {
-    text:
-      "あなたは【味わいを深く愉しむ人】。\n" +
-      "甘み、渋み、コク、余韻——その輪郭をじっくり味わう方ですね。\n" +
-      "味の芯がはっきりしたお茶と、食べ合わせがよく合います。\n\n" +
-      "おすすめは、この3つ。\n" +
-      "50401 春摘みべにふうきの和紅茶／フルーティな甘みと渋みが一体に\n" +
-      "10801 みらいの上煎茶／クリアな味わいに、美しい渋みとコク\n" +
-      "11601 さえみどりの上煎茶／上品な旨みと奥ゆかしい渋み、食後にも\n\n" +
-      "気になるお茶は、下のボタンか、番号（例 50401）を送ってくださいね。",
-    quickReplies: [
-      qr("50401 春摘みべにふうき紅茶", diagnosisCardToken("50401")),
-      qr("10801 みらいの上煎茶", diagnosisCardToken("10801")),
-      qr("11601 さえみどりの上煎茶", diagnosisCardToken("11601")),
-      qr("もっと相談する", CONSULT_MORE_TEXT),
-    ],
-  },
+const PERSONA_INTRO: Record<PersonaType, string> = {
+  serenity:
+    "あなたは【静けさを愉しむ人】。\n" +
+    "一日のあわいに、そっと心をほどく時間を大切にされる方ですね。\n" +
+    "まろやかな甘みと穏やかな香りのお茶が、よく似合います。",
+  explorer:
+    "あなたは【お茶の世界を旅する人】。\n" +
+    "一杯ごとの違いや、つくり手の物語に心が動く方ですね。\n" +
+    "珍しい品種や、ひと手間かけた製法のお茶を、ぜひ。",
+  sensory:
+    "あなたは【味わいを深く愉しむ人】。\n" +
+    "甘み、渋み、コク、余韻——その輪郭をじっくり味わう方ですね。\n" +
+    "味の芯がはっきりしたお茶と、食べ合わせがよく合います。",
 };
 
-/** 結果メッセージ（winner タイプの文面 + おすすめ 4 ボタン）。 */
-export function buildResult(winner: PersonaType): OutMessage {
-  return RESULTS[winner];
+/** おすすめ提示件数（販売中カタログから上位 N 件）。 */
+const DIAGNOSIS_RECOMMEND_COUNT = 3;
+
+/** LINE quick reply ラベル上限（20 文字・tea-menu.QR_LABEL_MAX と同値）。 */
+const QR_LABEL_MAX = 20;
+
+/** ラベルを 20 文字に収める（超過は末尾を … に置換）。 */
+function truncateLabel(s: string): string {
+  return s.length > QR_LABEL_MAX ? s.slice(0, QR_LABEL_MAX - 1) + "…" : s;
+}
+
+/**
+ * 診断の味の問い（Q2）を「次の一杯」と同じ flavor 語彙へ写す（純粋）。軸解決は next-cup.karteAffinity に委譲。
+ * これで診断結果（persona + 味の好み）が販売中カタログの銘柄選定に反映される（reuse・一貫性）。
+ *   Q2-1 まろやかな甘み → rich 香り / Q2-3 コク・余韻 → full ボディ / Q2-4 すっきり軽やか → light ボディ。
+ *   Q2-2「香り高く個性」は 2 軸へ一意に写せないため null（persona 傾きのみで並べる）。
+ */
+export function tasteFromDiagnosisQ2(q2: number): TasteProfile | null {
+  switch (q2) {
+    case 1:
+      return { preferredCategories: [], flavorPreferences: ["sweet", "mellow"], scenePref: null };
+    case 3:
+      return { preferredCategories: [], flavorPreferences: ["rich"], scenePref: null };
+    case 4:
+      return { preferredCategories: [], flavorPreferences: ["refreshing"], scenePref: null };
+    default:
+      return null;
+  }
+}
+
+/**
+ * 診断結果（winner persona [+ 味の好み Q2]）を「次の一杯」と同じカルテ表現へ束ねる（純粋）。
+ * karteAffinity がこの persona / tasteProfile を軸親和度へ写して銘柄を並べ替える（会話/次の一杯と同一源）。
+ */
+export function diagnosisRecommendationKarte(winner: PersonaType, q2?: number): NextCupKarte {
+  return { persona: winner, tasteProfile: q2 !== undefined ? tasteFromDiagnosisQ2(q2) : null };
+}
+
+/**
+ * 販売中カタログからカルテ親和度の高い順（同点は番号昇順・決定的）に上位 n 件を選ぶ（純粋・reuse next-cup）。
+ * カタログが空・不足なら在るだけ返す（graceful・ハードコード番号に依存しない）。
+ */
+export function pickDiagnosisRecommendations(
+  teas: TeaItem[],
+  karte: NextCupKarte,
+  n: number = DIAGNOSIS_RECOMMEND_COUNT,
+): TeaItem[] {
+  return [...teas]
+    .sort((a, b) => {
+      const d = karteAffinity(b, karte) - karteAffinity(a, karte);
+      return d !== 0 ? d : a.number.localeCompare(b.number);
+    })
+    .slice(0, Math.max(0, n));
+}
+
+/**
+ * おすすめ銘柄が 1 件も無いとき（カタログ取得失敗・在庫ゼロ）の graceful フォールバック（純粋）。
+ * persona の受け止めは必ず届け、行き止まりの 5 桁ボタンは出さず会話導線だけ添える（#6・静か）。
+ */
+export function buildResultFallback(winner: PersonaType): OutMessage {
+  return {
+    text: `${PERSONA_INTRO[winner]}\n\n今おすすめできるお茶を、会話でもお選びしますね。`,
+    quickReplies: [qr("お茶選びを相談する", CONSULT_MORE_TEXT)],
+  };
+}
+
+/**
+ * 結果メッセージ（winner の受け止め + 販売中カタログから動的に選んだおすすめ）（純粋）。
+ *
+ * 監査 #6 是正: おすすめ銘柄はハードコード 5 桁ではなく、fetchSellingTeas の販売中カタログから
+ *   カルテ親和度（next-cup.karteAffinity・会話/次の一杯と同じ persona/taste 重み）で動的抽出する。
+ *   販売終了・番号変更で欠番になっても「見つかりません」化せず、在るお茶から必ず提案が組める。
+ *   1 件も無ければ buildResultFallback（persona の受け止め + 相談導線）へ倒す（graceful）。
+ * おすすめボタンは diagnosisCardToken（`このお茶｜{番号}｜診断`）で「診断出所」を継承する（従来どおり）:
+ *   到達カードは tea.card_view value=diagnosis を記録し、感想タップは product_ratings source=diagnosis。
+ */
+export function buildResultWithTeas(
+  winner: PersonaType,
+  teas: TeaItem[],
+  karte?: NextCupKarte | null,
+): OutMessage {
+  const picks = pickDiagnosisRecommendations(teas, karte ?? diagnosisRecommendationKarte(winner));
+  if (picks.length === 0) return buildResultFallback(winner);
+
+  const lines = picks.map((t) => {
+    const desc = t.descShort.trim() ? `／${t.descShort.trim()}` : "";
+    return `${t.number} ${t.name}${desc}`;
+  });
+  const text =
+    `${PERSONA_INTRO[winner]}\n\n` +
+    `おすすめは、この${picks.length}つ。\n` +
+    `${lines.join("\n")}\n\n` +
+    `気になるお茶は、下のボタンか、番号（例 ${picks[0].number}）を送ってくださいね。`;
+
+  const quickReplies: QuickReplyItem[] = picks.map((t) =>
+    qr(truncateLabel(`${t.number} ${t.name}`), diagnosisCardToken(t.number)),
+  );
+  quickReplies.push(qr("もっと相談する", CONSULT_MORE_TEXT));
+  return { text, quickReplies };
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +366,7 @@ export function buildResult(winner: PersonaType): OutMessage {
 
 export function planPreferenceFlow(
   userMessage: string,
+  teas: TeaItem[] = [],
 ): { message: OutMessage; winner: PersonaType | null } | null {
   const action = parsePreferenceAction(userMessage);
   if (!action) return null;
@@ -316,7 +380,10 @@ export function planPreferenceFlow(
       return { message: buildQ3(action.q1, action.q2), winner: null };
     case "result": {
       const winner = scoreDiagnosis(action.q1, action.q2, action.q3);
-      return { message: buildResult(winner), winner };
+      // 監査 #6: おすすめは販売中カタログ（teas）から persona + 味の好み(Q2) で動的解決する。
+      //   teas 未指定・空（呼び出し側の取得失敗含む）は buildResultWithTeas 内で graceful フォールバック。
+      const karte = diagnosisRecommendationKarte(winner, action.q2);
+      return { message: buildResultWithTeas(winner, teas, karte), winner };
     }
     case "invalid":
       // 範囲外・欠損は安全側で最初からやり直し（イントロ + Q1 を再提示）。
@@ -548,7 +615,25 @@ export async function handlePreferenceDiagnosis(
   env: Env,
   responder: LineResponder,
 ): Promise<boolean> {
-  const plan = planPreferenceFlow(userMessage);
+  // 監査 #6: 結果段のみ、おすすめを販売中カタログから動的解決する（ハードコード 5 桁を撤去）。
+  //   取得失敗（Notion 不達等）は空配列に倒し、buildResultWithTeas 内で graceful フォールバックへ（fail-safe）。
+  //   Q1〜Q3 の段では banner/quick-reply だけなのでカタログ取得はしない（余計な I/O と失敗面を増やさない）。
+  const preAction = parsePreferenceAction(userMessage);
+  if (!preAction) return false;
+  let teas: TeaItem[] = [];
+  if (preAction.kind === "result") {
+    try {
+      teas = await fetchSellingTeas(env);
+    } catch (err) {
+      console.warn(
+        "[preference-diagnosis] selling-teas fetch failed (fallback to consult):",
+        err instanceof Error ? err.message : err,
+      );
+      teas = [];
+    }
+  }
+
+  const plan = planPreferenceFlow(userMessage, teas);
   if (!plan) return false;
 
   const supabase = createSupabaseClient(env);

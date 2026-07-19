@@ -18,12 +18,43 @@ import {
   parsePreferenceAction,
   planPreferenceFlow,
   scoreDiagnosis,
-  buildResult,
+  buildResultWithTeas,
+  buildResultFallback,
+  pickDiagnosisRecommendations,
+  diagnosisRecommendationKarte,
   buildIntroAndQ1,
   DIAGNOSIS_TRIGGER,
   DIAGNOSIS_WEIGHT,
 } from "../../src/lib/preference-diagnosis";
 import { mergePersonaScores, type PersonaType, type PersonaScores } from "../../src/lib/firestore";
+import type { TeaItem } from "../../src/lib/tea-menu";
+import { AROMA_RICH, AROMA_DRY, BODY_FULL, BODY_LIGHT } from "../lib/tea-fixtures";
+
+/** 診断相談導線の発話（preference-diagnosis CONSULT_MORE_TEXT と一致）。 */
+const CONSULT_MORE = "お茶選びを相談したいです";
+
+/** TeaItem を最小フィールドで組む（動的おすすめのカタログ・フィクスチャ用）。 */
+function mkTea(
+  number: string,
+  name: string,
+  category: string,
+  flavorProfiles: string[],
+  descShort = "",
+): TeaItem {
+  return {
+    number,
+    name,
+    category,
+    flavorProfiles,
+    descShort,
+    howToBrew: "",
+    temp: "",
+    time: "",
+    water: "",
+    enjoy: "",
+    story: "",
+  };
+}
 
 let total = 0,
   passed = 0,
@@ -210,31 +241,75 @@ it("handleTextMessage は onboarding/feedback/tea-menu/menu-action を診断よ�
   assert(iMenu < iDiag, `menu-action(${iMenu}) must precede diagnosis(${iDiag})`);
 });
 
-console.log("\n--- (g) 結果 quick reply 制約・お茶カード接続 ---");
+console.log("\n--- (g) 結果おすすめは販売中カタログから動的解決（監査 #6） ---");
 
-it("全 winner 結果: quick reply 4個・13以下・ラベル≤20字・お茶カード/相談導線", () => {
+// 販売中カタログのフィクスチャ。旧ハードコード RESULTS の番号（40601 / 10501 / 50401 等）は含めない
+//   ＝「動的解決していないと番号が必ず外れる」状態を作り、ハードコード残留を機械検出する（break-proof）。
+const CATALOG: TeaItem[] = [
+  mkTea("11301", "煎茶 やまなみ", "緑茶", [AROMA_RICH, BODY_FULL], "コクのある旨味と甘い余韻。"),
+  mkTea("11401", "深蒸し煎茶 みどり", "緑茶", [AROMA_RICH, BODY_FULL], "濃厚で香ばしい。"),
+  mkTea("20101", "和紅茶 あかね", "紅茶", [AROMA_DRY, BODY_LIGHT], "軽やかで爽やかな渋み。"),
+  mkTea("40101", "和烏龍茶 香駿", "青茶", [AROMA_RICH, BODY_FULL], "華やかな香りとまろやかな甘み。"),
+];
+const AVAILABLE = new Set(CATALOG.map((t) => t.number));
+const LEGACY_HARDCODED = ["40601", "10501", "10201", "40201", "11601", "50401", "10801"];
+
+it("結果おすすめは全て販売中カタログの番号（ハードコード 5 桁に依存しない・break-proof）", () => {
   for (const w of ["serenity", "explorer", "sensory"] as PersonaType[]) {
-    const m = buildResult(w);
-    assertEqual(m.quickReplies.length, 4, `${w}: 4 buttons`);
-    assert(m.quickReplies.length <= QR_MAX, `${w}: <=13`);
-    for (const q of m.quickReplies) {
+    const m = buildResultWithTeas(w, CATALOG, diagnosisRecommendationKarte(w, 1));
+    // お茶ボタンは診断出所つきカードトークン、番号は必ずカタログ内。
+    const teaButtons = m.quickReplies.filter((q) => /^このお茶｜\d{5}｜診断$/.test(q.action.text));
+    assert(teaButtons.length >= 1, `${w}: 1件以上の動的お茶ボタン`);
+    for (const q of teaButtons) {
+      const no = q.action.text.match(/\d{5}/)![0];
+      assert(AVAILABLE.has(no), `${w}: おすすめ ${no} は販売中カタログ内であること`);
       assert(q.action.label.length <= LABEL_MAX, `${w}: label<=20 (${q.action.label})`);
     }
-    // 先頭3つはお茶カードトークン（tea-menu の「このお茶｜{番号}｜診断」へ接続）。
-    // 末尾の「｜診断」は出所マーカー（ブロック3-A 1(a)）: 到達カードは card_view value=diagnosis を
-    // 記録し、そのカードの感想タップは product_ratings source=diagnosis になる。
-    const teaButtons = m.quickReplies.slice(0, 3);
-    assert(
-      teaButtons.every((q) => /^このお茶｜\d{5}｜診断$/.test(q.action.text)),
-      `${w}: 3 diagnosis-origin tea card tokens`,
-    );
-    // 4つ目は「もっと相談する」→ ③相談入口テキスト
+    // 本文に出る 5 桁もすべてカタログ内（旧ハードコード挙動なら 40601 等が出て失敗する＝break-proof）。
+    for (const no of m.text.match(/\d{5}/g) ?? []) {
+      assert(AVAILABLE.has(no), `${w}: 本文番号 ${no} は在庫内（ハードコード漏れ無し）`);
+    }
+    for (const legacy of LEGACY_HARDCODED) {
+      assert(!m.text.includes(legacy), `${w}: 旧ハードコード ${legacy} が出ない`);
+    }
+    // 末尾は相談導線・総数 13 以下。
     assertEqual(
-      m.quickReplies[3].action.text,
-      "お茶選びを相談したいです",
-      `${w}: consult more`,
+      m.quickReplies[m.quickReplies.length - 1].action.text,
+      CONSULT_MORE,
+      `${w}: 相談導線が末尾`,
     );
+    assert(m.quickReplies.length <= QR_MAX, `${w}: <=13`);
   }
+});
+
+it("カタログが変わればおすすめも変わる（単一在庫 → 単一提案・動的）", () => {
+  const one = buildResultWithTeas("serenity", [CATALOG[0]], diagnosisRecommendationKarte("serenity"));
+  const teaButtons = one.quickReplies.filter((q) => /^このお茶｜\d{5}｜診断$/.test(q.action.text));
+  assertEqual(teaButtons.length, 1, "単一在庫 → おすすめ 1 件");
+  assertEqual(teaButtons[0].action.text, "このお茶｜11301｜診断", "在るお茶に解決");
+});
+
+it("カタログ空 → graceful フォールバック（persona 受け止め + 相談導線・5 桁ボタン無し）", () => {
+  for (const w of ["serenity", "explorer", "sensory"] as PersonaType[]) {
+    const m = buildResultWithTeas(w, [], diagnosisRecommendationKarte(w));
+    assertEqual(m.text.match(/\d{5}/g), null, `${w}: フォールバックに 5 桁の死番号なし`);
+    assert(m.quickReplies.some((q) => q.action.text === CONSULT_MORE), `${w}: 相談導線を提示`);
+    const reveal = { serenity: "静けさを愉しむ人", explorer: "旅する人", sensory: "深く愉しむ人" }[w];
+    assert(m.text.includes(reveal), `${w}: persona の受け止めは必ず届く`);
+  }
+});
+
+it("buildResultFallback も同じ graceful 契約（5 桁ボタン無し・相談導線）", () => {
+  const m = buildResultFallback("serenity");
+  assertEqual(m.text.match(/\d{5}/g), null, "fallback: 死番号なし");
+  assert(m.quickReplies.some((q) => q.action.text === CONSULT_MORE), "fallback: 相談導線");
+});
+
+it("味の好み(Q2)がカタログ内の軸親和で並ぶ（sensory+コク → full ボディ上位・light 末尾）", () => {
+  // sensory + Q2-3（コク）→ full ボディ寄り。全 4 件並べると light の 20101 が末尾。
+  const picks = pickDiagnosisRecommendations(CATALOG, diagnosisRecommendationKarte("sensory", 3), 4);
+  assertEqual(picks.length, 4, "4 件全て並ぶ");
+  assertEqual(picks[picks.length - 1].number, "20101", "light ボディ(20101)は full 志向で最下位");
 });
 
 it("イントロ+Q1: ラベル≤20字・3択・トークン形式", () => {
