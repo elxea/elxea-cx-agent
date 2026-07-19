@@ -255,5 +255,46 @@ export const NEXT_CUP_DECLINE_MESSAGE =
  * 押し売りにしない「よろしければ」添え・1 件のみ。銘柄名と 5 桁番号を差し込む。
  */
 export function nextCupSuggestionSentence(name: string, number: string): string {
-  return `よろしければ、次はこんな一杯もどうぞ。\n${name}（No.${number}）`;
+  return `よろしければ、次はこんな一杯もどうぞ。\n${formatTeaLabel({ name, number })}`;
+}
+
+// --- お茶の正準ラベル（UX① 番号+名前の統一・SoT）---
+//
+// オーナー要望①: ユーザーに見える全お茶参照を `名前（No.XXXXX）` に統一する。
+// 既存文面（nextCupSuggestionSentence / buildTeaCard / 診断結果 等）に定着していた同形を
+// 名前付き関数へ集約し、名前のみ表示だった箇所（淹れ方一覧 / 次の一杯ボタン / 診断結果）を
+// この正準形へ寄せる。表示・ラベル専用（挙動は変えない）。
+
+/**
+ * お茶の正準ラベル `名前（No.XXXXX）`（UX① 統一の SoT）。
+ * name が空 / number と同一（表示名フォールバック時）は冗長回避で `No.XXXXX` のみを返す
+ *   （`11301（No.11301）` を防ぐ）。
+ */
+export function formatTeaLabel(tea: { name: string; number: string }): string {
+  const name = tea.name.trim();
+  if (!name || name === tea.number) return `No.${tea.number}`;
+  return `${name}（No.${tea.number}）`;
+}
+
+/**
+ * LINE quick reply ラベル用の正準ラベル（番号保全 truncate・UX①）。
+ *
+ * LINE の quick reply ラベルは表示上限（既定 20 字）がある。素の `名前（No.XXXXX）` を
+ * 末尾truncate（従来の truncateLabel）に通すと長名時に**番号側が切れて意味が消える**。
+ * 本関数は `（No.XXXXX）`（＝番号部）を必ず温存し、**名前側だけ**を `…` で詰めて max に収める。
+ * name が空 / number と同一なら `No.XXXXX` のみ（既に十分短い）。
+ */
+export function formatTeaQuickReplyLabel(
+  tea: { name: string; number: string },
+  max = 20,
+): string {
+  const name = tea.name.trim();
+  if (!name || name === tea.number) return `No.${tea.number}`;
+  const numberPart = `（No.${tea.number}）`; // 例: （No.11301）＝ 5 桁で 10 字固定。絶対に切らない。
+  const full = `${name}${numberPart}`;
+  if (full.length <= max) return full;
+  // 番号部は必ず残し、名前に使える字数だけを名前側から確保する（… の 1 字を見込む）。
+  const room = max - numberPart.length;
+  if (room <= 1) return numberPart; // max が極端に小さい場合でも番号だけは温存する。
+  return `${name.slice(0, room - 1)}…${numberPart}`;
 }

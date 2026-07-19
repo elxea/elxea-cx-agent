@@ -64,6 +64,27 @@ function stubFetch(handler: (url: string) => { ok: boolean; status: number }) {
   };
 }
 
+/** fetch をスタブし、送信された JSON body を捕捉する（UX③ の quickReply 検証用）。 */
+function stubFetchWithBody(handler: (url: string) => { ok: boolean; status: number }) {
+  const bodies: Array<Record<string, unknown>> = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    try {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    } catch {
+      bodies.push({});
+    }
+    const { ok, status } = handler(String(input));
+    return { ok, status, text: async () => (ok ? "" : `error ${status}`) } as Response;
+  }) as typeof fetch;
+  return {
+    bodies,
+    restore() {
+      globalThis.fetch = original;
+    },
+  };
+}
+
 const REPLY = "https://api.line.me/v2/bot/message/reply";
 const PUSH = "https://api.line.me/v2/bot/message/push";
 
@@ -116,6 +137,39 @@ async function main() {
       await r.text("hello");
       assert(f.calls.length === 2, `reply then push = 2 calls, got ${f.calls.length}`);
       assert(f.calls[0] === REPLY && f.calls[1] === PUSH, `reply→push, got ${f.calls.join(",")}`);
+    } finally {
+      f.restore();
+    }
+  });
+
+  console.log("\n--- (UX③) flex に quickReply を additive で付ける ---");
+  await it("flex(alt, contents, qr) は message に quickReply.items を付ける（≤13 に丸め）", async () => {
+    const f = stubFetchWithBody(() => ({ ok: true, status: 200 }));
+    try {
+      const r = createResponder("U1", "rt-live", env);
+      const items = Array.from({ length: 15 }, (_, i) => ({
+        type: "action" as const,
+        action: { type: "message" as const, label: `l${i}`, text: `t${i}` },
+      }));
+      await r.flex("alt", { type: "bubble" }, items);
+      const msg = (f.bodies[0].messages as Array<Record<string, unknown>>)[0];
+      assert(msg.type === "flex", "flex message");
+      const qr = msg.quickReply as { items?: unknown[] } | undefined;
+      assert(!!qr && Array.isArray(qr.items), "quickReply.items present");
+      assert(qr!.items!.length === 13, `slice to 13 (got ${qr!.items!.length})`);
+    } finally {
+      f.restore();
+    }
+  });
+
+  await it("flex(alt, contents) は quickReply を付けない（無回帰・省略時）", async () => {
+    const f = stubFetchWithBody(() => ({ ok: true, status: 200 }));
+    try {
+      const r = createResponder("U1", "rt-live", env);
+      await r.flex("alt", { type: "bubble" });
+      const msg = (f.bodies[0].messages as Array<Record<string, unknown>>)[0];
+      assert(msg.type === "flex", "flex message");
+      assert(msg.quickReply === undefined, "no quickReply when omitted");
     } finally {
       f.restore();
     }

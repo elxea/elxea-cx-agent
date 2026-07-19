@@ -36,19 +36,44 @@ afterEach(() => {
   h.restore();
 });
 
-/** 送信テキストを捕捉するだけの Responder（Firestore/LINE に触れず handleTeaMenuFlow を直接駆動する）。 */
-function captureResponder(): { responder: LineResponder; text: () => string } {
-  const sent: string[] = [];
+/**
+ * 送信を捕捉する Responder（Firestore/LINE に触れず handleTeaMenuFlow を直接駆動する）。
+ * UX③: rate-good は Flex カードで返るため flex も捕捉する。reply() は本文（テキスト + Flex の altText）を返す。
+ */
+type FlexCall = {
+  altText: string;
+  contents: Record<string, unknown>;
+  quickReplies?: QuickReplyItem[];
+};
+function captureResponder(): {
+  responder: LineResponder;
+  reply: () => string;
+  flexCalls: () => FlexCall[];
+} {
+  const texts: string[] = [];
+  const flexes: FlexCall[] = [];
   const responder: LineResponder = {
     async text(t: string, _qr?: QuickReplyItem[]): Promise<void> {
-      sent.push(t);
+      texts.push(t);
     },
-    async flex(_altText: string, _contents: Record<string, unknown>): Promise<void> {
-      /* この動線では未使用 */
+    async flex(
+      altText: string,
+      contents: Record<string, unknown>,
+      quickReplies?: QuickReplyItem[],
+    ): Promise<void> {
+      flexes.push({ altText, contents, quickReplies });
     },
   };
-  return { responder, text: () => sent.join("\n---\n") };
+  return {
+    responder,
+    // 返答本文の総体（テキスト本文 + Flex の altText fallback）。No.XXXXX は altText に入る。
+    reply: () => [...texts, ...flexes.map((f) => f.altText)].join("\n---\n"),
+    flexCalls: () => flexes,
+  };
 }
+
+/** 画像なしローダ（既定・Notion 非接触で画像なし graceful を検証する）。 */
+const noImages = async (): Promise<Map<string, string>> => new Map<string, string>();
 
 /** テスト用 TeaItem 生成（全フィールド充足）。 */
 function mk(number: string, category: string, flavorProfiles: string[]): TeaItem {
@@ -78,13 +103,39 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
 
     const handled = await handleTeaMenuFlow(user, `感想よい${"｜"}11301`, env, cap.responder, {
       loadKarte: async () => karte,
+      loadProductImages: noImages,
     });
     expect(handled).toBe(true);
 
-    const reply = cap.text();
-    expect(reply).toContain(NEXT_CUP_GOOD_THANKS); // お礼は従来どおり
+    // UX③: rate-good は Flex カードで返る（text ではなく flex が呼ばれる）。
+    expect(cap.flexCalls().length, "Flex カードで返る（UX③）").toBeGreaterThan(0);
+    const reply = cap.reply();
+    expect(reply).toContain(NEXT_CUP_GOOD_THANKS); // お礼は従来どおり（altText fallback）
     expect(reply).toContain("No.40101"); // カルテ（青茶）を反映した次の一杯
     expect(reply).not.toContain("No.11401"); // baseline の同軸最小は選ばれない
+    // カード見出しも 名前（No.40101） に統一（① がカードに効く）。
+    expect(JSON.stringify(cap.flexCalls()[0].contents)).toContain("（No.40101）");
+  });
+
+  it("画像あり(正規化 r2.dev をモック注入) → カードの hero.url に直 r2.dev（UX③ 写真つき）", async () => {
+    const user = synthLineUserId("f5img");
+    const cap = captureResponder();
+    const karte: NextCupKarte = {
+      persona: null,
+      tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: [], scenePref: null },
+    };
+    const R2 = "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/40101.jpg";
+    // 画像マップは 5 桁番号キー（ハーメティックの合成 TeaItem は page id を持たないため番号で join）。
+    const handled = await handleTeaMenuFlow(user, `感想よい${"｜"}11301`, env, cap.responder, {
+      loadKarte: async () => karte,
+      loadProductImages: async () => new Map([["40101", R2]]),
+    });
+    expect(handled).toBe(true);
+
+    const calls = cap.flexCalls();
+    expect(calls.length, "Flex カードで返る").toBeGreaterThan(0);
+    const hero = (calls[0].contents as { hero?: { url?: string } }).hero;
+    expect(hero?.url, "hero に正規化済み直 r2.dev URL が載る（送信はモック=OFF）").toBe(R2);
   });
 
   it("カルテ空 → 従来どおり同軸最小 11401（青茶カルテとの A/B 対照）", async () => {
@@ -93,9 +144,10 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
 
     await handleTeaMenuFlow(user, `感想よい${"｜"}11301`, env, cap.responder, {
       loadKarte: async () => ({ persona: null, tasteProfile: null }),
+      loadProductImages: noImages,
     });
 
-    const reply = cap.text();
+    const reply = cap.reply();
     expect(reply).toContain("No.11401"); // baseline
     expect(reply).not.toContain("No.40101"); // カルテ無しでは青茶に寄らない
   });
@@ -104,11 +156,12 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
     const user = synthLineUserId("f5d");
     const cap = captureResponder();
 
-    // deps を渡さない = 本番と同じ経路（loadCustomerKarte）。ハーメティック env は Firebase 未設定なので
-    // getFirestoreEnv が throw → 空カルテ → 従来挙動。カルテ配線が本番でも fail-safe なことを示す。
+    // deps を渡さない = 本番と同じ経路（loadCustomerKarte + fetchProductImages）。ハーメティック env は
+    // Firebase 未設定なので getFirestoreEnv が throw → 空カルテ → 従来挙動。画像は Notion モックが空 Map を返す
+    // （＝画像なし graceful）。カルテ/画像配線が本番でも fail-safe なことを示す。
     await handleTeaMenuFlow(user, `感想よい${"｜"}11301`, env, cap.responder);
 
-    const reply = cap.text();
+    const reply = cap.reply();
     expect(reply).toContain("No.11401");
   });
 

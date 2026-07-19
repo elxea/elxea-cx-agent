@@ -786,3 +786,148 @@ export function feedbackCard(params: {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// UX③ お茶レコメンドカード + 画像 URL 正規化（写真つきカード / 写真なし graceful）
+// ---------------------------------------------------------------------------
+
+/**
+ * お茶画像 URL を「直 r2.dev」優先に正規化する（UX③・純粋）。
+ *
+ * Product Catalogue（商品カタログ）の画像 URL は 2 形態が混在する:
+ *   - wsrv.nl ラップ: `https://wsrv.nl/?url=<r2.dev を urlencode>&w=2000&…`
+ *   - 直 r2.dev:      `https://pub-xxxx.r2.dev/cdn/…jpg`
+ * LINE Flex の hero は公開到達な HTTPS 画像を要求する。安定性のため wsrv.nl ラップは
+ * `?url=` を decode して直 r2.dev を採用し、素の直 URL はそのまま使う。
+ *
+ * @returns 正規化済み HTTPS URL。空 / http 化不能 / 非 URL は null（＝hero を出さず graceful）。
+ */
+export function preferDirectR2(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let url = raw.trim();
+  if (!url) return null;
+  // wsrv.nl ラップなら ?url=<encoded> を剥がして直リンクを優先する。
+  if (/(^|\/\/|\.)wsrv\.nl\//i.test(url)) {
+    const m = url.match(/[?&]url=([^&]+)/);
+    if (m) {
+      try {
+        const decoded = decodeURIComponent(m[1]).trim();
+        if (decoded) url = decoded;
+      } catch {
+        /* 壊れた encoding は元 URL のまま扱う（fail-safe） */
+      }
+    }
+  }
+  if (url.startsWith("http://")) url = "https://" + url.slice("http://".length);
+  return url.startsWith("https://") ? url : null;
+}
+
+/**
+ * お茶レコメンドカード（UX③・写真つき or 写真なし graceful）。
+ *
+ * 構成: hero（画像あり時のみ）+ `名前（No.XXXXX）`（呼び出し側で formatTeaLabel 済）+ 抜粋 + 「見る」ボタン。
+ * `imageUrl` 省略時は hero を出さず、崩れないテキスト調カードになる（現況の主経路）。
+ * `matchReason` 指定時のみ本文末尾に理由 1 行を添える（診断/次の一杯の一貫性）。
+ */
+export function teaRecommendCard(params: {
+  /** 表示名（既に `名前（No.XXXXX）` に整形済み）。 */
+  name: string;
+  /** 短い説明（味わい抜粋）。 */
+  description: string;
+  /** 正規化済み HTTPS 画像 URL（preferDirectR2 の戻り）。省略で hero なし。 */
+  imageUrl?: string;
+  /** 「見る」ボタンの遷移先（web）。 */
+  productUrl: string;
+  /** マッチ理由 1 行（任意）。 */
+  matchReason?: string;
+}): Record<string, unknown> {
+  const bodyContents: Record<string, unknown>[] = [
+    {
+      type: "text",
+      text: params.name,
+      weight: "bold",
+      size: "lg",
+      color: COLORS.charcoal,
+      wrap: true,
+    },
+  ];
+  if (params.description.trim()) {
+    bodyContents.push({
+      type: "text",
+      text: params.description.trim(),
+      size: "sm",
+      color: COLORS.muted,
+      wrap: true,
+      maxLines: 3,
+      margin: "md",
+    });
+  }
+  if (params.matchReason && params.matchReason.trim()) {
+    bodyContents.push({
+      type: "text",
+      text: params.matchReason.trim(),
+      size: "xs",
+      color: COLORS.muted,
+      wrap: true,
+      margin: "md",
+      style: "italic",
+    });
+  }
+  return {
+    type: "bubble",
+    size: "mega",
+    ...(params.imageUrl
+      ? {
+          hero: {
+            type: "image",
+            url: params.imageUrl,
+            size: "full",
+            aspectRatio: "4:3",
+            aspectMode: "cover",
+          },
+        }
+      : {}),
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      backgroundColor: COLORS.cream,
+      contents: bodyContents,
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      backgroundColor: COLORS.cream,
+      contents: [
+        {
+          type: "button",
+          action: { type: "uri", label: "見る", uri: params.productUrl },
+          style: "primary",
+          color: COLORS.charcoal,
+          height: "sm",
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * お茶レコメンドカルーセル（UX③・最大 10・診断結果は最大 3 件で呼ぶ）。
+ * 各 bubble は teaRecommendCard と同一構成（写真あり/なし graceful を各カードで踏襲）。
+ * carousel は全 bubble が同一 size である必要があり、teaRecommendCard は常に "mega" のため整合する。
+ */
+export function teaRecommendCarousel(
+  items: Array<{
+    name: string;
+    description: string;
+    imageUrl?: string;
+    productUrl: string;
+    matchReason?: string;
+  }>,
+): Record<string, unknown> {
+  return {
+    type: "carousel",
+    contents: items.slice(0, 10).map((t) => teaRecommendCard(t)),
+  };
+}
