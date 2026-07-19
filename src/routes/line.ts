@@ -29,6 +29,7 @@ import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handleLinkageFlow } from "../lib/subscriber-linkage";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { handleMyKarteFlow } from "../lib/my-karte";
+import { handleJournalFlow } from "../lib/journal";
 import {
   buildResponseQuickReplies,
   FEEDBACK_POSITIVE_TEXT,
@@ -913,6 +914,13 @@ async function handleTextMessage(
   // 生スコアは一切出さない。空カルテは診断 CTA に graceful。tea-menu / 診断と同じく後置（無関係発話は素通り）。
   const wasMyKarte = await handleMyKarteFlow(lineUserId, userMessage, env, responder);
   if (wasMyKarte) return;
+
+  // 読みもの（UX④・完全一致「読みもの」・read-only）。ユーザーの persona（穏やか/探求/感覚）に合う
+  // 記事を Content Hub（Roji）から最大 3 件（合わなければ最新順）で選び、③ 共有の Flex カルーセル
+  // （サムネ+見出し+抜粋+「読む」・本文は出さない）で返す。URL/サムネ空はダミーで動作、Notion 充足で
+  // 自動反映。tea-menu / 診断 / マイカルテと同じく後置（無関係発話は素通り）。
+  const wasJournal = await handleJournalFlow(lineUserId, userMessage, env, responder);
+  if (wasJournal) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;
