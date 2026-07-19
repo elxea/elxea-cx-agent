@@ -45,7 +45,13 @@ export type FlowEventName =
   //   link.invite_shown: 未連携ユーザーの連携文脈で便益+ボタンを出したとき（metadata.surface = trigger|menu4）。
   //   link.completed:    identity/link-liff の連携成功時（metadata.source = liff 等）。
   | "link.invite_shown"
-  | "link.completed";
+  | "link.completed"
+  // 計測（treatment 記録・設計 v2.1 #1 最優先・spec §6-3「どの版を見せたか」）:
+  //   next_cup_shown: rate-good 後に「次の一杯」を実際に見せたとき。
+  //     product_no = 見せた銘柄（5桁）／ value = 版（"karte" = 個別化が baseline と別の銘柄を選んだ /
+  //     "baseline" = カルテが結果を変えなかった or 空カルテ）。metadata に ratedNo / baselineNo / affinity。
+  //   これを残さないと「どの版を見せたか」が後から遡れない消えるデータになり効果測定できない。
+  | "next_cup_shown";
 
 /** 記録する 1 イベントの入力。 */
 export interface FlowEventInput {
