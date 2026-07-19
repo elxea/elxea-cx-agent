@@ -121,22 +121,32 @@ it("buildSourceResponse(marche): 5桁番号を案内し診断/一覧/使い方�
   assertTrue(texts.includes(ONBOARDING_HOWTO_TEXT), "使い方トークン");
 });
 
-it("buildSourceResponse(online): 従来 3 択 + 好み診断ボタン", () => {
+it("buildSourceResponse(online): 好み診断が主線（quickReply 先頭 = 診断・設計 A-3）", () => {
   const { text, quickReplies } = buildSourceResponse("online");
   assertTrue(!EMOJI_RE.test(text), "本文に絵文字なし");
   const texts = actionTexts(quickReplies);
-  assertTrue(texts.includes(ONBOARDING_EXPLORE_TEXT), "お茶を探す");
-  assertTrue(texts.includes(ONBOARDING_ABOUT_TEXT), "elxea について知る");
-  assertTrue(texts.includes(ONBOARDING_HOWTO_TEXT), "使い方を教えて");
-  assertTrue(texts.includes(DIAGNOSIS_TRIGGER), "好み診断ボタン追加");
-  assertEqual(quickReplies.length, 4, "3 択 + 診断 = 4");
+  // 主線 = 好み診断が先頭（従来は 4 択末尾に希釈されていたドリフトの是正）。
+  assertEqual(texts[0], DIAGNOSIS_TRIGGER, "先頭が好み診断トリガー");
+  // ほかの入り口は副次として残す（選択肢は削らない）。
+  assertTrue(texts.includes(ONBOARDING_EXPLORE_TEXT), "お茶を探す残置");
+  assertTrue(texts.includes(ONBOARDING_ABOUT_TEXT), "elxea について知る残置");
+  assertTrue(texts.includes(ONBOARDING_HOWTO_TEXT), "使い方を教えて残置");
+  assertEqual(quickReplies.length, 4, "診断 + 3 択 = 4");
 });
 
-it("buildSourceResponse(other) は online と同一応答（記録値のみ異なる）", () => {
-  const a = buildSourceResponse("online");
-  const b = buildSourceResponse("other");
-  assertEqual(b.text, a.text, "text 一致");
-  assertEqual(JSON.stringify(actionTexts(b.quickReplies)), JSON.stringify(actionTexts(a.quickReplies)), "quick reply 一致");
+it("buildSourceResponse(other): 従来どおり診断は末尾（online とは非同一・主線化しない）", () => {
+  const other = buildSourceResponse("other");
+  const online = buildSourceResponse("online");
+  const otherTexts = actionTexts(other.quickReplies);
+  // 「その他」は設計 A-3 が主線を規定しない入口 → 従来の並び（診断は末尾）を維持。
+  assertEqual(otherTexts[0], ONBOARDING_EXPLORE_TEXT, "その他は先頭がお茶を探す");
+  assertEqual(otherTexts[otherTexts.length - 1], DIAGNOSIS_TRIGGER, "その他は診断が末尾");
+  // online（診断主線）とは非同一 = ドリフト是正がオンライン分岐に閉じている証跡。
+  assertTrue(online.text !== other.text, "online と other の本文は非同一");
+  assertTrue(
+    actionTexts(online.quickReplies)[0] !== otherTexts[0],
+    "先頭 CTA が online と other で異なる",
+  );
 });
 
 it("quick reply ラベル長は LINE 上限 20 文字以内", () => {

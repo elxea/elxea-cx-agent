@@ -18,8 +18,10 @@ import { messageEvent, synthLineUserId } from "../lib/synthetic";
 import {
   WELCOME_SOURCE_MARCHE_TEXT,
   WELCOME_SOURCE_ONLINE_TEXT,
+  ONBOARDING_EXPLORE_TEXT,
   buildSourceResponse,
 } from "../../src/lib/welcome-onboarding";
+import { DIAGNOSIS_TRIGGER } from "../../src/lib/preference-diagnosis";
 
 let h: Hermetic;
 
@@ -76,5 +78,38 @@ describe("hermetic L1 — 動線2: 入口質問（welcome source）", () => {
       (e) => e.user_ref === user && e.event_name === "welcome.source",
     );
     expect(row?.value).toBe("online");
+  });
+
+  // spec drift④（personalization-spec §6 優先4 / Table A #15 / 監査 #8・設計案 v2 A-3）:
+  //   オンライン入口は好み診断を主線に。診断が 4 択末尾に埋没していたドリフトを是正し、
+  //   応答 quickReply の「先頭 action」が好み診断トリガーであることを load-bearing にガードする。
+  //   これが赤くなる = オンライン入口の診断主線化が壊れた（診断が先頭でない）。
+  it("オンライン回答 → 好み診断が主線（応答 quickReply の先頭が診断トリガー）", async () => {
+    const user = synthLineUserId("f2c");
+
+    await dispatchLineWebhook({
+      env,
+      channelSecret: String(env.LINE_CHANNEL_SECRET),
+      events: [messageEvent(user, WELCOME_SOURCE_ONLINE_TEXT)],
+    });
+
+    // オンライン分岐の応答（quickReply 付きテキスト message）を捕捉。
+    const msg = h.line
+      .allMessages()
+      .find((m) => m.type === "text" && (m as { quickReply?: unknown }).quickReply);
+    expect(msg, "quickReply 付きの分岐応答が返る").toBeTruthy();
+
+    const items = (
+      msg as { quickReply: { items: Array<{ action: { text?: string } }> } }
+    ).quickReply.items;
+
+    // ── load-bearing: 好み診断が主線 = quickReply の先頭 action（4 択末尾ではない）。
+    expect(items[0]?.action?.text, "先頭の quick reply が好み診断トリガー").toBe(
+      DIAGNOSIS_TRIGGER,
+    );
+
+    // 回帰ガード: ほかの入り口（お茶を探す）は副次として残す（選択肢は削らない）。
+    const actionTexts = items.map((i) => i.action?.text);
+    expect(actionTexts, "従来の入り口も副次として残る").toContain(ONBOARDING_EXPLORE_TEXT);
   });
 });
