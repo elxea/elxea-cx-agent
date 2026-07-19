@@ -514,6 +514,35 @@ export function buildNumberNotFound(teas: TeaItem[], number: string): OutMessage
   };
 }
 
+/**
+ * QR 同梱物の product_slug（ref=pkg_{slug}）を販売中のお茶 1 件へ解決する（監査 #4・純粋）。
+ *
+ * 目的: 商品が確定している QR 同梱ユーザーを、当該お茶の card→感想→次の一杯 ループへ直接乗せる
+ *   （設計 Figma §17:334）。slug→5 桁番号の対応は Notion Tea Menu（fetchSellingTeas の結果）を 1 参照する。
+ *
+ * 解決順（決定的）:
+ *   1. slug が 5 桁番号を含む（QR ref が番号を埋め込む最短経路）→ 番号一致で直接解決。
+ *   2. それ以外は slug をスペース区切りに正規化し、お茶名との部分一致で解決（大小無視）。
+ *   解決できなければ null（呼び出し側は一覧入口へ着地させ、行き止まりにしない）。販売終了・番号変更で
+ *   欠番になった場合も null に落ち、ブランドウェルカム自体は必ず届く（#6 と同じ動的欠番耐性）。
+ */
+export function resolveTeaBySlug(slug: string, teas: TeaItem[]): TeaItem | null {
+  const digits = slug.match(/\d{5}/);
+  if (digits) {
+    const byNumber = teas.find((t) => t.number === digits[0]);
+    if (byNumber) return byNumber;
+  }
+  const norm = slug.replace(/_/g, " ").trim().toLowerCase();
+  if (norm) {
+    const byName = teas.find((t) => {
+      const name = t.name.toLowerCase();
+      return name.includes(norm) || norm.includes(name);
+    });
+    if (byName) return byName;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // プラン（純粋・状態レス）: アクション + 全お茶 → 送信メッセージ列 or null
 // ---------------------------------------------------------------------------

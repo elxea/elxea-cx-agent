@@ -16,7 +16,7 @@
  */
 
 import type { QuickReplyItem } from "./line";
-import { WELCOME_INTRO } from "./brand-copy";
+import { WELCOME_INTRO, WELCOME_DELIVERY_FREQUENCY } from "./brand-copy";
 import { DIAGNOSIS_TRIGGER } from "./preference-diagnosis";
 import { TEA_LIST_ENTRY_TRIGGER } from "./tea-menu";
 
@@ -80,7 +80,7 @@ function messageAction(label: string, text: string): QuickReplyItem {
 export function buildEntryWelcome(): WelcomeMessage {
   const text =
     `${WELCOME_INTRO}\n\n` +
-    "お便りをお送りするのは月に1〜2回、季節の節目だけです。\n\n" +
+    `${WELCOME_DELIVERY_FREQUENCY}\n\n` +
     "はじめに、どこで elxea を知っていただけましたか？";
 
   const quickReplies: QuickReplyItem[] = [

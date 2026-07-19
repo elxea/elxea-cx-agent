@@ -51,3 +51,23 @@ export function messageEvent(
     deliveryContext: { isRedelivery: false },
   };
 }
+
+/**
+ * LINE フォローイベント（友だち追加）を 1 件組む。
+ * QR 同梱物経由のオンボーディング（handleFollowEvent）を webhook 経路で駆動するために使う。
+ * ref（pkg_{slug}）自体は follow event に載らない（LINE 仕様）ため、QR は pending_follow_refs へ
+ *   seed して再現する（getPendingFollowRef が読む）。ここでは純粋に follow イベント本体を組む。
+ */
+export function followEvent(userId: string): Record<string, unknown> {
+  const now = Date.now();
+  return {
+    type: "follow",
+    mode: "active",
+    timestamp: now,
+    source: { type: "user", userId },
+    replyToken: SYNTH_REPLY_TOKEN,
+    follow: { isUnblocked: false },
+    webhookEventId: synthWebhookEventId(),
+    deliveryContext: { isRedelivery: false },
+  };
+}

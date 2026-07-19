@@ -15,10 +15,16 @@ import {
   saveMessage,
   getRecentMessages,
   getCrossChannelMessages,
-  searchKnowledgeHybrid,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
-import { handleTeaMenuFlow } from "../lib/tea-menu";
+import {
+  handleTeaMenuFlow,
+  fetchSellingTeas,
+  buildTeaCard,
+  resolveTeaBySlug,
+  TEA_LIST_ENTRY_TRIGGER,
+  type TeaItem,
+} from "../lib/tea-menu";
 import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handleLinkageFlow } from "../lib/subscriber-linkage";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
@@ -27,6 +33,7 @@ import { menuTapValue } from "../lib/menu-tap";
 import {
   ONBOARDING_EXPLORE_INTRO,
   ONBOARDING_ABOUT_BODY,
+  buildProductWelcome,
 } from "../lib/brand-copy";
 import {
   ONBOARDING_EXPLORE_TEXT,
@@ -67,11 +74,6 @@ const TASTING_NOTE_CTA_TEXT =
  * オンボーディング Quick Reply のトリガーテキスト（従来 3 択）は
  * src/lib/welcome-onboarding.ts に集約（入口質問型ウェルカムと共用の正本）。
  */
-
-/** 商品固有オンボーディング Quick Reply のトリガーテキスト */
-const ONBOARDING_BREWING_TEXT = "onboarding:brewing_guide";
-const ONBOARDING_PRODUCT_DETAIL_TEXT = "onboarding:product_detail";
-const ONBOARDING_SIMILAR_TEXT = "onboarding:similar_products";
 
 /** ref パラメータのプレフィックス（QR同梱物経由） */
 const REF_PACKAGE_PREFIX = "pkg_";
@@ -199,92 +201,11 @@ function extractProductSlug(ref: string): string | null {
   return null;
 }
 
-/**
- * product_slug から商品情報を RAG（Supabase pgvector）で検索し、
- * 商品名と関連情報を取得する。
- */
-async function lookupProductBySlug(
-  productSlug: string,
-  env: Env,
-): Promise<{ productName: string; context: string } | null> {
-  const supabase = createSupabaseClient(env);
-
-  // product_slug をスペース区切りに変換して検索キーワードにする
-  // 例: "hojicha_classic" → "hojicha classic"
-  const searchQuery = productSlug.replace(/_/g, " ");
-
-  const embedding = await createEmbedding(searchQuery, env);
-  const results = await searchKnowledgeHybrid(
-    supabase,
-    embedding,
-    searchQuery,
-    3,       // topK: 上位3件
-    0.3,     // threshold
-    null,    // source_type: フィルタなし（product_slug 自体が十分な検索キー）
-  );
-
-  if (results.length === 0) {
-    console.log(`[follow-ref] No product found for slug: ${productSlug}`);
-    return null;
-  }
-
-  // 最上位の結果から商品名を抽出（source_title を使用）
-  const topResult = results[0];
-  const productName = topResult.source_title || searchQuery;
-
-  // 上位結果のコンテンツを結合してコンテキストとする
-  const context = results.map((r) => r.content).join("\n\n");
-
-  return { productName, context };
-}
-
-/**
- * 商品固有のウェルカムメッセージを生成する。
- * Planning のテンプレートに基づく。
- */
-function buildProductWelcomeMessage(productName: string): string {
-  return (
-    `こんにちは！elxea へようこそ。\n\n` +
-    `${productName} をお届けしましたね。\n` +
-    `おいしく楽しんでいただけていますか？\n\n` +
-    `このお茶のおすすめの淹れ方や、\n` +
-    `あなたに合う他のお茶のことなど、\n` +
-    `何でも気軽に聞いてくださいね。`
-  );
-}
-
-/**
- * 商品固有の Quick Reply ボタンを生成する。
- * Planning: 「おいしい淹れ方を教えて」「この茶葉について詳しく」「似たお茶をもっと見たい」
- */
-function buildProductQuickReplies(_productSlug: string): QuickReplyItem[] {
-  return [
-    {
-      type: "action",
-      action: {
-        type: "message",
-        label: "おいしい淹れ方を教えて",
-        text: ONBOARDING_BREWING_TEXT,
-      },
-    },
-    {
-      type: "action",
-      action: {
-        type: "message",
-        label: "この茶葉について詳しく",
-        text: ONBOARDING_PRODUCT_DETAIL_TEXT,
-      },
-    },
-    {
-      type: "action",
-      action: {
-        type: "message",
-        label: "似たお茶をもっと見たい",
-        text: ONBOARDING_SIMILAR_TEXT,
-      },
-    },
-  ];
-}
+// 商品固有ウェルカム文面は brand-copy.ts の buildProductWelcome（SoT）へ移設した（監査 #3）。
+//   旧 buildProductWelcomeMessage はブランド文言をベタ書きし読み仮名/配信頻度を欠いていた。
+// QR の Quick Reply（自由対話3択）と RAG 由来の商品名解決（lookupProductBySlug）は廃止し、
+//   handleFollowEvent で slug→5桁番号を解決して当該お茶のカード（💬感想ボタン付き）を直接提示する
+//   card→感想→次の一杯 ループへ置き換えた（監査 #4・Figma §17:334）。
 
 /** イベントをバックグラウンドで処理 */
 async function processEvents(
@@ -524,23 +445,39 @@ async function handleFollowEvent(
   const productSlug = ref ? extractProductSlug(ref) : null;
 
   if (productSlug) {
-    // --- 商品固有ウェルカムメッセージ（QR同梱物経由） ---
+    // --- QR同梱物経由: ブランド正本ウェルカム（#3）→ 当該お茶のカード（#4） ---
+    // 商品が確定している最大流入（QR 同梱）を、card→感想→次の一杯 の個別最適ループへ直接乗せる。
     let productName = productSlug.replace(/_/g, " ");
-
+    let resolvedTea: TeaItem | null = null;
     try {
-      const productInfo = await lookupProductBySlug(productSlug, env);
-      if (productInfo) {
-        productName = productInfo.productName;
-      }
+      const teas = await fetchSellingTeas(env);
+      resolvedTea = resolveTeaBySlug(productSlug, teas);
+      if (resolvedTea) productName = resolvedTea.name;
     } catch (err) {
-      console.warn("[follow] Product lookup failed, using slug as name:", err instanceof Error ? err.message : err);
+      // 販売中お茶の取得失敗時もウェルカムは必ず届ける（slug をそのまま商品名に使う）。
+      console.warn("[follow] tea resolve failed:", err instanceof Error ? err.message : err);
     }
 
-    const welcomeText = buildProductWelcomeMessage(productName);
-    const quickReplyItems = buildProductQuickReplies(productSlug);
+    // #3: ウェルカム文面はブランド正本（brand-copy.buildProductWelcome）へ一本化。
+    //     読み仮名（エルクシア）・シングルオリジン・配信頻度が SoT 経由で必ず入る。
+    const welcomeText = buildProductWelcome(productName);
 
-    await responder.text(welcomeText, quickReplyItems);
-    console.log(`[follow] Sent product-specific welcome for ${productSlug} to ${lineUserId}`);
+    if (resolvedTea) {
+      // #4: 当該お茶のカード（💬感想ボタン付き）を提示し、card→感想→次の一杯 ループへ乗せる。
+      const card = buildTeaCard(resolvedTea);
+      await responder.text(welcomeText);
+      await responder.text(card.text, card.quickReplies);
+      console.log(`[follow] QR welcome + rating card for ${resolvedTea.number} to ${lineUserId}`);
+    } else {
+      // お茶を解決できない（販売終了・番号変更 等）: 一覧入口を添えて行き止まりにしない。
+      await responder.text(welcomeText, [
+        {
+          type: "action",
+          action: { type: "message", label: "🍃 お茶の一覧を見る", text: TEA_LIST_ENTRY_TRIGGER },
+        },
+      ]);
+      console.log(`[follow] QR welcome (slug unresolved: ${productSlug}) to ${lineUserId}`);
+    }
   } else {
     // --- 通常の友だち追加ウェルカム（入口質問型・ブロック2） ---
     // 「どこで elxea を知ったか」を 1 回だけ質問し、回答で 3 動線へ分岐する。
@@ -813,51 +750,12 @@ async function handleOnboardingMessage(
       ];
       break;
 
-    // --- 商品固有オンボーディング Quick Reply（QR同梱物経由） ---
-    case ONBOARDING_BREWING_TEXT:
-      initialAction = "brewing_guide";
-      responseText = "おいしい淹れ方をご案内しますね。お届けしたお茶の最適な淹れ方をお伝えします。";
-      // エージェントに自然言語で問い合わせを流す（Quick Reply テキストは内部トリガー）
-      return handleProductOnboardingAction(lineUserId, "おいしい淹れ方を教えてください", initialAction, env, responder);
-
-    case ONBOARDING_PRODUCT_DETAIL_TEXT:
-      initialAction = "product_detail";
-      return handleProductOnboardingAction(lineUserId, "この茶葉について詳しく教えてください", initialAction, env, responder);
-
-    case ONBOARDING_SIMILAR_TEXT:
-      initialAction = "similar_products";
-      return handleProductOnboardingAction(lineUserId, "似たお茶をもっと見たいです", initialAction, env, responder);
-
     default:
       return false;
   }
 
   // 応答送信
   await responder.text(responseText, followUpQuickReplies);
-
-  // Firestore にオンボーディング完了を記録（fire-and-forget）
-  recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {
-    console.log("[onboarding] Firestore completion recording failed:", err instanceof Error ? err.message : err);
-  });
-
-  return true;
-}
-
-/**
- * 商品固有オンボーディング Quick Reply のタップを処理する。
- * 内部トリガーテキストを自然言語に変換してエージェントに渡す。
- * Firestore に記録した上で true を返す。
- */
-async function handleProductOnboardingAction(
-  lineUserId: string,
-  naturalLanguageQuery: string,
-  initialAction: string,
-  env: Env,
-  responder: LineResponder,
-): Promise<boolean> {
-  // エージェントに自然言語で問い合わせを転送
-  // （handleTextMessage の通常フローに乗せる）
-  await handleTextMessage(lineUserId, naturalLanguageQuery, env, responder);
 
   // Firestore にオンボーディング完了を記録（fire-and-forget）
   recordOnboardingCompletion(lineUserId, initialAction, env).catch((err) => {
