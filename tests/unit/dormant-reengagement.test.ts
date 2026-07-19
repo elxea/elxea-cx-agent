@@ -17,6 +17,8 @@ import {
   jstDate,
   dormantAggregationUnit,
   runDormantReengagementWith,
+  buildDormantBody,
+  deriveDormantReferencePhrase,
   maskUserRef,
   DAY_MS,
   type LineUserActivity,
@@ -24,6 +26,8 @@ import {
   type DecisionRecord,
 } from "../../src/lib/dormant-reengagement";
 import { isValidAggregationUnit } from "../../src/lib/aggregation-unit";
+import { DORMANT_REENGAGEMENT_MESSAGE } from "../../src/lib/brand-copy";
+import type { NextCupKarte } from "../../src/lib/next-cup";
 
 let total = 0;
 let passed = 0;
@@ -113,6 +117,65 @@ it("maskUserRef: 先頭8文字+... で PII をマスク", () => {
   // U("abcdef") = "U" + "abcdef".padEnd(32,"0") → 先頭8文字は "Uabcdef0"。
   assertEqual(maskUserRef(U("abcdef")), "Uabcdef0...", "mask");
   assertEqual(maskUserRef("short"), "********", "短い値は伏せる");
+});
+
+// ===================================================================
+// カルテ個別最適（#②-3）純粋関数: deriveDormantReferencePhrase / buildDormantBody
+// ===================================================================
+
+const karte = (over: Partial<NextCupKarte> = {}): NextCupKarte => ({
+  persona: over.persona ?? null,
+  tasteProfile: over.tasteProfile ?? null,
+});
+
+it("deriveDormantReferencePhrase: preferredCategories → 日本語カテゴリ参照句（青茶/緑茶/紅茶）", () => {
+  assertEqual(
+    deriveDormantReferencePhrase(
+      karte({ tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: [], scenePref: null } }),
+    ),
+    "以前お好みだった青茶に近いお茶",
+    "oolong→青茶",
+  );
+  assertEqual(
+    deriveDormantReferencePhrase(
+      karte({ tasteProfile: { preferredCategories: ["black"], flavorPreferences: [], scenePref: null } }),
+    ),
+    "以前お好みだった紅茶に近いお茶",
+    "black→紅茶",
+  );
+});
+
+it("deriveDormantReferencePhrase: カテゴリは persona 傾きに優先（#2 と同じ重み思想）", () => {
+  assertEqual(
+    deriveDormantReferencePhrase(
+      karte({
+        persona: "sensory",
+        tasteProfile: { preferredCategories: ["green"], flavorPreferences: [], scenePref: null },
+      }),
+    ),
+    "以前お好みだった緑茶に近いお茶",
+    "category > persona",
+  );
+});
+
+it("deriveDormantReferencePhrase: persona だけ（カテゴリ無し）→ 味の傾き / explorer・null → null", () => {
+  assertEqual(deriveDormantReferencePhrase(karte({ persona: "serenity" })), "まろやかな甘みのあるお茶", "serenity");
+  assertEqual(deriveDormantReferencePhrase(karte({ persona: "sensory" })), "しっかりとしたコクのあるお茶", "sensory");
+  assertEqual(deriveDormantReferencePhrase(karte({ persona: "explorer" })), null, "explorer は決めつけない");
+  assertEqual(deriveDormantReferencePhrase(null), null, "null カルテ");
+  assertEqual(deriveDormantReferencePhrase(karte()), null, "空カルテ");
+});
+
+it("buildDormantBody: カルテ有り→個別最適（参照句を含む） / 手がかり無し→generic 完全一致（無回帰）", () => {
+  const body = buildDormantBody(
+    karte({ tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: [], scenePref: null } }),
+  );
+  assertTrue(body.includes("青茶"), "個別最適本文は好みカテゴリを含む");
+  assertTrue(body !== DORMANT_REENGAGEMENT_MESSAGE, "generic とは別本文");
+  // 手がかり無し（null / explorer / 空）は generic 完全一致 = no-karte 後方互換。
+  assertEqual(buildDormantBody(null), DORMANT_REENGAGEMENT_MESSAGE, "null→generic");
+  assertEqual(buildDormantBody(karte({ persona: "explorer" })), DORMANT_REENGAGEMENT_MESSAGE, "explorer→generic");
+  assertEqual(buildDormantBody(karte()), DORMANT_REENGAGEMENT_MESSAGE, "空→generic");
 });
 
 // ===================================================================
@@ -215,6 +278,44 @@ it("ゲートOFF（既定）: 送信ゼロ・候補は全員 dry-run 記録", as
   assertTrue(
     recorded.every((x) => x.bodyPreview.length > 0),
     "送るはずだった本文を記録",
+  );
+});
+
+it("loadKarte 配線（#②-3）: 候補ごとに bodyPreview を出し分け（有り→個別最適 / 無し→generic・送信ゼロ）", async () => {
+  const uKarte = U("c1"); // カルテ有り（青茶を好む）
+  const uPlain = U("c2"); // カルテ無し
+  const kartes: Record<string, NextCupKarte> = {
+    [uKarte]: {
+      persona: null,
+      tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: [], scenePref: null },
+    },
+    [uPlain]: { persona: null, tasteProfile: null },
+  };
+  const { deps, recorded, sends } = makeDeps({
+    sendEnabled: false,
+    users: [
+      { lineUserId: uKarte, lastActiveAt: daysAgoIso(90) },
+      { lineUserId: uPlain, lastActiveAt: daysAgoIso(80) },
+    ],
+  });
+  deps.loadKarte = async (id) => kartes[id] ?? { persona: null, tasteProfile: null };
+
+  const r = await runDormantReengagementWith(deps);
+  assertEqual(r.dryRun, 2, "2 件 dry-run");
+  assertEqual(sends.length, 0, "実送信ゼロ（dry-run）");
+  const byUser = Object.fromEntries(recorded.map((d) => [d.lineUserId, d.bodyPreview]));
+  assertTrue(byUser[uKarte].includes("青茶"), "カルテ有りは個別最適本文（好みカテゴリを含む）");
+  assertEqual(byUser[uPlain], DORMANT_REENGAGEMENT_MESSAGE, "カルテ無しは generic（無回帰）");
+  assertTrue(byUser[uKarte] !== byUser[uPlain], "A/B: 2 人の本文は異なる");
+});
+
+it("loadKarte 未指定: 従来どおり generic body 固定（後方互換）", async () => {
+  const { deps, recorded } = makeDeps({ sendEnabled: false });
+  const r = await runDormantReengagementWith(deps);
+  assertTrue(r.dryRun >= 1, "候補あり");
+  assertTrue(
+    recorded.every((d) => d.bodyPreview === DORMANT_REENGAGEMENT_MESSAGE),
+    "全員 generic（loadKarte 無しは出し分けしない）",
   );
 });
 

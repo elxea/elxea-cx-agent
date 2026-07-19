@@ -111,6 +111,53 @@ export const DORMANT_REENGAGEMENT_MESSAGE =
   `こんにちは、${BRAND_NAME}（${BRAND_NAME_READING}）です。お変わりありませんか。` +
   "新しいお茶も少しずつ増えています。よろしければ、お茶の一覧から今の気分に合う一杯を探してみてくださいね。";
 
+/**
+ * 休眠一通の「個別最適版」本文ビルダー（純粋・監査 punch-list #②-3）。
+ *
+ * 体験原則（統合設計書 §B / リポ CLAUDE.md・DORMANT_REENGAGEMENT_MESSAGE と同一）: 静かで丁寧・
+ *   押し売り禁止・プッシュを増やさない・本文絵文字禁止・1メッセージ100文字目安。個別最適版でも
+ *   売り込み・クーポン・緊急性の演出（限定/今だけ/セール等）は書かない。
+ *
+ * 設計: generic 版（DORMANT_REENGAGEMENT_MESSAGE）と骨格・トーンを完全に共有し、真ん中の
+ *   「新しいお茶も少しずつ増えています」の 1 文だけを、その人のカルテ由来の参照句
+ *   （referencePhrase・末尾が「お茶」で終わる名詞句）に差し替える。差し替えは 1 文だけなので
+ *   「なぜこの文面か」が説明可能（explainable）で、挨拶・誘い（お茶の一覧へ）の構造は不変。
+ *
+ * @param referencePhrase カルテ由来の参照句（例: 「以前お好みだった青茶に近いお茶」）。
+ *   null / 空はカルテの手がかり無し → generic 版（DORMANT_REENGAGEMENT_MESSAGE）へ倒す（無回帰）。
+ * SoT: brand-copy 定数（ブランド名・読み仮名は本ファイル冒頭の正本参照）。参照句の語彙は
+ *   dormant-reengagement.ts が next-cup の CATEGORY_FAMILY / persona 傾き（#2 / #②-2 と同一）から導く。
+ */
+export function buildDormantReengagementMessage(referencePhrase: string | null): string {
+  if (!referencePhrase || referencePhrase.trim().length === 0) {
+    return DORMANT_REENGAGEMENT_MESSAGE;
+  }
+  return (
+    `こんにちは、${BRAND_NAME}（${BRAND_NAME_READING}）です。お変わりありませんか。` +
+    `${referencePhrase}も、少しずつ増えています。よろしければ、お茶の一覧から今の気分に合う一杯を探してみてくださいね。`
+  );
+}
+
+/**
+ * カルテの「好きなカテゴリ」を、休眠一通の参照句（名詞句）に整える（純粋・#②-3）。
+ * @param categoryLabel 日本語カテゴリラベル（緑茶 / 青茶 / 紅茶。next-cup.categoryLabelForPreferred 由来）。
+ */
+export function dormantCategoryReferencePhrase(categoryLabel: string): string {
+  return `以前お好みだった${categoryLabel}に近いお茶`;
+}
+
+/**
+ * persona=serenity（穏やか・まろやかな甘み寄り／診断 Q2-1）の参照句。
+ * 明示カテゴリが無いときの弱い prior（persona 傾き・next-cup の personaAromaLean と同じ根拠）。
+ */
+export const DORMANT_TASTE_REFERENCE_SERENITY = "まろやかな甘みのあるお茶";
+
+/**
+ * persona=sensory（コク・余韻がしっかり寄り／診断 Q2-3）の参照句。
+ * 明示カテゴリが無いときの弱い prior（persona 傾き・next-cup の personaBodyLean と同じ根拠）。
+ */
+export const DORMANT_TASTE_REFERENCE_SENSORY = "しっかりとしたコクのあるお茶";
+
 // --- アカウント連携導線（定期便客限定・ブロック4）---
 //
 // 体験原則（統合設計書 §B / リポ CLAUDE.md）: 静かで丁寧・押し売り禁止・絵文字禁止・
