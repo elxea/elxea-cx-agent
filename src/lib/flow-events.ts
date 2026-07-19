@@ -144,3 +144,53 @@ export async function logFlowEvent(
     );
   }
 }
+
+/** 直近の next_cup_shown（見せた「次の一杯」）。UX② マイカルテ「だから」カードの根拠に使う。 */
+export interface LatestNextCupShown {
+  /** 見せた銘柄の 5 桁番号（product_no）。 */
+  productNo: string | null;
+  /** 版（"karte" = 個別化で別銘柄 / "baseline"）。生の affinity 数値は含めない（人間語に留める）。 */
+  value: string | null;
+}
+
+/**
+ * 直近の next_cup_shown イベントを 1 件だけ読む（read-only・fail-safe）。
+ *
+ * UX② マイカルテの「だから（なぜこの一杯か）」カードで、実際に最後に見せた「次の一杯」を
+ * 根拠として引くために使う。**書き込みは一切しない**。metadata の affinity 等の生スコアは
+ * 返さない（productNo と版だけを返し、表示側は人間語のみで語る）。
+ *
+ * 失敗・0 件・テーブル未適用はいずれも null（呼び出し側は根拠なしで graceful に組む）。
+ */
+export async function getLatestNextCupShown(
+  supabase: SupabaseClient,
+  userRef: string,
+): Promise<LatestNextCupShown | null> {
+  try {
+    if (!userRef) return null;
+    const { data, error } = await supabase
+      .from(FLOW_EVENTS_TABLE)
+      .select("product_no, value")
+      .eq("user_ref", userRef)
+      .eq("event_name", "next_cup_shown")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (error) {
+      console.warn("[flow-events] latest next_cup_shown read failed (non-blocking):", error.message);
+      return null;
+    }
+    const row = (data ?? [])[0] as { product_no?: unknown; value?: unknown } | undefined;
+    if (!row) return null;
+    const productNo = sanitizeProductNo(
+      typeof row.product_no === "string" ? row.product_no : undefined,
+    );
+    const value = sanitizeSlug(typeof row.value === "string" ? row.value : undefined);
+    return { productNo, value };
+  } catch (err) {
+    console.warn(
+      "[flow-events] latest next_cup_shown unexpected error (non-blocking):",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
