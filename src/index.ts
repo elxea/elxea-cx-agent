@@ -26,6 +26,7 @@ import {
 } from "./lib/delivery-runtime";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
 import { runDormantReengagement } from "./lib/dormant-reengagement";
+import { runMarcheActivation } from "./lib/marche-activation";
 import { getAlertStatus } from "./lib/alerts";
 
 /**
@@ -72,6 +73,18 @@ export type Env = {
   DORMANT_THRESHOLD_DAYS?: string;
   /** 休眠一通の 1 実行あたり送信上限（通）。未設定・不正は既定 20。月次予算は line_message_ledger が別途会計。 */
   DORMANT_PER_RUN_CAP?: string;
+  /**
+   * マルシェ活性化ナッジ（spec drift #1）の実送信許可フラグ。"true" のときのみ実送信。
+   * 既定 未設定=false（dry-run: 候補と本文を marche_activation_log に記録するだけで LINE には送らない）。
+   * DELIVERY/DORMANT_SEND_ENABLED とは独立（活性化機能だけを別ゲートで制御する）。
+   */
+  MARCHE_SEND_ENABLED?: string;
+  /** マルシェ活性化の下限しきい値（日・追加からこの日数を過ぎたら対象）。未設定・不正は既定 1。 */
+  MARCHE_ACTIVATION_THRESHOLD_DAYS?: string;
+  /** マルシェ活性化の上限ウィンドウ（日・追加からこの日数を過ぎたら休眠に譲る）。未設定・不正は既定 14。 */
+  MARCHE_ACTIVATION_WINDOW_DAYS?: string;
+  /** マルシェ活性化の 1 実行あたり送信上限（通）。未設定・不正は既定 20。月次予算は line_message_ledger が別途会計。 */
+  MARCHE_ACTIVATION_PER_RUN_CAP?: string;
   /** broadcast(全員配信) の想定受信者数（無料枠ガード見積用）。 */
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD?: string;
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST?: string;
@@ -454,6 +467,55 @@ app.post("/api/dormant/run", async (c) => {
 });
 
 /**
+ * マルシェ活性化ナッジ 手動トリガ API（spec drift #1）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。cron の stats tick 同居処理と同一処理を同期実行する。
+ *
+ * ⚠ 実送信ガード（多層・既定は送らない）:
+ *   - MARCHE_SEND_ENABLED != "true"（既定）: dry-run。候補と本文を marche_activation_log に記録するだけで LINE 送信系 API に触れない。
+ *   - 恒久重複防止（1人1回）は marche_activation_log、月次予算は line_message_ledger。
+ * staging の疎通確認（対象0でも正常終了・dry-run で送信0）に使う。結果 JSON を同期で返す（証跡化）。
+ */
+app.post("/api/marche-activation/run", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const result = await runMarcheActivation(c.env).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+    sendEnabled: c.env.MARCHE_SEND_ENABLED === "true",
+    thresholdDays: 0,
+    windowDays: 0,
+    perRunCap: 0,
+    scanned: 0,
+    candidates: 0,
+    sent: 0,
+    dryRun: 0,
+    budgetBlocked: 0,
+    details: [] as never[],
+  }));
+
+  console.log(
+    "Manual marche activation completed:",
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      sendEnabled: result.sendEnabled,
+      scanned: result.scanned,
+      candidates: result.candidates,
+      sent: result.sent,
+      dryRun: result.dryRun,
+    }),
+  );
+
+  return c.json({ status: "marche_activation_completed", result });
+});
+
+/**
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
  * - scheduled: Cron Trigger による定期処理
@@ -542,6 +604,35 @@ export default {
           .catch((err) => {
             console.error(
               "Scheduled dormant re-engagement threw (fail-soft):",
+              err instanceof Error ? err.message : String(err),
+            );
+          }),
+      );
+
+      // マルシェ活性化ナッジ（spec drift #1）も stats tick に同居させる（専用 cron を新設できない・
+      // Cloudflare の 5 トリガ上限で 6 本目は登録拒否＝wrangler.toml 参照。stats（0 19）は staging 限定
+      // トリガ〔本番 [triggers] に無い〕なので、この同居も staging 限定で発火＝本番では実行されない）。
+      // 既定は送信封鎖（MARCHE_SEND_ENABLED != "true" で dry-run・LINE 送信系 API 非接触）。
+      // stats/dormant とは独立の waitUntil（1 つの失敗が他を巻き込まない）。fail-soft でジョブは throw しない。
+      ctx.waitUntil(
+        runMarcheActivation(env)
+          .then((result) => {
+            console.log(
+              "Scheduled marche activation completed (co-located on stats tick):",
+              JSON.stringify({
+                ok: result.ok,
+                reason: result.reason,
+                sendEnabled: result.sendEnabled,
+                scanned: result.scanned,
+                candidates: result.candidates,
+                sent: result.sent,
+                dryRun: result.dryRun,
+              }),
+            );
+          })
+          .catch((err) => {
+            console.error(
+              "Scheduled marche activation threw (fail-soft):",
               err instanceof Error ? err.message : String(err),
             );
           }),

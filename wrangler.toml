@@ -109,5 +109,14 @@ binding = "AI"
 #     へ記録するだけ・LINE 送信系 API 非接触）。staging でも DORMANT_SEND_ENABLED は置かない（実送信ゼロ）。
 #   DORMANT_CRON_PATTERN("0 20 * * *") と classifyCron の "dormant" 分岐は、将来 cron 枠が空いたときに
 #   専用トリガへ移すための配線として残す（現状は未登録＝不活性・手動は /api/dormant/run で起動可能）。
+#
+# ── spec drift #1 マルシェ活性化ナッジも stats tick に同居（新規トリガ 0 本・staging 限定）──
+#   休眠と同じ 5 トリガ上限の制約により専用トリガを付けられないため、index.ts の "stats" 分岐が
+#   runBroadcastStatsFetch / runDormantReengagement に続けて runMarcheActivation も waitUntil する。
+#   stats（0 19）は staging 限定トリガ（本番 [triggers] に無い）なので活性化スキャンも本番では実行されない。
+#   ⚠ 既定は送信封鎖（MARCHE_SEND_ENABLED != "true" で dry-run: 候補と本文を marche_activation_log へ
+#     記録するだけ・LINE 送信系 API 非接触）。staging でも MARCHE_SEND_ENABLED は置かない（実送信ゼロ）。
+#     手動疎通は /api/marche-activation/run で起動可能（dry-run・対象0でも正常終了）。
+#   しきい値/窓/上限は env で調整可（MARCHE_ACTIVATION_THRESHOLD_DAYS=1 / _WINDOW_DAYS=14 / _PER_RUN_CAP=20 が既定）。
 [env.staging.triggers]
 crons = ["*/15 * * * *", "0 18 * * *", "0 19 * * *"]

@@ -114,6 +114,9 @@ it("buildEntryWelcome: 3 択が流入元トークンを送る", () => {
 it("buildSourceResponse(marche): 5桁番号を案内し診断/一覧/使い方を提示", () => {
   const { text, quickReplies } = buildSourceResponse("marche");
   assertTrue(text.includes("5桁の番号"), "5桁番号の案内");
+  // spec drift #1: 番号を送る動作を明示（初動の「番号未送信」離脱を減らす強化コピー）。
+  assertTrue(text.includes("送っていただくと"), "番号を送るとどうなるかの明示");
+  assertTrue(text.includes("送ってみてくださいね"), "番号送信の静かな CTA");
   assertTrue(!EMOJI_RE.test(text), "本文に絵文字なし");
   const texts = actionTexts(quickReplies);
   assertTrue(texts.includes(DIAGNOSIS_TRIGGER), "診断トリガー");
