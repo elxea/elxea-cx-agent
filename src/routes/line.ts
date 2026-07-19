@@ -28,6 +28,11 @@ import {
 import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handleLinkageFlow } from "../lib/subscriber-linkage";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
+import {
+  buildResponseQuickReplies,
+  FEEDBACK_POSITIVE_TEXT,
+  FEEDBACK_NEGATIVE_TEXT,
+} from "../lib/feedback-quick-reply";
 import { logFlowEvent } from "../lib/flow-events";
 import { menuTapValue } from "../lib/menu-tap";
 import {
@@ -81,9 +86,9 @@ const REF_PACKAGE_PREFIX = "pkg_";
 /** pending_follow_refs の有効期限（10分 — QRスキャンから友だち追加までのバッファ） */
 const PENDING_REF_TTL_MINUTES = 10;
 
-/** フィードバック Quick Reply のトリガーテキスト */
-const FEEDBACK_POSITIVE_TEXT = "feedback:positive";
-const FEEDBACK_NEGATIVE_TEXT = "feedback:negative";
+// フィードバック Quick Reply のトリガーテキスト（FEEDBACK_POSITIVE_TEXT / FEEDBACK_NEGATIVE_TEXT）と、
+// 生成・提示頻度ロジック（buildResponseQuickReplies）は ../lib/feedback-quick-reply に集約した
+// （監査 #5: 👍/👎 の常時付与をやめ提示頻度を絞る。handleFeedbackMessage はここから import 参照）。
 
 /** フィードバック待ちユーザーのコメント収集状態（インメモリ） */
 const pendingFeedbackComments = new Map<string, { messageContent: string; expiresAt: number }>();
@@ -514,22 +519,8 @@ async function handleFollowEvent(
   }
 }
 
-/**
- * フィードバック Quick Reply アイテムを生成する。
- * エージェント応答の Quick Reply に追加する。
- */
-function buildFeedbackQuickReplies(): QuickReplyItem[] {
-  return [
-    {
-      type: "action",
-      action: { type: "message", label: "\uD83D\uDC4D よかった", text: FEEDBACK_POSITIVE_TEXT },
-    },
-    {
-      type: "action",
-      action: { type: "message", label: "\uD83D\uDC4E 改善希望", text: FEEDBACK_NEGATIVE_TEXT },
-    },
-  ];
-}
+// buildFeedbackQuickReplies() は ../lib/feedback-quick-reply へ移設（監査 #5: 常時付与をやめ提示頻度を絞る）。
+// タップ経路（下記 handleFeedbackMessage）は不変＝ message_feedback 記録 / Slack ネガ通知の信号は保全する。
 
 /**
  * フィードバックメッセージを処理する。
@@ -968,7 +959,7 @@ async function handleTextMessage(
     { isLinked: identity.isLinked, ratingUserRef: lineUserId },
   );
 
-  // Quick Reply を LINE 形式に変換し、フィードバック Quick Reply を追加
+  // Quick Reply を LINE 形式に変換する。
   const agentQuickReplies: QuickReplyItem[] = result.quickReplies?.map(
     (qr) => ({
       type: "action" as const,
@@ -976,14 +967,19 @@ async function handleTextMessage(
     }),
   ) ?? [];
 
-  const feedbackQuickReplies = buildFeedbackQuickReplies();
-  const allQuickReplies = [...agentQuickReplies, ...feedbackQuickReplies];
+  // このターンを含むアシスタント応答の通算回数（tasting-note CTA と共有する turn カウント）。
+  const assistantTurnCount = history.filter((m) => m.role === "assistant").length + 1;
+
+  // 監査 #5: 👍/👎 の「毎ターン常時付与」をやめ、静か原則に沿って提示頻度を絞る（初回 + N ターンに 1 度）。
+  //   信号（message_feedback 記録 / Slack ネガ通知）は handleFeedbackMessage 側で常時有効・不変。
+  //   ここは surfacing の頻度だけを絞る（感想→product_ratings→次の一杯 の個別最適ループには非干渉）。
+  const allQuickReplies = buildResponseQuickReplies(agentQuickReplies, { assistantTurnCount });
 
   // テイスティングノート CTA: 5ターン以上 & 未表示の場合、応答末尾に追加
   let responseText = result.response;
   if (
     !tastingNoteCTAShown.has(lineUserId) &&
-    history.filter((m) => m.role === "assistant").length + 1 >= TASTING_NOTE_TURN_THRESHOLD
+    assistantTurnCount >= TASTING_NOTE_TURN_THRESHOLD
   ) {
     responseText += TASTING_NOTE_CTA_TEXT;
     tastingNoteCTAShown.add(lineUserId);
