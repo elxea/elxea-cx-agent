@@ -40,6 +40,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:unit
 
+  hermetic-e2e:
+    name: hermetic-e2e
+    needs: static-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # ハーメティック L1（バックエンド動線・返答本文の自動判定）。ネットワーク不使用・モックのみ。
+    # 秘密不要で PR / push 両方で走る（master-push 限定の e2e-tests とは別の PR ゲート）。
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:hermetic
+
   e2e-tests:
     name: e2e-tests
     needs: static-checks
