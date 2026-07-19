@@ -35,7 +35,7 @@ import {
   type RatingValue,
   type RatingSource,
 } from "./product-ratings";
-import { selectNextCup, type NextCupKarte } from "./next-cup";
+import { selectNextCup, karteAffinity, type NextCupKarte } from "./next-cup";
 import { loadCustomerKarte } from "./customer-karte";
 import {
   NEXT_CUP_GOOD_THANKS,
@@ -263,7 +263,7 @@ function qr(label: string, text: string): QuickReplyItem {
   return { type: "action", action: { type: "message", label: truncateLabel(label), text } };
 }
 
-/** 一覧の並び順: 種類（CATEGORY_ORDER）→ 番号。種類ごとにまとまり、読みやすい。 */
+/** 一覧の並び順（generic・no-karte 基準）: 種類（CATEGORY_ORDER）→ 番号。種類ごとにまとまり、読みやすい。 */
 function sortForEntry(teas: TeaItem[]): TeaItem[] {
   const rank = (c: string) => {
     const i = CATEGORY_ORDER.indexOf(c as (typeof CATEGORY_ORDER)[number]);
@@ -275,12 +275,40 @@ function sortForEntry(teas: TeaItem[]): TeaItem[] {
 }
 
 /**
+ * カルテ（好み）で一覧を並べ替える（監査 punch-list #②-2「お茶の提示・メニュー・おすすめの出し分け」）。
+ *
+ * generic 並び（sortForEntry: 種類→番号）を土台に、カルテ親和度（next-cup.ts の karteAffinity・
+ * 会話側 core.ts buildPersonalizationBlock と「次の一杯」#2 が読むのと同じ persona / tasteProfile 重み）が
+ * 高い順へ安定に前出しする。＝「その人に合うお茶を先頭に surfacing する」出し分け。
+ *
+ * 安全・後方互換（no-karte 無回帰）:
+ *   - カルテ null・空（未診断/未連携）は karteAffinity が全銘柄 0 を返す ⇒ generic 並びと完全一致。
+ *     no-karte ユーザーは従来挙動のまま（graceful fallback）。
+ *   - 同親和度は generic 並び順（種類→番号）を保つ決定的 tiebreak（Array.sort の安定性に依存しない）。
+ *   - 「似た軸の 1 本を出す」次の一杯(#2)と同一の karteAffinity を共有し、出し分けの一貫性を担保する。
+ */
+function sortForEntryWithKarte(teas: TeaItem[], karte?: NextCupKarte | null): TeaItem[] {
+  const generic = sortForEntry(teas);
+  if (!karte) return generic;
+  // generic 上の順位（決定的 tiebreak 用）。同親和度は種類→番号の従来順を保つ。
+  const genericRank = new Map(generic.map((t, i) => [t.number, i]));
+  return [...generic].sort((a, b) => {
+    const d = karteAffinity(b, karte) - karteAffinity(a, karte); // 親和度が大きい方を前へ
+    if (d !== 0) return d;
+    return (genericRank.get(a.number) ?? 0) - (genericRank.get(b.number) ?? 0);
+  });
+}
+
+/**
  * お茶一覧メッセージ（種類選択層なし・販売中のお茶を直接一覧）。
  * Status=販売中 の全お茶を「今お選びいただけるお茶（＝今季のお茶）」として直返しする。
  * 13 超はページング（次へ／前へ）。1 ページ 11 件 + ナビ最大 2 枠で上限 13 に収める。
+ *
+ * karte（任意・監査 #②-2）を渡すと、その人の好み（persona / tasteProfile）に近い銘柄を
+ * 先頭へ並べ替える（出し分け）。未指定・空カルテは generic 並び（種類→番号）で従来どおり。
  */
-export function buildEntryMessage(teas: TeaItem[], page = 0): OutMessage {
-  const sorted = sortForEntry(teas);
+export function buildEntryMessage(teas: TeaItem[], page = 0, karte?: NextCupKarte | null): OutMessage {
+  const sorted = sortForEntryWithKarte(teas, karte);
   if (sorted.length === 0) {
     return {
       text: "申し訳ありません、ただいまご案内できるお茶がありません。少し時間をおいてお試しください。",
@@ -548,7 +576,11 @@ export function resolveTeaBySlug(slug: string, teas: TeaItem[]): TeaItem | null 
 // プラン（純粋・状態レス）: アクション + 全お茶 → 送信メッセージ列 or null
 // ---------------------------------------------------------------------------
 
-export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: OutMessage[] } | null {
+export function planTeaFlow(
+  userMessage: string,
+  teas: TeaItem[],
+  karte?: NextCupKarte | null,
+): { messages: OutMessage[] } | null {
   const action = parseTeaAction(userMessage);
   if (!action) return null;
 
@@ -556,7 +588,9 @@ export function planTeaFlow(userMessage: string, teas: TeaItem[]): { messages: O
 
   switch (action.kind) {
     case "entry":
-      return { messages: [buildEntryMessage(teas, action.page)] };
+      // 監査 #②-2: 一覧（お茶の提示・メニュー）はカルテ（好み）で並べ替える。
+      //   未指定・空カルテは generic 並び（種類→番号）で従来どおり（no-karte 無回帰）。
+      return { messages: [buildEntryMessage(teas, action.page, karte)] };
 
     case "card": {
       const tea = find(action.number);
@@ -843,13 +877,24 @@ export async function handleTeaMenuFlow(
     return false; // 文中 5 桁の曖昧ケースは自由対話へ素通り
   }
 
-  const plan = planTeaFlow(userMessage, teas);
+  // 記録用 Supabase クライアント + カルテローダを先に用意する（entry の出し分けにカルテを使うため）。
+  //   カルテは監査 #②-2（お茶一覧の出し分け）と #2（rate-good の次の一杯）で共用する。
+  //   deps.loadKarte はハーメティックテストの注入シーム（Firestore 非接触）。既定は fail-safe な loadCustomerKarte。
+  const supabase = createSupabaseClient(env);
+  const loadKarte = deps?.loadKarte ?? ((id: string) => loadCustomerKarte(id, env, supabase));
+
+  // 監査 #②-2 出し分け: お茶一覧（entry）だけカルテを読み、好みに近い順へ並べ替える。
+  //   他アクション（card/brew/感想…）は一覧の並びに関与しないためカルテ不要（余計な I/O を避ける）。
+  //   カルテ取得は fail-safe（空＝従来の generic 並び）＝ no-karte ユーザーは完全に従来挙動（無回帰）。
+  const entryKarte: NextCupKarte | undefined =
+    action.kind === "entry" ? await loadKarte(lineUserId) : undefined;
+
+  const plan = planTeaFlow(userMessage, teas, entryKarte);
   if (!plan) return false; // number-loose 不一致など → 素通り
 
   // 記録（flow_events / product_ratings）は返信の成否と独立に必ず開始する（fire-and-forget・Spec §B-5）。
   //   返信より先に void で投げることで、返信 throw（reply token 期限切れ + push 失敗など）に
   //   記録が道連れにされる回帰を防ぐ（診断ハンドラ runDiagnosisSideEffects と同じ堅牢化・2026-07-16）。
-  const supabase = createSupabaseClient(env);
   for (const ev of teaFlowEvents(userMessage, teas, lineUserId)) {
     void logFlowEvent(supabase, ev);
   }
@@ -879,9 +924,7 @@ export async function handleTeaMenuFlow(
       let suggestion: TeaItem | null = null;
       if (action.kind === "rate-good") {
         const priorRatings = await getUserRatings(supabase, lineUserId);
-        const loadKarte =
-          deps?.loadKarte ?? ((id: string) => loadCustomerKarte(id, env, supabase));
-        const karte = await loadKarte(lineUserId);
+        const karte = await loadKarte(lineUserId); // 上で用意した共用ローダを再利用（entry と同じ源）
         suggestion = selectNextCup(ratedTea, teas, allRatedProductNos(priorRatings), karte);
       }
       messages = [buildRateResponse(ratedTea, action.kind, suggestion)];
