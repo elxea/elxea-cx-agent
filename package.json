@@ -29,7 +29,8 @@
     "smoke-test": "npx tsx scripts/smoke-test.ts",
     "prober": "npx tsx scripts/knowledge-prober.ts",
     "regression": "npx tsx scripts/knowledge-regression.ts",
-    "test:staging-smoke": "npx tsx tests/staging/smoke.test.ts"
+    "test:staging-smoke": "npx tsx tests/staging/smoke.test.ts",
+    "test:hermetic": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -39,12 +40,14 @@
     "jose": "^6.2.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.6",
     "@cloudflare/workers-types": "^4.20250313.0",
     "@types/node": "^25.3.5",
     "dotenv": "^17.3.1",
     "pg": "^8.20.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
+    "vitest": "4.1.10",
     "wrangler": "^4.5.0"
   }
 }
