@@ -161,7 +161,7 @@ export async function fetchProductTagsByIds(
 // 顧客注文照会（lookup_my_orders）
 // -------------------------------------------------------------------
 
-type OrderSummary = {
+export type OrderSummary = {
   name: string;
   status: string;
   fulfillmentStatus: string;
@@ -169,6 +169,97 @@ type OrderSummary = {
   totalPrice: string;
   tracking?: { number: string; url: string };
 };
+
+/**
+ * 呼び出しユーザーの紐付け済み Shopify アカウントから、直近注文を構造化して返す（read-only・fail-safe）。
+ *
+ * UX② マイカルテ（連携済みユーザーの「最近のお届け」表示）用の read-only 抽出。lookupMyOrders が
+ * 文字列整形して返すのに対し、本関数は整形前の OrderSummary[] を返す（表示側で人間語に組む）。
+ *
+ * 安全設計:
+ *   - resolveCallerShopifyCustomerId（customer_linkages）で本人に紐付いた顧客だけを引く（[SEC-A]・IDOR 防止）。
+ *   - 未連携・顧客不在・API 失敗・認証未設定は **例外を投げず []** を返す（LINE のみユーザーは購入セクションを省く）。
+ *   - 書き込みは一切しない（Admin API は orders 参照クエリのみ）。
+ *
+ * @param userId  LINE userId（channel="line"）または Shopify customer id（channel="web"）。
+ * @param channel 呼び出しチャネル。
+ * @param limit   返す最大件数（既定 3・表示用に少数）。
+ */
+export async function fetchRecentOrders(
+  userId: string,
+  channel: "line" | "web",
+  env: Env,
+  limit = 3,
+): Promise<OrderSummary[]> {
+  try {
+    if (!env.SHOPIFY_ADMIN_ACCESS_TOKEN || !env.SHOPIFY_STORE_DOMAIN) return [];
+    const supabase = createSupabaseClient(env);
+    const shopifyCustomerId = await resolveCallerShopifyCustomerId(userId, channel, supabase);
+    if (!shopifyCustomerId) return []; // 未連携（LINE のみ）→ 購入セクションは省く。
+    const query = `
+      query getCustomerOrders($customerId: ID!) {
+        customer(id: $customerId) {
+          orders(first: 5, sortKey: CREATED_AT, reverse: true) {
+            edges {
+              node {
+                name
+                displayFinancialStatus
+                displayFulfillmentStatus
+                createdAt
+                totalPriceSet { shopMoney { amount currencyCode } }
+                fulfillments(first: 1) {
+                  trackingInfo(first: 1) { number url }
+                  status
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const data = await shopifyAdminQuery(
+      query,
+      { customerId: `gid://shopify/Customer/${shopifyCustomerId}` },
+      env,
+    );
+    const customer = data.customer as {
+      orders: {
+        edges: Array<{
+          node: {
+            name: string;
+            displayFinancialStatus: string;
+            displayFulfillmentStatus: string;
+            createdAt: string;
+            totalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+            fulfillments: Array<{
+              trackingInfo: Array<{ number: string; url: string }>;
+              status: string;
+            }>;
+          };
+        }>;
+      };
+    } | null;
+    if (!customer) return [];
+    return customer.orders.edges.slice(0, Math.max(0, limit)).map((edge) => {
+      const o = edge.node;
+      const tracking = o.fulfillments?.[0]?.trackingInfo?.[0];
+      return {
+        name: o.name,
+        status: formatFinancialStatus(o.displayFinancialStatus),
+        fulfillmentStatus: formatFulfillmentStatus(o.displayFulfillmentStatus),
+        createdAt: new Date(o.createdAt).toLocaleDateString("ja-JP"),
+        totalPrice: `¥${Number(o.totalPriceSet.shopMoney.amount).toLocaleString()}`,
+        tracking: tracking?.number ? { number: tracking.number, url: tracking.url } : undefined,
+      };
+    });
+  } catch (err) {
+    console.warn(
+      "[shopify] fetchRecentOrders skipped (non-blocking):",
+      err instanceof Error ? err.message : err,
+    );
+    return [];
+  }
+}
 
 /**
  * ユーザーの紐付け済み Shopify アカウントから注文履歴を取得。

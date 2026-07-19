@@ -34,13 +34,13 @@ export interface PersonalizationFacts {
   tasteProfile: TasteProfile | null;
 }
 
-const PERSONA_LABEL: Record<PersonaType, string> = {
+export const PERSONA_LABEL: Record<PersonaType, string> = {
   serenity: "穏やか（静けさ・ゆとりを好む）",
   explorer: "探求（新しいお茶・産地の物語を好む）",
   sensory: "感覚（味わい・香り・ペアリングを楽しむ）",
 };
 
-const ENTRY_LABEL: Record<EntrySource, string> = {
+export const ENTRY_LABEL: Record<EntrySource, string> = {
   marche: "マルシェ（対面イベント）で elxea を知った",
   online: "オンラインで elxea を知った",
   other: "その他の経路で elxea を知った",

@@ -252,7 +252,11 @@ export function buildQ3(q1: number, q2: number): OutMessage {
  * 監査 #6 是正: 旧実装は 5 桁番号をハードコードしており、販売終了・番号変更で「見つかりません」化した。
  *   受け止め（あなたは〇〇な人）はブランド体験の核なので定数として保持し、銘柄だけを動的化する。
  */
-const PERSONA_INTRO: Record<PersonaType, string> = {
+/**
+ * 診断ペルソナ別の「受け止め文」（人間の言葉・生スコア非露出）。UX② マイカルテが
+ * 「あなた」カードでこのままの言葉を再利用する（新しい用語をユーザーに増やさないため export）。
+ */
+export const PERSONA_INTRO: Record<PersonaType, string> = {
   serenity:
     "あなたは【静けさを愉しむ人】。\n" +
     "一日のあわいに、そっと心をほどく時間を大切にされる方ですね。\n" +

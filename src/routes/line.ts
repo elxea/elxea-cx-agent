@@ -28,6 +28,7 @@ import {
 import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handleLinkageFlow } from "../lib/subscriber-linkage";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
+import { handleMyKarteFlow } from "../lib/my-karte";
 import {
   buildResponseQuickReplies,
   FEEDBACK_POSITIVE_TEXT,
@@ -906,6 +907,12 @@ async function handleTextMessage(
   //   自由発話・pending トークンと衝突しないため後置は安全。無関係発話は素通り。
   const wasDiagnosis = await handlePreferenceDiagnosis(lineUserId, userMessage, env, responder);
   if (wasDiagnosis) return;
+
+  // マイカルテ（UX②・完全一致「マイカルテ」・read-only）。ユーザーの理解プロフィールを
+  // 3 枚の Flex カルーセル（あなた / これまで / だから）で返す。未連携 LINE ユーザーでも動作し、
+  // 生スコアは一切出さない。空カルテは診断 CTA に graceful。tea-menu / 診断と同じく後置（無関係発話は素通り）。
+  const wasMyKarte = await handleMyKarteFlow(lineUserId, userMessage, env, responder);
+  if (wasMyKarte) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;
