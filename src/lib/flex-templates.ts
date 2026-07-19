@@ -844,12 +844,12 @@ export function preferDirectR2(raw: string | null | undefined): string | null {
 /**
  * お茶レコメンドカード（UX③・写真つき or 写真なし graceful）。
  *
- * 構成: hero（画像あり時のみ）+ `名前（No.XXXXX）`（呼び出し側で formatTeaLabel 済）+ 抜粋 + 「見る」ボタン。
+ * 構成: hero（画像あり時のみ）+ `番号｜名前`（呼び出し側で formatTeaLabel 済）+ 抜粋 + 「見る」ボタン。
  * `imageUrl` 省略時は hero を出さず、崩れないテキスト調カードになる（現況の主経路）。
  * `matchReason` 指定時のみ本文末尾に理由 1 行を添える（診断/次の一杯の一貫性）。
  */
 export function teaRecommendCard(params: {
-  /** 表示名（既に `名前（No.XXXXX）` に整形済み）。 */
+  /** 表示名（既に `番号｜名前` に整形済み）。 */
   name: string;
   /** 短い説明（味わい抜粋）。 */
   description: string;

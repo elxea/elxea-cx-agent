@@ -35,6 +35,7 @@ import { AGENT_TOOLS } from "./tools";
 import { withTimeout } from "../lib/utils";
 import { recordEscalation } from "../lib/alerts";
 import { applyBrandGuard } from "../lib/brand-guard";
+import { formatTeaLabel } from "../lib/brand-copy";
 
 type Message = {
   role: "user" | "assistant";
@@ -1058,7 +1059,7 @@ async function buildPersonalizationBlock(params: {
         const teas = await fetchSellingTeas(env);
         for (const no of positives) {
           const tea = teas.find((t) => t.number === no);
-          if (tea) ratedGoodLabels.push(`${tea.name}（No.${tea.number}）`);
+          if (tea) ratedGoodLabels.push(formatTeaLabel({ name: tea.name, number: tea.number }));
           if (ratedGoodLabels.length >= 5) break;
         }
       }

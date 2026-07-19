@@ -77,10 +77,10 @@ const LINE_ONLY: KarteDisplay = {
   persona: "sensory",
   tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: ["rich", "sweet"], scenePref: "夜のひととき" },
   entrySource: "marche",
-  ratedGoodLabels: ["煎茶 やまなみ（No.11301）"],
+  ratedGoodLabels: ["11301｜煎茶 やまなみ"],
   diagnosisDone: true,
   recentOrders: [],
-  lastNextCupLabel: "和烏龍茶 香駿（No.40101）",
+  lastNextCupLabel: "40101｜和烏龍茶 香駿",
 };
 
 it("トリガー完全一致のみ true（部分一致は false）", () => {
@@ -103,9 +103,9 @@ it("未連携+カルテあり → 3 枚カード・人間語・なぜ理由・�
   assert(v.includes("青茶"), "カテゴリ人間語（oolong→青茶）");
   assert(v.includes("コク"), "flavor 人間語（rich→コク）");
   assert(!v.includes("rich"), "flavor slug 非露出");
-  assert(v.includes("（No.11301）"), "評価済みお茶が 名前（No.）表記");
+  assert(v.includes("11301｜"), "評価済みお茶が 番号｜名前 表記");
   assert(v.includes("だから、次の一杯"), "3 枚目のなぜカード");
-  assert(v.includes("（No.40101）"), "直近の次の一杯を根拠に");
+  assert(v.includes("40101｜"), "直近の次の一杯を根拠に");
   assert(/ふまえ|合わせて|寄り添って/.test(v), "なぜ理由文");
   assert(!SCORE_LEAK_RE.test(v), `生スコア漏洩: ${v}`);
 });
@@ -209,9 +209,9 @@ it("loadKarteForDisplay: 注入 fake で組み立て + 書き込みゼロ（read
   assertEqual(d.persona, "sensory", "persona");
   assertEqual(d.diagnosisDone, true, "diagnosisDone");
   assertEqual(d.entrySource, "marche", "entrySource");
-  assertEqual(d.ratedGoodLabels.join("|"), "煎茶 やまなみ（No.11301）", "rated label");
+  assertEqual(d.ratedGoodLabels.join("|"), "11301｜煎茶 やまなみ", "rated label");
   assertEqual(d.recentOrders.length, 1, "orders");
-  assertEqual(d.lastNextCupLabel, "和烏龍茶 香駿（No.40101）", "last next cup");
+  assertEqual(d.lastNextCupLabel, "40101｜和烏龍茶 香駿", "last next cup");
   assertEqual(writes, 0, "書き込みゼロ（read-only）");
 });
 

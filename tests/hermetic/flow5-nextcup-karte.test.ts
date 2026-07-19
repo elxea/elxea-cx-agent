@@ -111,10 +111,10 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
     expect(cap.flexCalls().length, "Flex カードで返る（UX③）").toBeGreaterThan(0);
     const reply = cap.reply();
     expect(reply).toContain(NEXT_CUP_GOOD_THANKS); // お礼は従来どおり（altText fallback）
-    expect(reply).toContain("No.40101"); // カルテ（青茶）を反映した次の一杯
-    expect(reply).not.toContain("No.11401"); // baseline の同軸最小は選ばれない
-    // カード見出しも 名前（No.40101） に統一（① がカードに効く）。
-    expect(JSON.stringify(cap.flexCalls()[0].contents)).toContain("（No.40101）");
+    expect(reply).toContain("40101｜"); // カルテ（青茶）を反映した次の一杯
+    expect(reply).not.toContain("11401｜"); // baseline の同軸最小は選ばれない
+    // カード見出しも 番号｜名前 に統一（① がカードに効く）。
+    expect(JSON.stringify(cap.flexCalls()[0].contents)).toContain("40101｜");
   });
 
   it("画像あり(正規化 r2.dev をモック注入) → カードの hero.url に直 r2.dev（UX③ 写真つき）", async () => {
@@ -148,8 +148,8 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
     });
 
     const reply = cap.reply();
-    expect(reply).toContain("No.11401"); // baseline
-    expect(reply).not.toContain("No.40101"); // カルテ無しでは青茶に寄らない
+    expect(reply).toContain("11401｜"); // baseline
+    expect(reply).not.toContain("40101｜"); // カルテ無しでは青茶に寄らない
   });
 
   it("deps 未指定(本番既定ローダ) → Firebase 未設定で fail-safe、baseline 11401 に着地", async () => {
@@ -162,7 +162,7 @@ describe("hermetic L1 — 動線5: 次の一杯がカルテを読む（監査 #2
     await handleTeaMenuFlow(user, `感想よい${"｜"}11301`, env, cap.responder);
 
     const reply = cap.reply();
-    expect(reply).toContain("No.11401");
+    expect(reply).toContain("11401｜");
   });
 
   it("selectNextCup 単体: persona=sensory が同カテゴリ内でフルボディ寄りに並べ替える", () => {

@@ -70,10 +70,10 @@ it("入口 marche/online/other を注入する", () => {
 it("+1 銘柄ラベルを注入する", () => {
   const out = buildPersonalizationContext({
     ...emptyFacts,
-    ratedGoodLabels: ["やぶきた（No.11301）", "べにふうき（No.20101）"],
+    ratedGoodLabels: ["11301｜やぶきた", "20101｜べにふうき"],
   });
-  assert(out.includes("やぶきた（No.11301）"), "銘柄1");
-  assert(out.includes("べにふうき（No.20101）"), "銘柄2");
+  assert(out.includes("11301｜やぶきた"), "銘柄1");
+  assert(out.includes("20101｜べにふうき"), "銘柄2");
   assert(out.includes("おいしかった"), "positive ラベル");
 });
 
@@ -85,7 +85,7 @@ it("tasteProfile を注入する", () => {
 });
 
 it("境界 4 ルールが常に全て含まれる（事実 1 つでも）", () => {
-  const out = buildPersonalizationContext({ ...emptyFacts, ratedGoodLabels: ["x（No.11301）"] });
+  const out = buildPersonalizationContext({ ...emptyFacts, ratedGoodLabels: ["11301｜x"] });
   assert(BOUNDARY_RULES.length === 4, "4 ルール");
   for (const rule of BOUNDARY_RULES) assert(out.includes(rule), "含む");
   // ルール1 が「マイナス評価・休眠・離脱に言及しない」制約を明文化していること。

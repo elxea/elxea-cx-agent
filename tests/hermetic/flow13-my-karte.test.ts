@@ -87,7 +87,7 @@ function visibleTextOf(view: { altText: string; contents: Record<string, unknown
  * 生スコア漏洩ガード（可視テキストに対して評価する）。
  *   - persona slug（sensory/serenity/explorer）・scores・affinity を禁止。
  *   - コロン+数字（"sensory: 6" 等の生スコア表記）を禁止。
- * `名前（No.11301）` の数字は「No.」直後で ':' を伴わないため許容される（設計どおり）。
+ * `11301｜名前` の数字は「No.」直後で ':' を伴わないため許容される（設計どおり）。
  */
 const SCORE_LEAK_RE = /\bscores?\b|\b(sensory|serenity|explorer)\b|affinity|[:：]\s*\d/i;
 
@@ -96,10 +96,10 @@ const LINE_ONLY_KARTE: KarteDisplay = {
   persona: "sensory",
   tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: ["rich"], scenePref: "夜のひととき" },
   entrySource: "marche",
-  ratedGoodLabels: ["煎茶 やまなみ（No.11301）"],
+  ratedGoodLabels: ["11301｜煎茶 やまなみ"],
   diagnosisDone: true,
   recentOrders: [],
-  lastNextCupLabel: "和烏龍茶 香駿（No.40101）",
+  lastNextCupLabel: "40101｜和烏龍茶 香駿",
 };
 
 describe("hermetic L1 — 動線13: マイカルテ（UX②）", () => {
@@ -126,12 +126,12 @@ describe("hermetic L1 — 動線13: マイカルテ（UX②）", () => {
     expect(visible).toContain("あなたのこと");
     expect(visible).toContain("味わいを深く愉しむ人"); // sensory の人間語（生 slug ではない）
     expect(visible).toContain("青茶"); // preferredCategories=oolong → 人間語ラベル
-    // 2 枚目「これまで」= ①の 名前（No.）表記の評価済みお茶 + 診断状況。
+    // 2 枚目「これまで」= ①の 番号｜名前 表記の評価済みお茶 + 診断状況。
     expect(visible).toContain("これまで");
-    expect(visible).toContain("（No.11301）");
+    expect(visible).toContain("11301｜");
     // 3 枚目「だから」= なぜ薦めるかの理由文。
     expect(visible).toContain("だから、次の一杯");
-    expect(visible).toContain("（No.40101）"); // 直近の次の一杯を根拠に
+    expect(visible).toContain("40101｜"); // 直近の次の一杯を根拠に
     expect(visible, "なぜ（理由）を語る").toMatch(/ふまえ|合わせて|寄り添って/);
 
     // 生スコア非漏洩（可視テキスト）。
@@ -188,7 +188,7 @@ describe("hermetic L1 — 動線13: マイカルテ（UX②）", () => {
     const flexes = cap.flexCalls();
     expect(flexes.length, "評価があるのでカードが返る").toBe(1);
     const visible = visibleTextOf(flexes[0]);
-    expect(visible).toContain("（No.11301）"); // seed した +1 評価が銘柄名に解決される
+    expect(visible).toContain("11301｜"); // seed した +1 評価が銘柄名に解決される
     expect(SCORE_LEAK_RE.test(visible), `生スコアが漏れている: ${visible}`).toBe(false);
 
     // read-only: 既定パスでも書き込みゼロ（seed した行数から増えない）。

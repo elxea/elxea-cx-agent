@@ -126,7 +126,7 @@ it("温度回答: How to Brew 本文を整形して直返し（創作なし）",
   const t = FIXTURE.find((x) => x.number === "10101")!;
   const m = buildBrewAnswer(t);
   assert(m.text.includes("80℃ / 120ml / 60sec"), "brew text verbatim");
-  assert(m.text.includes("No.10101"), "shows number");
+  assert(m.text.includes("10101｜"), "shows number (番号｜名前)");
   // 温度回答の後は温度を除いた選択肢を再提示
   assert(!m.quickReplies.some((q) => q.action.label.includes("温度")), "excludes 温度 in followup");
 });
@@ -136,7 +136,7 @@ console.log("\n--- (b) 番号直指定 ---");
 it("5桁のみ → 該当カード", () => {
   const plan = planTeaFlow("50101", FIXTURE);
   assert(plan !== null, "planned");
-  assert(plan!.messages[0].text.includes("No.50101"), "card for 50101");
+  assert(plan!.messages[0].text.includes("50101｜"), "card for 50101");
 });
 
 it("5桁のみ 不明番号 → 正直な案内（インターセプトする）", () => {
@@ -257,7 +257,7 @@ it("文中の未知5桁 → planTeaFlow=null（素通り・自由対話を壊さ
 
 it("文中の既知5桁 → カード（number-loose 一致）", () => {
   const plan = planTeaFlow("40101 について教えて", FIXTURE);
-  assert(plan !== null && plan.messages[0].text.includes("No.40101"), "known loose → card");
+  assert(plan !== null && plan.messages[0].text.includes("40101｜"), "known loose → card");
 });
 
 console.log("\n--- (e) 入口 → 一覧 → カード → 項目（3タップ以内で回答到達） ---");
@@ -284,7 +284,7 @@ it("3タップ以内: メニュー[1] → お茶[2] → 温度[3] の各段が p
   assert(step1 !== null, "step1 entry");
   // タップ2: 一覧のお茶ボタン（このお茶｜10101）→ カード
   const step2 = planTeaFlow("このお茶｜10101", FIXTURE);
-  assert(step2 !== null && step2.messages[0].text.includes("No.10101"), "step2 card");
+  assert(step2 !== null && step2.messages[0].text.includes("10101｜"), "step2 card");
   // タップ3: カードの温度ボタン（淹れ方｜10101）→ 回答
   const step3 = planTeaFlow("淹れ方｜10101", FIXTURE);
   assert(step3 !== null && step3.messages[0].text.includes("80℃"), "step3 answer");
@@ -411,30 +411,30 @@ it("feedback pending コメントに5桁が混じっても tea トリガーと�
   assert(parseTeaAction("11301") !== null, "bare 5-digit is a tea action (guarded by ordering)");
 });
 
-console.log("\n--- (UX①) お茶ラベルの番号+名前統一（名前のみ表示の是正） ---");
+console.log("\n--- (UX①) お茶ラベルの番号｜名前統一（名前のみ表示の是正） ---");
 
-it("淹れ方一覧: 各お茶ボタンの label が `名前（No.XXXXX）`（① 是正・名前のみを撲滅）", () => {
+it("淹れ方一覧: 各お茶ボタンの label が `番号｜名前`（① 是正・名前のみを撲滅）", () => {
   const m = buildEntryMessage(FIXTURE, 0);
   const teaLabels = m.quickReplies
     .filter((q) => q.action.text.startsWith("このお茶｜"))
     .map((q) => q.action.label);
   assert(teaLabels.length > 0, "お茶ボタンがある");
   for (const label of teaLabels) {
-    assert(label.includes("（No."), `番号+名前統一 (${label})`);
+    assert(/^\d{5}｜/.test(label), `番号｜名前統一 (${label})`);
     assert(label.length <= 20, `≤20 (${label})`);
   }
 });
 
-it("次の一杯ボタン: buildRateThanksGood の提案 label が `名前（No.XXXXX）`（①）", () => {
+it("次の一杯ボタン: buildRateThanksGood の提案 label が `番号｜名前`（①）", () => {
   const rated = FIXTURE.find((x) => x.number === "10101")!;
   const suggestion = FIXTURE.find((x) => x.number === "40101")!;
   const m = buildRateThanksGood(rated, suggestion);
   const btn = m.quickReplies.find((q) => q.action.text === "このお茶｜40101");
   assert(!!btn, "提案ボタンがある");
-  assert(btn!.action.label.includes("（No.40101）"), `番号+名前 (${btn!.action.label})`);
+  assert(btn!.action.label.startsWith("40101｜"), `番号｜名前 (${btn!.action.label})`);
   assert(btn!.action.label.length <= 20, "≤20");
-  // 本文にも `名前（No.）` の提案文が入る（従来どおり）。
-  assert(m.text.includes("（No.40101）"), "提案文にも番号+名前");
+  // 本文にも `番号｜名前` の提案文が入る（従来どおり）。
+  assert(m.text.includes("40101｜"), "提案文にも番号｜名前");
 });
 
 console.log("\n" + "=".repeat(60));

@@ -305,7 +305,7 @@ describe("feedbackCard", () => {
 describe("teaRecommendCard (UX③)", () => {
   it("画像あり → hero.url に画像 URL を載せる", () => {
     const r = teaRecommendCard({
-      name: "玉露（No.11301）",
+      name: "11301｜玉露",
       description: "まろやかなうまみ。",
       imageUrl: "https://pub-xxxx.r2.dev/cdn/11301.jpg",
       productUrl: "https://elxea.com/ja",
@@ -316,22 +316,22 @@ describe("teaRecommendCard (UX③)", () => {
 
   it("画像なし → hero を含まない（graceful・現況の主経路）", () => {
     const r = teaRecommendCard({
-      name: "玉露（No.11301）",
+      name: "11301｜玉露",
       description: "まろやかなうまみ。",
       productUrl: "https://elxea.com/ja",
     }) as Record<string, unknown>;
     assertEqual(r.hero, undefined, "no hero when imageUrl omitted");
   });
 
-  it("body 見出しに `（No.` を含む（① とカードの連結）+ footer は uri ボタン「見る」", () => {
+  it("body 見出しに `番号｜` を含む（① とカードの連結）+ footer は uri ボタン「見る」", () => {
     const r = teaRecommendCard({
-      name: "玉露（No.11301）",
+      name: "11301｜玉露",
       description: "説明",
       productUrl: "https://elxea.com/ja/x",
     }) as Record<string, Record<string, unknown>>;
     const body = r.body as Record<string, unknown>;
     const contents = body.contents as Record<string, unknown>[];
-    assert(String(contents[0].text).includes("（No."), "見出しに （No.");
+    assert(String(contents[0].text).includes("11301｜"), "見出しに 番号｜");
     const footer = r.footer as Record<string, unknown>;
     const btn = (footer.contents as Record<string, Record<string, unknown>>[])[0];
     const action = btn.action as Record<string, unknown>;
@@ -344,7 +344,7 @@ describe("teaRecommendCard (UX③)", () => {
 describe("teaRecommendCarousel (UX③)", () => {
   it("carousel を生成し最大10件に制限", () => {
     const items = Array.from({ length: 12 }, (_, i) => ({
-      name: `お茶${i}（No.1${String(i).padStart(4, "0")}）`,
+      name: `1${String(i).padStart(4, "0")}｜お茶${i}`,
       description: "x",
       productUrl: "https://elxea.com/ja",
     }));

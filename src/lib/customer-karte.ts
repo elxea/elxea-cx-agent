@@ -132,7 +132,7 @@ export interface KarteDisplay {
   tasteProfile: TasteProfile | null;
   /** 入口（marche/online/other・未知は null）。 */
   entrySource: EntrySource | null;
-  /** 「おいしかった」= +1 評価銘柄の正準ラベル `名前（No.XXXXX）`（最大 5 件）。 */
+  /** 「おいしかった」= +1 評価銘柄の正準ラベル `番号｜名前`（最大 5 件）。 */
   ratedGoodLabels: string[];
   /** 好み診断を完了しているか（persona 確定を以て「済み」とみなす）。 */
   diagnosisDone: boolean;
@@ -264,7 +264,7 @@ export async function loadKarteForDisplay(
         const tea = teas.find((t) => t.number === last.productNo);
         lastNextCupLabel = tea
           ? formatTeaLabel({ name: tea.name, number: tea.number })
-          : `No.${last.productNo}`;
+          : last.productNo;
       }
     } catch (err) {
       console.warn(

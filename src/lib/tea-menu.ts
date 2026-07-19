@@ -334,7 +334,7 @@ export function buildEntryMessage(teas: TeaItem[], page = 0, karte?: NextCupKart
   const quickReplies: QuickReplyItem[] = [];
   // 前へ（2 ページ目以降）: 現在 1 始まりページ = safePage+1、その前 = safePage
   if (safePage > 0) quickReplies.push(qr("前へ", `${TOK.list}${safePage}`));
-  // UX①: 淹れ方一覧の各ボタンを `名前（No.XXXXX）` に統一（番号保全 truncate で 20 字上限内・番号は切らない）。
+  // UX①: 淹れ方一覧の各ボタンを `番号｜名前` に統一（番号保全 truncate で 20 字上限内・番号は切らない）。
   for (const t of slice) quickReplies.push(qr(formatTeaQuickReplyLabel(t), `${TOK.card}${t.number}`));
   // 次へ: 次の 1 始まりページ = safePage+2
   if (sorted.length > start + TEA_LIST_PAGE_SIZE) {
@@ -410,7 +410,7 @@ function nextStepQuickReplies(
 /** お茶カード。origin=diagnosis なら card→感想 チェーンに出所を継承する。 */
 export function buildTeaCard(tea: TeaItem, origin?: Origin): OutMessage {
   const desc = tea.descShort.trim() ? `\n${tea.descShort.trim()}` : "";
-  const text = `${tea.name}（No.${tea.number}）${desc}\n\n知りたいことをどうぞ。`;
+  const text = `${formatTeaLabel(tea)}${desc}\n\n知りたいことをどうぞ。`;
   return { text, quickReplies: cardItemQuickReplies(tea, undefined, origin) };
 }
 
@@ -432,7 +432,7 @@ export function buildBrewAnswer(tea: TeaItem): OutMessage {
   const body = brew
     ? `おすすめの淹れ方はこちらです。\n\n${brew}`
     : "申し訳ありません、このお茶の淹れ方はまだ登録されていません。";
-  const text = `【${tea.name}（No.${tea.number}）】\n${body}`;
+  const text = `【${formatTeaLabel(tea)}】\n${body}`;
   return { text, quickReplies: nextStepQuickReplies(tea, "flavor") };
 }
 
@@ -445,7 +445,7 @@ export function buildFlavorAnswer(tea: TeaItem): OutMessage {
     lines.length > 0
       ? `味わい・香りの特徴です。\n\n${lines.join("\n")}`
       : "申し訳ありません、このお茶の味・香りの情報はまだ登録されていません。";
-  const text = `【${tea.name}（No.${tea.number}）】\n${body}`;
+  const text = `【${formatTeaLabel(tea)}】\n${body}`;
   return { text, quickReplies: nextStepQuickReplies(tea, "brew") };
 }
 
@@ -454,7 +454,7 @@ export function buildEnjoyAnswer(tea: TeaItem): OutMessage {
   const body = tea.enjoy.trim()
     ? `楽しみ方のご提案です。\n\n${tea.enjoy.trim()}`
     : "申し訳ありません、このお茶の楽しみ方はまだ登録されていません。";
-  const text = `【${tea.name}（No.${tea.number}）】\n${body}`;
+  const text = `【${formatTeaLabel(tea)}】\n${body}`;
   return { text, quickReplies: nextStepQuickReplies(tea, "brew") };
 }
 
@@ -467,7 +467,7 @@ export function buildStoryAnswer(tea: TeaItem): OutMessage {
   const body = tea.story.trim()
     ? `このお茶をつくる農家さんの物語です。\n\n${tea.story.trim()}`
     : "つくり手の物語は、ただいま準備中です。もう少しお待ちくださいね。";
-  const text = `【${tea.name}（No.${tea.number}）】\n${body}`;
+  const text = `【${formatTeaLabel(tea)}】\n${body}`;
   return { text, quickReplies: nextStepQuickReplies(tea, "flavor") };
 }
 
@@ -477,7 +477,7 @@ export function buildStoryAnswer(tea: TeaItem): OutMessage {
  */
 export function buildRatePrompt(tea: TeaItem, origin?: Origin): OutMessage {
   return {
-    text: `【${tea.name}（No.${tea.number}）】\nお口に合いましたか？ よければひとことだけ教えてください。`,
+    text: `【${formatTeaLabel(tea)}】\nお口に合いましたか？ よければひとことだけ教えてください。`,
     quickReplies: [
       qr("おいしかった", withOrigin(`${TOK.rateGood}${tea.number}`, origin)),
       qr("好みと少し違った", withOrigin(`${TOK.rateBad}${tea.number}`, origin)),
@@ -490,7 +490,7 @@ export function buildRatePrompt(tea: TeaItem, origin?: Origin): OutMessage {
 export function buildRateThanks(tea: TeaItem, origin?: Origin): OutMessage {
   return {
     text:
-      `【${tea.name}（No.${tea.number}）】\n` +
+      `【${formatTeaLabel(tea)}】\n` +
       "ありがとうございます。次のおすすめに活かしますね。",
     quickReplies: cardItemQuickReplies(tea, undefined, origin),
   };
@@ -506,14 +506,14 @@ export function buildRateThanksGood(
   tea: TeaItem,
   suggestion: TeaItem | null,
 ): OutMessage {
-  const head = `【${tea.name}（No.${tea.number}）】\n${NEXT_CUP_GOOD_THANKS}`;
+  const head = `【${formatTeaLabel(tea)}】\n${NEXT_CUP_GOOD_THANKS}`;
   if (!suggestion) {
     return { text: head, quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)] };
   }
   return {
     text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}`,
     quickReplies: [
-      // UX①: 次の一杯ボタンも `名前（No.XXXXX）` に統一（番号保全 truncate・番号は切らない）。
+      // UX①: 次の一杯ボタンも `番号｜名前` に統一（番号保全 truncate・番号は切らない）。
       qr(formatTeaQuickReplyLabel(suggestion), `${TOK.card}${suggestion.number}`),
       qr("🍃 別のお茶を見る", BACK_TO_LIST),
     ],
@@ -526,7 +526,7 @@ export function buildRateThanksGood(
  */
 export function buildRateDeclined(tea: TeaItem): OutMessage {
   return {
-    text: `【${tea.name}（No.${tea.number}）】\n${NEXT_CUP_DECLINE_MESSAGE}`,
+    text: `【${formatTeaLabel(tea)}】\n${NEXT_CUP_DECLINE_MESSAGE}`,
     quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)],
   };
 }
@@ -1136,7 +1136,7 @@ export async function handleTeaMenuFlow(
   }
 
   // UX③: 次の一杯（rate-good で候補あり）は写真つき（無ければ写真なし graceful）Flex カードで送る。
-  //   altText = 従来のお礼＋提案文（テキスト fallback）、quickReply = 従来導線（① で `名前（No.）` 化済）。
+  //   altText = 従来のお礼＋提案文（テキスト fallback）、quickReply = 従来導線（① で `番号｜名前` 化済）。
   //   画像取得は失敗しても握りつぶして画像なしカードに倒す（返信は必ず届ける）。
   if (nextCupCard && messages.length === 1) {
     const om = messages[0];

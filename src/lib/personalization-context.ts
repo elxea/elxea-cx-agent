@@ -28,7 +28,7 @@ export interface PersonalizationFacts {
   persona: PersonaType | null;
   /** 入口（marche/online/other）。未知・不明は null。 */
   entrySource: EntrySource | null;
-  /** +1 評価した銘柄の表示ラベル（例: "銘柄名（No.40101）"）。0 件可。 */
+  /** +1 評価した銘柄の表示ラベル（例: "40101｜銘柄名"）。0 件可。 */
   ratedGoodLabels: string[];
   /** 会話由来の好み（null 可）。 */
   tasteProfile: TasteProfile | null;

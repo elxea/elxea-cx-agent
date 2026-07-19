@@ -134,21 +134,27 @@ it("QR ウェルカム（buildProductWelcome）が brand-copy 正本要素を含
 
 // --- UX① お茶の正準ラベル（番号+名前の統一 + 番号保全 truncate）---
 
-it("formatTeaLabel: 通常は `名前（No.XXXXX）`", () => {
-  assert(formatTeaLabel({ name: "玉露", number: "11301" }) === "玉露（No.11301）", "名前（No.）");
+it("formatTeaLabel: 通常は `番号｜名前`（番号先頭・全角パイプ）", () => {
+  assert(formatTeaLabel({ name: "玉露", number: "11301" }) === "11301｜玉露", "番号｜名前");
+  // オーナー提示の実例と一致する（10101｜春摘みやぶきたの和紅茶）。
+  assert(
+    formatTeaLabel({ name: "春摘みやぶきたの和紅茶", number: "10101" }) === "10101｜春摘みやぶきたの和紅茶",
+    "オーナー実例",
+  );
+  assert(/^\d{5}｜/.test(formatTeaLabel({ name: "玉露", number: "11301" })), "5桁番号｜で始まる");
 });
 
-it("formatTeaLabel: name が number と同一 / 空 は `No.XXXXX` のみ（冗長回避）", () => {
-  assert(formatTeaLabel({ name: "11301", number: "11301" }) === "No.11301", "name===number");
-  assert(formatTeaLabel({ name: "", number: "11301" }) === "No.11301", "empty name");
-  assert(formatTeaLabel({ name: "   ", number: "11301" }) === "No.11301", "whitespace name");
+it("formatTeaLabel: name が number と同一 / 空 は `番号` のみ（冗長回避・番号は残す）", () => {
+  assert(formatTeaLabel({ name: "11301", number: "11301" }) === "11301", "name===number");
+  assert(formatTeaLabel({ name: "", number: "11301" }) === "11301", "empty name");
+  assert(formatTeaLabel({ name: "   ", number: "11301" }) === "11301", "whitespace name");
 });
 
-it("formatTeaQuickReplyLabel: 短名は素の `名前（No.XXXXX）`・≤20・（No. を含む", () => {
+it("formatTeaQuickReplyLabel: 短名は素の `番号｜名前`・≤20・番号｜ を含む", () => {
   const l = formatTeaQuickReplyLabel({ name: "玉露", number: "11301" });
-  assert(l === "玉露（No.11301）", `short label (${l})`);
+  assert(l === "11301｜玉露", `short label (${l})`);
   assert([...l].length <= 20, "≤20");
-  assert(l.includes("（No."), "contains （No.");
+  assert(l.includes("11301｜"), "contains 番号｜");
 });
 
 it("formatTeaQuickReplyLabel[break-proof]: 長名でも ≤20 かつ番号を絶対に切らない（名前側だけ …）", () => {
@@ -156,16 +162,17 @@ it("formatTeaQuickReplyLabel[break-proof]: 長名でも ≤20 かつ番号を絶
   const l = formatTeaQuickReplyLabel({ name: longName, number: "11301" });
   // 20 字上限を守る。
   assert(l.length <= 20, `≤20 (len=${l.length}, ${l})`);
-  // 番号部を必ず温存する（従来の末尾 truncate なら番号が消えて失敗する = break-proof）。
-  assert(l.includes("（No.11301）"), `番号部温存 (${l})`);
+  // 番号部（番号｜）を必ず温存する（番号が先頭なので末尾 truncate でも番号は消えない = break-proof）。
+  assert(l.startsWith("11301｜"), `番号｜プレフィックス温存 (${l})`);
   assert(l.includes("11301"), "5 桁番号が残る");
+  assert(/^\d{5}｜/.test(l), "先頭は 5桁番号｜");
   // 名前側だけが … で詰められる。
   assert(l.includes("…"), "名前側を … で truncate");
-  assert(l.startsWith("とても長い"), "名前の先頭は残る");
+  assert(l.startsWith("11301｜とても長い"), "番号のあと名前の先頭は残る");
 });
 
-it("formatTeaQuickReplyLabel: name===number は `No.XXXXX` のみ", () => {
-  assert(formatTeaQuickReplyLabel({ name: "11301", number: "11301" }) === "No.11301", "fallback");
+it("formatTeaQuickReplyLabel: name===number は `番号` のみ", () => {
+  assert(formatTeaQuickReplyLabel({ name: "11301", number: "11301" }) === "11301", "fallback");
 });
 
 for (const t of queue) {

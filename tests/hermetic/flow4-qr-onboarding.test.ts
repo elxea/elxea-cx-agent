@@ -67,7 +67,7 @@ describe("hermetic L1 — 動線4: QR同梱ウェルカム → 感想カード �
     expect(reply).toContain("シングルオリジン"); // single-origin
 
     // --- #4: 解決したお茶（11301）のカードが提示され、💬感想（rate token）が付く ---
-    expect(reply).toContain("No.11301");
+    expect(reply).toContain("11301｜");
     const msgJson = JSON.stringify(h.line.allMessages());
     // カードの 💬感想 ボタン = 「感想｜11301」トークン（rating-capable card の証拠）。
     expect(msgJson).toContain(`感想${"｜"}11301`);
@@ -87,7 +87,7 @@ describe("hermetic L1 — 動線4: QR同梱ウェルカム → 感想カード �
       ...h.line.flexes().map((f) => String(f.altText ?? "")),
     ].join("\n---\n");
     expect(reply2).toContain(NEXT_CUP_GOOD_THANKS);
-    expect(reply2).toContain("No.11401");
+    expect(reply2).toContain("11401｜");
 
     // --- DB 効果: QR 由来の感想が product_ratings（カルテの燃料）に記録される ---
     await settle();
@@ -115,7 +115,7 @@ describe("hermetic L1 — 動線4: QR同梱ウェルカム → 感想カード �
     const msgJson = JSON.stringify(h.line.allMessages());
     // 未解決でもカード無し・一覧入口 quick reply に着地（自由対話3択の行き止まりにしない）。
     expect(msgJson).toContain(TEA_LIST_ENTRY_TRIGGER); // 「お茶を選ぶ」入口
-    // 存在しない番号のカード（No.99999）は出さない（創作しない）。
-    expect(reply).not.toContain("No.99999");
+    // 存在しない番号のカードは出さない（創作しない・カードなら 99999｜名前 になる）。
+    expect(reply).not.toContain("99999｜");
   });
 });
