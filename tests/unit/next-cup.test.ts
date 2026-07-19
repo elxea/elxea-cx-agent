@@ -236,7 +236,7 @@ it("buildRateResponse(+1, suggestion): お礼 + 提案 1 本を添える", () =>
   const sug = tea("11401", "緑茶", [AROMA_RICH, BODY_FULL], "次の一杯");
   const out = buildRateResponse(rated, "rate-good", sug);
   assert(out.text.includes(NEXT_CUP_GOOD_THANKS), "お礼文");
-  assert(out.text.includes("次の一杯（No.11401）"), "提案銘柄");
+  assert(out.text.includes("11401｜次の一杯"), "提案銘柄（番号｜名前）");
   assert(out.quickReplies.some((q) => q.action.text.includes("11401")), "提案カード導線");
 });
 
@@ -253,7 +253,7 @@ it("buildRateResponse(-1): 提案ゼロ・静かな受け止めのみ（suggesti
   const out = buildRateResponse(rated, "rate-bad", sug);
   assert(out.text.includes(NEXT_CUP_DECLINE_MESSAGE), "静かな一文");
   assert(!out.text.includes("別の一杯"), "-1 は提案を出さない");
-  assert(!out.text.includes("No.11401"), "-1 は銘柄提案なし");
+  assert(!out.text.includes("11401ï½"), "-1 は銘柄提案なし");
 });
 
 console.log("\n============================================================");

@@ -349,7 +349,7 @@ export function buildResultWithTeas(
 
   const lines = picks.map((t) => {
     const desc = t.descShort.trim() ? `／${t.descShort.trim()}` : "";
-    // UX①: 診断結果の本文も `名前（No.XXXXX）` に統一（従来の「番号 名前」先頭を是正）。
+    // UX①: 診断結果の本文も `番号｜名前` に統一（従来の「番号 名前」先頭を是正）。
     return `${formatTeaLabel(t)}${desc}`;
   });
   const text =
@@ -359,7 +359,7 @@ export function buildResultWithTeas(
     `気になるお茶は、下のボタンか、番号（例 ${picks[0].number}）を送ってくださいね。`;
 
   const quickReplies: QuickReplyItem[] = picks.map((t) =>
-    // UX①: 診断結果 QR も `名前（No.XXXXX）`（番号保全 truncate・番号は切らない。従来 truncateLabel は末尾＝名前ではなく番号を切りうる）。
+    // UX①: 診断結果 QR も `番号｜名前`（番号保全 truncate・番号は切らない。番号先頭のため末尾 truncate で切れるのは名前側）。
     qr(formatTeaQuickReplyLabel(t), diagnosisCardToken(t.number)),
   );
   quickReplies.push(qr("もっと相談する", CONSULT_MORE_TEXT));
@@ -369,7 +369,7 @@ export function buildResultWithTeas(
 /**
  * 診断おすすめ（picks）を UX③ の Flex カルーセルに写す（純粋）。
  *
- * 各カードは `名前（No.XXXXX）`（formatTeaLabel）+ 抜粋 + 画像（あれば hero・なければ graceful）+「見る」。
+ * 各カードは `番号｜名前`（formatTeaLabel）+ 抜粋 + 画像（あれば hero・なければ graceful）+「見る」。
  * 画像は imageMap（page id / 5 桁番号 → 正規化 HTTPS URL）から引く。picks は最大 3 件で呼ぶ。
  * quickReply（診断出所つきカードトークン + 相談導線）は buildResultWithTeas 側が持ち、ハンドラが Flex に添える。
  */
@@ -668,7 +668,7 @@ export async function handlePreferenceDiagnosis(
 
   // UX③: 結果段は写真つき（無ければ写真なし graceful）Flex カルーセルで返す。
   //   picks 空（カタログ取得失敗・在庫ゼロ）はテキスト（persona 受け止め + 相談導線）に倒す（buildResultFallback）。
-  //   altText = 従来テキスト（persona 受け止め + おすすめ一覧）、quickReply = 従来導線（① で `名前（No.）` 化済）。
+  //   altText = 従来テキスト（persona 受け止め + おすすめ一覧）、quickReply = 従来導線（① で `番号｜名前` 化済）。
   //   picks は plan と同じ karte で再解決し、カルーセルのカードと本文/quickReply の並びを一致させる。
   let resultCarousel: Record<string, unknown> | null = null;
   if (plan.winner) {
