@@ -158,6 +158,25 @@ export function articleCard(params: {
   };
 }
 
+/**
+ * 記事カルーセル Flex Message（UX④・最大 3 件で呼ぶ・productCarousel ミラー）。
+ * 各 bubble は articleCard と同一構成（サムネ + タイトル + 抜粋 maxLines:2 + 「記事を読む」）。
+ * **本文（body 記事全文）は載せない**（articleCard が title/description/thumbnail/url だけを組む）。
+ */
+export function articleCarousel(
+  articles: Array<{
+    title: string;
+    description: string;
+    imageUrl?: string;
+    articleUrl: string;
+  }>,
+): Record<string, unknown> {
+  return {
+    type: "carousel",
+    contents: articles.slice(0, 10).map((a) => articleCard(a)),
+  };
+}
+
 /** 注文確認カード Flex Message（MS5 5.3） */
 export function orderCard(params: {
   orderName: string;

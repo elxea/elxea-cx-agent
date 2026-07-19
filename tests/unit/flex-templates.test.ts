@@ -67,7 +67,24 @@ import {
   teaRecommendCard,
   teaRecommendCarousel,
   preferDirectR2,
+  articleCard,
+  articleCarousel,
 } from "../../src/lib/flex-templates";
+
+/** Flex ノードから全文字列を集める（本文非露出ガード用・深い再帰）。 */
+function collectStrings(node: unknown, acc: string[]): void {
+  if (typeof node === "string") {
+    acc.push(node);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const n of node) collectStrings(n, acc);
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const v of Object.values(node as Record<string, unknown>)) collectStrings(v, acc);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // productIntroCard テスト
@@ -357,6 +374,79 @@ describe("preferDirectR2 (UX③ 画像 URL 正規化)", () => {
   });
   it("http は https に昇格", () => {
     assertEqual(preferDirectR2("http://pub-abc.r2.dev/x.jpg"), "https://pub-abc.r2.dev/x.jpg", "upgrade");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// articleCard / articleCarousel テスト（UX④・本文非露出）
+// ---------------------------------------------------------------------------
+
+describe("articleCard (UX④)", () => {
+  const ARTICLE_BODY = "これは記事の本文全文であり、カードには絶対に含めてはいけない内容です。";
+  it("画像あり → hero を持ち title/excerpt/url ボタンを組む", () => {
+    const card = articleCard({
+      title: "静けさと、一杯のこと",
+      description: "慌ただしい日々に、お茶がくれる余白について。",
+      imageUrl: "https://placehold.co/1024x576/png",
+      articleUrl: "https://elxea.com/ja/blogs/journal/x",
+    }) as Record<string, unknown>;
+    assertDefined(card.hero, "hero present when imageUrl given");
+    const strings: string[] = [];
+    collectStrings(card, strings);
+    const joined = strings.join("\n");
+    assert(joined.includes("静けさと、一杯のこと"), "title present");
+    assert(joined.includes("余白について"), "excerpt present");
+    assert(joined.includes("記事を読む"), "read button label present");
+    assert(joined.includes("https://elxea.com/ja/blogs/journal/x"), "url present");
+  });
+  it("画像なし → hero を省略（graceful）", () => {
+    const card = articleCard({
+      title: "T",
+      description: "D",
+      articleUrl: "https://elxea.com/ja/blogs/journal/y",
+    }) as Record<string, unknown>;
+    assertEqual(card.hero as unknown, undefined, "no hero without imageUrl");
+  });
+  it("本文（body 全文）を一切含まない — title/excerpt/thumbnail/url のみ", () => {
+    const card = articleCard({
+      title: "静けさと、一杯のこと",
+      description: "慌ただしい日々に、お茶がくれる余白について。",
+      imageUrl: "https://placehold.co/1024x576/png",
+      articleUrl: "https://elxea.com/ja/blogs/journal/x",
+    });
+    const strings: string[] = [];
+    collectStrings(card, strings);
+    const joined = strings.join("\n");
+    assert(!joined.includes(ARTICLE_BODY), "記事本文がカードに漏れてはいけない");
+  });
+  it("excerpt は maxLines:2（1〜2 行）", () => {
+    const card = articleCard({
+      title: "T",
+      description: "長い抜粋テキスト",
+      articleUrl: "https://elxea.com/ja/blogs/journal/z",
+    }) as { body?: { contents?: Array<Record<string, unknown>> } };
+    const excerptNode = card.body?.contents?.find(
+      (c) => c.text === "長い抜粋テキスト",
+    );
+    assertDefined(excerptNode, "excerpt node present");
+    assertEqual((excerptNode as Record<string, unknown>).maxLines as number, 2, "excerpt maxLines=2");
+  });
+});
+
+describe("articleCarousel (UX④)", () => {
+  it("最大 3 件のカードを carousel に束ね、各カードが本文を含まない", () => {
+    const carousel = articleCarousel([
+      { title: "A", description: "a", imageUrl: "https://placehold.co/1x1/png", articleUrl: "https://x/a" },
+      { title: "B", description: "b", articleUrl: "https://x/b" },
+      { title: "C", description: "c", articleUrl: "https://x/c" },
+    ]) as { type: string; contents: unknown[] };
+    assertEqual(carousel.type, "carousel", "carousel type");
+    assertEqual(carousel.contents.length, 3, "3 bubbles");
+    const strings: string[] = [];
+    collectStrings(carousel, strings);
+    const joined = strings.join("\n");
+    assert(joined.includes("記事を読む"), "read button in carousel");
+    assert(!joined.includes("本文"), "no body text token in carousel");
   });
 });
 
