@@ -5,6 +5,9 @@ on:
     branches: [master, developer]
   pull_request:
     branches: [master]
+  # 手動トリガ専用の実行経路。prod Supabase を読む search-quality はこの経路でのみ走らせ、
+  # push（master/developer）では走らせない（= master への毎マージを staging-only に保つ）。
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -67,7 +70,7 @@ jobs:
       LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
-      STAGING_WORKER_URL: https://elxea-agent-staging.setaka1103.workers.dev
+      STAGING_WORKER_URL: https://elxea-agent-staging.setaka-on.workers.dev
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -83,7 +86,11 @@ jobs:
     needs: static-checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name != 'pull_request'
+    # search-quality は Supabase を直接 createClient で叩く（tests/search-quality/run-search-quality.ts）。
+    # secrets.SUPABASE_URL は本番 Supabase（ref bquqzrbzdzjegdovxalu）を指すため、push で走ると
+    # master への毎マージが本番 Supabase を READ してしまう。これを断つため手動 workflow_dispatch 専用に隔離する。
+    # （定期監視が必要になれば別途 schedule を足す判断を人間側で行う。既定は自動での本番接触ゼロ。）
+    if: github.event_name == 'workflow_dispatch'
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -99,7 +106,10 @@ jobs:
 
   deploy-staging:
     name: deploy-staging
-    needs: [unit-tests, e2e-tests, search-quality]
+    # search-quality を push から外した（workflow_dispatch 専用）ため needs から除外する。
+    # 残すと push 時に search-quality が skip され、その skip が deploy-staging に伝播して
+    # staging デプロイが恒久 skip される（GitHub Actions の skipped-need 伝播）。
+    needs: [unit-tests, e2e-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
@@ -117,4 +127,4 @@ jobs:
       - name: Staging smoke test
         run: pnpm test:staging-smoke
         env:
-          STAGING_WORKER_URL: https://elxea-agent-staging.setaka1103.workers.dev
+          STAGING_WORKER_URL: https://elxea-agent-staging.setaka-on.workers.dev
