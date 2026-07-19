@@ -16,6 +16,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["tests/hermetic/**/*.test.ts"],
+    // グローバル・ハーメティックガード（§2-5 の全体化）。全ハーメティックファイルの beforeEach で
+    // installHermeticFetch(env) を自動実行し、個々のファイルが呼び忘れても実ネットワークへ出られない
+    // ようにする（QA caveat「per-file 規約依存」の解消）。詳細は tests/lib/hermetic-setup.ts。
+    setupFiles: ["./tests/lib/hermetic-setup.ts"],
     // ハーメティック（ネットワーク不使用）だが、万一の遅延に備えて余裕を持たせる。
     testTimeout: 15_000,
     hookTimeout: 15_000,

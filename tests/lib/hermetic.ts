@@ -24,6 +24,36 @@ export interface Hermetic {
   restore(): void;
 }
 
+/**
+ * 差し替え済み fetch に付ける識別マーカー（idempotent 判定用）。
+ * グローバル setup（tests/lib/hermetic-setup.ts）と各テストの beforeEach が
+ * 二重に install しても、2 回目以降は既存インスタンスを返して二重ラップを避ける。
+ */
+const HERMETIC_MARK = "__elxeaHermeticFetch__";
+
+/** 現在この isolate で有効なハーメティックインスタンス（未 install なら null）。 */
+let active: Hermetic | null = null;
+
+/** この isolate で既にハーメティック fetch が敷かれているか。 */
+export function isHermeticInstalled(): boolean {
+  return active !== null && (globalThis.fetch as unknown as Record<string, unknown>)[HERMETIC_MARK] === true;
+}
+
+/**
+ * 現在有効なハーメティックインスタンスを返す。
+ * グローバル setup が全ハーメティックファイルの beforeEach で install するため、
+ * テストは installHermeticFetch を自分で呼ばずに本アクセサで line/supabase/notion を取れる。
+ * 未 install で呼ぶと throw（＝ガードが敷かれていないことを早期に検出する）。
+ */
+export function getHermetic(): Hermetic {
+  if (!isHermeticInstalled() || active === null) {
+    throw new Error(
+      "[hermetic] ガード未設置で getHermetic() が呼ばれた。vitest setupFiles（tests/lib/hermetic-setup.ts）が有効か確認する。",
+    );
+  }
+  return active;
+}
+
 function urlOf(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.href;
@@ -37,6 +67,13 @@ function urlOf(input: RequestInfo | URL): string {
 export function installHermeticFetch(env: Record<string, unknown>): Hermetic {
   // assert-not-prod の強制点（install するたびに env を fail-closed 検査）。
   assertNotProdEnv(env);
+
+  // Idempotent: 既にこの isolate で敷かれているなら二重ラップせず既存インスタンスを返す。
+  //   グローバル setup が beforeEach で install した後、各テスト（旧来の per-file 呼び出し）が
+  //   重ねて呼んでも安全にする。復元は一度で完結し、original（実 fetch）を確実に取り戻す。
+  if (isHermeticInstalled() && active !== null) {
+    return active;
+  }
 
   const supabaseHost = new URL(String(env.SUPABASE_URL)).host;
   const line = createLineCapture();
@@ -75,14 +112,19 @@ export function installHermeticFetch(env: Record<string, unknown>): Hermetic {
     throw new Error(`[hermetic] 非モックの外部ネットワークをブロック: ${url}`);
   }) as typeof fetch;
 
+  // idempotent 判定用のマーカーを差し替え後の fetch に付ける。
+  (router as unknown as Record<string, unknown>)[HERMETIC_MARK] = true;
   globalThis.fetch = router;
 
-  return {
+  const instance: Hermetic = {
     line,
     supabase,
     notion,
     restore() {
       globalThis.fetch = original;
+      active = null;
     },
   };
+  active = instance;
+  return instance;
 }
