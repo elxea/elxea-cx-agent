@@ -13,8 +13,10 @@ import {
   classifyAroma,
   classifyBody,
   selectNextCup,
+  karteAffinity,
   type AromaAxis,
   type BodyAxis,
+  type NextCupKarte,
 } from "../../src/lib/next-cup";
 import { buildRateResponse } from "../../src/lib/tea-menu";
 import type { TeaItem } from "../../src/lib/tea-menu";
@@ -138,6 +140,94 @@ it("軸 unknown の評価銘柄でも同 Category で救済する", () => {
   const rated = tea("50601", "青茶", []); // 軸タグ欠落（number 軸 6 銘柄欠の類）
   const teas = [rated, tea("50701", "青茶", [AROMA_RICH, BODY_FULL])];
   assertEqual(selectNextCup(rated, teas, [])!.number, "50701", "同 Category 救済");
+});
+
+// --- カルテ活用（監査 #2）: persona / tasteProfile が選定を並べ替える ---
+it("no-karte 後方互換: karte 未指定・null・空は従来の番号昇順に一致", () => {
+  const rated = tea("11301", "緑茶", [AROMA_RICH, BODY_FULL]);
+  const teas = [
+    rated,
+    tea("11401", "緑茶", [AROMA_RICH, BODY_FULL]),
+    tea("40101", "青茶", [AROMA_RICH, BODY_FULL]),
+  ];
+  const baseline = selectNextCup(rated, teas, [])!.number;
+  assertEqual(baseline, "11401", "baseline=番号最小");
+  assertEqual(selectNextCup(rated, teas, [], null)!.number, "11401", "null カルテ=baseline");
+  const empty: NextCupKarte = { persona: null, tasteProfile: null };
+  assertEqual(selectNextCup(rated, teas, [], empty)!.number, "11401", "空カルテ=baseline");
+  // 空カルテの親和度は常に 0（従来順序を壊さない機械的担保）。
+  assertEqual(karteAffinity(teas[2], null), 0, "affinity(null)=0");
+  assertEqual(karteAffinity(teas[2], empty), 0, "affinity(empty)=0");
+});
+
+it("preferredCategories(青茶) が同軸プールを並べ替える（40101 を選ぶ）", () => {
+  const rated = tea("11301", "緑茶", [AROMA_RICH, BODY_FULL]);
+  const teas = [
+    rated,
+    tea("11401", "緑茶", [AROMA_RICH, BODY_FULL]), // baseline（番号最小・緑茶）
+    tea("40101", "青茶", [AROMA_RICH, BODY_FULL]), // 青茶（同軸・番号大）
+  ];
+  const karte: NextCupKarte = {
+    persona: null,
+    tasteProfile: { preferredCategories: ["oolong"], flavorPreferences: [], scenePref: null },
+  };
+  assertEqual(selectNextCup(rated, teas, [], karte)!.number, "40101", "青茶好みで 40101");
+  assertEqual(selectNextCup(rated, teas, [])!.number, "11401", "カルテ無しは 11401");
+});
+
+it("persona=sensory は同カテゴリ内でフルボディ寄りに並べ替える", () => {
+  const rated = tea("30001", "緑茶", [AROMA_DRY, BODY_FULL]); // 同軸プール空 → 同カテゴリへ
+  const teas = [
+    rated,
+    tea("30002", "緑茶", [AROMA_RICH, BODY_LIGHT]), // 番号最小・ライト
+    tea("30003", "緑茶", [AROMA_RICH, BODY_FULL]), // 番号大・フル
+  ];
+  assertEqual(selectNextCup(rated, teas, [])!.number, "30002", "baseline=ライト（番号最小）");
+  const sensory: NextCupKarte = { persona: "sensory", tasteProfile: null };
+  assertEqual(selectNextCup(rated, teas, [], sensory)!.number, "30003", "sensory→フル");
+});
+
+it("persona=serenity は同カテゴリ内で甘い香り(rich)寄りに並べ替える", () => {
+  const rated = tea("31001", "緑茶", [AROMA_DRY, BODY_FULL]); // 同軸プール空 → 同カテゴリへ
+  const teas = [
+    rated,
+    tea("31002", "緑茶", [AROMA_DRY, BODY_LIGHT]), // 番号最小・ドライ
+    tea("31003", "緑茶", [AROMA_RICH, BODY_LIGHT]), // 番号大・リッチ（甘い香り）
+  ];
+  assertEqual(selectNextCup(rated, teas, [])!.number, "31002", "baseline=ドライ（番号最小）");
+  const serenity: NextCupKarte = { persona: "serenity", tasteProfile: null };
+  assertEqual(selectNextCup(rated, teas, [], serenity)!.number, "31003", "serenity→リッチ");
+});
+
+it("flavorPreferences(すっきり) は同カテゴリ内でライトボディ寄りに並べ替える", () => {
+  const rated = tea("32001", "緑茶", [AROMA_DRY, BODY_FULL]); // 同軸プール空 → 同カテゴリへ
+  const teas = [
+    rated,
+    tea("32002", "緑茶", [AROMA_RICH, BODY_FULL]), // 番号最小・フル
+    tea("32003", "緑茶", [AROMA_RICH, BODY_LIGHT]), // 番号大・ライト
+  ];
+  assertEqual(selectNextCup(rated, teas, [])!.number, "32002", "baseline=フル（番号最小）");
+  const light: NextCupKarte = {
+    persona: null,
+    tasteProfile: { preferredCategories: [], flavorPreferences: ["すっきり"], scenePref: null },
+  };
+  assertEqual(selectNextCup(rated, teas, [], light)!.number, "32003", "すっきり→ライト");
+});
+
+it("karteAffinity: カテゴリ+香り+persona の重みが加算される（+2/+2/+1）", () => {
+  const oolongRichFull = tea("40101", "青茶", [AROMA_RICH, BODY_FULL]);
+  const karte: NextCupKarte = {
+    persona: "serenity", // aroma=rich 寄り → +1
+    tasteProfile: {
+      preferredCategories: ["oolong"], // 青茶一致 → +2
+      flavorPreferences: ["甘い"], // aroma=rich → +2
+      scenePref: null,
+    },
+  };
+  assertEqual(karteAffinity(oolongRichFull, karte), 5, "2+2+1=5");
+  // 別軸・別カテゴリの銘柄は 0（好みに寄らない）。
+  const greenDryLight = tea("11301", "緑茶", [AROMA_DRY, BODY_LIGHT]);
+  assertEqual(karteAffinity(greenDryLight, karte), 0, "不一致=0");
 });
 
 // --- buildRateResponse ---

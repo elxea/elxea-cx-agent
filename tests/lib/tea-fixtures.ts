@@ -10,7 +10,14 @@
  *
  * フィクスチャ設計（flow1「感想→次の一杯」を決定的にするため）:
  *   11301（緑茶・rich+full）を評価対象にすると、同軸（rich+full）の別銘柄が 11401 / 11501。
- *   selectNextCup は同軸プールを番号昇順で採るため、次の一杯は必ず 11401 になる。
+ *   selectNextCup は同軸プールを番号昇順で採るため、カルテ無しの次の一杯は必ず 11401 になる。
+ *
+ * カルテ活用テスト（flow5・監査 #2）用の異種プール:
+ *   40101（青茶・rich+full）を同軸プールに 1 銘柄だけ足す。番号は 11401 より大きいので、
+ *   カルテ無し（baseline）の次の一杯は 11401 のまま（flow1 / flow4 の baseline を壊さない）。
+ *   一方、青茶を好むカルテ（tasteProfile.preferredCategories=["oolong"]）を渡すと、同軸プール内で
+ *   40101（青茶）のカテゴリ親和が 11401/11501（緑茶）を上回り、次の一杯が 40101 に変わる
+ *   （= カルテが選定に効くことをロードベアリングに示す）。
  */
 
 export const AROMA_RICH = "甘い、熟した香り | リッチ";
@@ -60,6 +67,15 @@ export const TEA_FIXTURE: FixtureTea[] = [
     flavorProfiles: [AROMA_DRY, BODY_LIGHT],
     descShort: "軽やかで爽やかな渋み。",
     howToBrew: "95℃で90秒。",
+  },
+  {
+    // カルテ活用テスト用の異種同軸銘柄（青茶・rich+full）。番号 > 11401 で baseline を壊さない。
+    number: "40101",
+    name: "和烏龍茶 香駿",
+    category: "青茶",
+    flavorProfiles: [AROMA_RICH, BODY_FULL],
+    descShort: "華やかな香りとまろやかな甘み。",
+    howToBrew: "90℃で60秒。",
   },
 ];
 

@@ -35,7 +35,8 @@ import {
   type RatingValue,
   type RatingSource,
 } from "./product-ratings";
-import { selectNextCup } from "./next-cup";
+import { selectNextCup, type NextCupKarte } from "./next-cup";
+import { loadCustomerKarte } from "./customer-karte";
 import {
   NEXT_CUP_GOOD_THANKS,
   NEXT_CUP_DECLINE_MESSAGE,
@@ -789,6 +790,17 @@ export function _resetTeaCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * handleTeaMenuFlow の依存注入（テストは fake を注入・本番は未指定で実 I/O を使う）。
+ */
+export interface TeaMenuFlowDeps {
+  /**
+   * 「次の一杯」用カルテ（persona / tasteProfile）のローダ。既定は Firestore 由来の loadCustomerKarte。
+   * ハーメティックテストは fake を注入して Firestore 非接触でカルテ影響を検証する。
+   */
+  loadKarte?: (lineUserId: string) => Promise<NextCupKarte>;
+}
+
+/**
  * 選択式お茶メニュー案内のインターセプタ。
  *
  * @returns 処理したら true（＝ここで応答完結）。タップメニューと無関係なら false
@@ -805,6 +817,7 @@ export async function handleTeaMenuFlow(
   userMessage: string,
   env: Env,
   responder: LineResponder,
+  deps?: TeaMenuFlowDeps,
 ): Promise<boolean> {
   const action = parseTeaAction(userMessage);
   if (!action) return false;
@@ -859,12 +872,17 @@ export async function handleTeaMenuFlow(
     // A-2a 評価後の「次の一杯」: +1 のときだけ、評価済み銘柄を除外して似た 1 本を選ぶ。
     //   -1 は提案ゼロ（静かに受け止める）。評価対象そのものは selectNextCup が常に除外する。
     //   getUserRatings は fail-safe（失敗＝空配列）なので、選定失敗でお礼まで止めない。
+    //   監査 #2: 直近評価だけでなくカルテ（persona/tasteProfile・会話側 core.ts と同じ源）を読み、
+    //     同軸/同カテゴリの候補が複数あるとき好みで並べ替える。カルテ取得も fail-safe（空＝従来挙動）。
     const ratedTea = teas.find((t) => t.number === action.number);
     if (ratedTea) {
       let suggestion: TeaItem | null = null;
       if (action.kind === "rate-good") {
         const priorRatings = await getUserRatings(supabase, lineUserId);
-        suggestion = selectNextCup(ratedTea, teas, allRatedProductNos(priorRatings));
+        const loadKarte =
+          deps?.loadKarte ?? ((id: string) => loadCustomerKarte(id, env, supabase));
+        const karte = await loadKarte(lineUserId);
+        suggestion = selectNextCup(ratedTea, teas, allRatedProductNos(priorRatings), karte);
       }
       messages = [buildRateResponse(ratedTea, action.kind, suggestion)];
     }
