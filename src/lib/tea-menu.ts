@@ -835,6 +835,53 @@ export interface TeaMenuFlowDeps {
 }
 
 /**
+ * 計測（treatment 記録）: 見せた「次の一杯」を flow_events(next_cup_shown) に 1 件残す
+ * （fire-and-forget・fail-safe・純粋計算の想定外例外でも決して throw しない）。
+ *
+ * なぜ（設計 v2.1 #1 最優先・spec §6-3「どの版を見せたか」）: 個別最適の効果を後から測るには
+ *   「どの銘柄をどの版（karte 個別化 / baseline）で見せたか」の記録が要る。残さないと遡れない
+ *   消えるデータになる。UX（選定・文言）は変えず、計測だけを足す（additive）。
+ *
+ * version 判定（決定的・純粋）: 同じ入力でカルテ有り(suggestion) と カルテ無し(baseline=null) の
+ *   selectNextCup を比べ、別銘柄なら "karte"（個別化が結果を変えた）、同銘柄なら "baseline"
+ *   （変えなかった or 空カルテ）。selectNextCup はカルテを並べ替え(tiebreak)にしか使わないため、
+ *   suggestion≠null のとき baseline も必ず≠null（同じ段・同じ候補プールに到達する）。
+ *
+ * PII を入れない（flow-events.ts の 3 原則）: product_no と version slug・番号のみ。metadata は
+ *   非自由文の構造値（ratedNo / baselineNo / affinity）に限る。
+ */
+function logNextCupShown(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  userRef: string,
+  ratedTea: TeaItem,
+  suggestion: TeaItem,
+  teas: TeaItem[],
+  excludedNos: Iterable<string>,
+  karte: NextCupKarte | null,
+): void {
+  try {
+    const baseline = selectNextCup(ratedTea, teas, excludedNos, null);
+    const version = baseline && baseline.number !== suggestion.number ? "karte" : "baseline";
+    void logFlowEvent(supabase, {
+      eventName: "next_cup_shown",
+      userRef,
+      value: version,
+      productNo: suggestion.number,
+      metadata: {
+        ratedNo: ratedTea.number,
+        baselineNo: baseline?.number ?? null,
+        affinity: karteAffinity(suggestion, karte),
+      },
+    });
+  } catch (err) {
+    console.warn(
+      "[tea-menu] next_cup_shown log skipped (non-blocking):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
  * 選択式お茶メニュー案内のインターセプタ。
  *
  * @returns 処理したら true（＝ここで応答完結）。タップメニューと無関係なら false
@@ -925,7 +972,15 @@ export async function handleTeaMenuFlow(
       if (action.kind === "rate-good") {
         const priorRatings = await getUserRatings(supabase, lineUserId);
         const karte = await loadKarte(lineUserId); // 上で用意した共用ローダを再利用（entry と同じ源）
-        suggestion = selectNextCup(ratedTea, teas, allRatedProductNos(priorRatings), karte);
+        const excludedNos = allRatedProductNos(priorRatings);
+        suggestion = selectNextCup(ratedTea, teas, excludedNos, karte);
+
+        // 計測（treatment 記録・設計 v2.1 #1 最優先・spec §6-3）: 次の一杯を「見せた」ときだけ、
+        //   どの銘柄をどの版（karte 個別化 / baseline）で見せたかを flow_events に残す（追加専用・fail-safe）。
+        //   選定挙動・ユーザー向け文言は一切変えない（logNextCupShown は記録のみで throw しない）。
+        if (suggestion) {
+          logNextCupShown(supabase, lineUserId, ratedTea, suggestion, teas, excludedNos, karte);
+        }
       }
       messages = [buildRateResponse(ratedTea, action.kind, suggestion)];
     }
