@@ -17,7 +17,7 @@
 
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
-import { ABOUT_BLURB } from "./brand-copy";
+import { ABOUT_BLURB, WELCOME_DELIVERY_FREQUENCY } from "./brand-copy";
 import { resolveLinkedSubscriber, emitLinkageButton } from "./subscriber-linkage";
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ export function buildAboutMessage(): string {
     `${ABOUT_BLURB}\n\n` +
     `くわしくはこちらをご覧ください。\n${SITE_URL}\n\n` +
     "このトークは、elxea のサポートを担当する AI がお答えしています。お茶えらびのご相談など、気軽に話しかけてくださいね。\n\n" +
-    "お便りをお送りするのは月に1〜2回、季節の節目だけです。"
+    WELCOME_DELIVERY_FREQUENCY
   );
 }
 

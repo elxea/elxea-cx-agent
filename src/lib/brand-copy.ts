@@ -61,6 +61,31 @@ export const WELCOME_INTRO =
   `こんにちは！${BRAND_NAME}（${BRAND_NAME_READING}）へようこそ。\n\n` +
   "日本各地の小規模茶農家さんから厳選した、シングルオリジン（単一農園・単一品種）のお茶を、あなたにぴったりの一杯としてお届けします。";
 
+/**
+ * お便り（配信）の頻度を伝える 1 行（ウェルカム共通・静けさの約束）。
+ * SoT 一本化: 従来 welcome-onboarding.ts / menu-actions.ts に同一文がベタ書きされていた（drift 源）ため
+ *   本定数へ集約。文面はブランドの配信ポリシー（月に1〜2回・季節の節目）を伝える既存文言のまま。
+ */
+export const WELCOME_DELIVERY_FREQUENCY =
+  "お便りをお送りするのは月に1〜2回、季節の節目だけです。";
+
+/**
+ * QR 同梱物（マルシェ/オンライン購入の袋）から友だち追加した方への商品固有ウェルカム。
+ *
+ * ⚠ 監査 #3（コンテンツ/High）是正: 旧 routes/line.ts buildProductWelcomeMessage は
+ *   「こんにちは！elxea へようこそ」をベタ書きし、読み仮名（エルクシア）・シングルオリジン・
+ *   配信頻度を欠き、禁止語リグレッションも迂回していた。最大流入（QR 同梱）の第一印象を
+ *   ブランド正本（SoT）に一本化するため、WELCOME_INTRO + 配信頻度 + 商品名差し込みで再構成する。
+ *   新たなブランド文言をベタ書きしない（差し込む商品名だけが可変）。
+ */
+export function buildProductWelcome(productName: string): string {
+  return (
+    `${WELCOME_INTRO}\n\n` +
+    `${WELCOME_DELIVERY_FREQUENCY}\n\n` +
+    `${productName} をお届けしましたね。お楽しみいただけていますか。`
+  );
+}
+
 /** オンボーディング「お茶を探す」導入文。 */
 export const ONBOARDING_EXPLORE_INTRO =
   `${BRAND_NAME} では、日本各地の小規模茶農家さんから厳選したシングルオリジンのお茶を取り揃えています。`;

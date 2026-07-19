@@ -25,6 +25,8 @@ import {
   BRAND_STATEMENT_SHORT,
   ABOUT_BLURB,
   WELCOME_INTRO,
+  WELCOME_DELIVERY_FREQUENCY,
+  buildProductWelcome,
   ONBOARDING_EXPLORE_INTRO,
   ONBOARDING_ABOUT_BODY,
   SUPPORT_EMAIL,
@@ -50,6 +52,9 @@ const USER_FACING: Array<{ label: string; text: string }> = [
   { label: "buildSubscriptionMessage(generic)", text: buildSubscriptionMessage("generic") },
   { label: "ABOUT_BLURB", text: ABOUT_BLURB },
   { label: "WELCOME_INTRO", text: WELCOME_INTRO },
+  { label: "WELCOME_DELIVERY_FREQUENCY", text: WELCOME_DELIVERY_FREQUENCY },
+  // QR 同梱ウェルカム（#3）も禁止語リグレッションの対象に含める（従来は迂回していた）。
+  { label: "buildProductWelcome", text: buildProductWelcome("サンプル煎茶") },
   { label: "ONBOARDING_EXPLORE_INTRO", text: ONBOARDING_EXPLORE_INTRO },
   { label: "ONBOARDING_ABOUT_BODY", text: ONBOARDING_ABOUT_BODY },
   ...BROADCAST_TEMPLATES.map((t) => ({ label: `broadcast:${t.id}`, text: t.text })),
@@ -115,6 +120,14 @@ it("正本値: ⑤about・ウェルカムがブランドステートメント（
 
 it("タグラインは About elxea の正本と一致", () => {
   assert(BRAND_TAGLINE === "日常の中にきらめきを感じられる一杯をあなたにも。", "tagline 正本一致");
+});
+
+it("QR ウェルカム（buildProductWelcome）が brand-copy 正本要素を含む（#3 SoT 一本化）", () => {
+  const w = buildProductWelcome("煎茶 やまなみ");
+  assert(w.includes("エルクシア"), "読み仮名エルクシア");
+  assert(w.includes("シングルオリジン"), "single-origin");
+  assert(w.includes(WELCOME_DELIVERY_FREQUENCY), "配信頻度 1 行");
+  assert(w.includes("煎茶 やまなみ"), "商品名差し込み");
 });
 
 for (const t of queue) {
