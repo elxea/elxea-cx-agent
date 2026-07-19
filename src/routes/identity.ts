@@ -23,6 +23,7 @@ import {
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
 import { upsertCustomerLinkage } from "../lib/customer-linkage";
+import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 import { logFlowEvent } from "../lib/flow-events";
 
 /**
@@ -208,6 +209,30 @@ export async function identityLinkHandler(c: Context<{ Bindings: Env }>) {
 }
 
 /**
+ * 連携成立時の好み引き継ぎ（lineUsers→users カルテ統合）を安全に実行する（never throw）。
+ *
+ * 設計 §3 引き継ぎ / ジャーニー S5「会員とつながったら好みが引き継がれた」の成立点。
+ * Firestore 未設定・失敗は握り潰す（連携応答 200 を落とさない・会話/連携を止めない）。data-only。
+ * 冪等・graceful は mergeLineUserIntoShopify 側が担保する（本ラッパは非致命化だけを足す）。
+ */
+async function runCarryoverMerge(
+  env: Env,
+  lineUserId: string,
+  shopifyCustomerId: string,
+): Promise<void> {
+  try {
+    const fsEnv = getFirestoreEnv(env);
+    await mergeLineUserIntoShopify(lineUserId, shopifyCustomerId, fsEnv);
+  } catch (err) {
+    // Firestore 未設定（GA 前は creds 無しでここに来る）や一時失敗は非致命。連携自体は成立済み。
+    console.warn(
+      "[identity/link-liff] karte carryover merge skipped/failed (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
  * POST /api/identity/link-liff
  *
  * 案A（LIFF 連携）第1弾の中心。LINE Bot ランタイムが読む Supabase `customer_linkages`
@@ -296,10 +321,23 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
       userRef: result.lineUserId,
       metadata: { source: "liff" },
     });
+
+    // 好み引き継ぎ（carryover・設計 §3 / ジャーニー S5「引き継がれた」）: 連携成立の瞬間に、未連携
+    //   カルテ lineUsers/{lineUserId} の persona/tasteProfile を users/{shopifyCustomerId} へ
+    //   mergePersonaScores 流儀で統合する（data-only・Firestore のみ・冪等・graceful）。
+    //   非致命ラッパ runCarryoverMerge 経由（never throw）。GA 前は Firestore 未設定で no-op に倒れる。
+    const carryoverMerge = runCarryoverMerge(
+      c.env,
+      result.lineUserId,
+      result.shopifyCustomerId,
+    );
+
     try {
       c.executionCtx.waitUntil(linkCompletedLog);
+      c.executionCtx.waitUntil(carryoverMerge);
     } catch {
       await linkCompletedLog;
+      await carryoverMerge;
     }
 
     return c.json({

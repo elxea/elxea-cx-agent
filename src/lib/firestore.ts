@@ -938,3 +938,171 @@ export async function updateLineUserTasteProfile(
   await updateLineUserProfile(lineUserId, updates, env);
   return updates;
 }
+
+// ---------------------------------------------------------------------------
+// 連携成立時の好み引き継ぎ（carryover）— lineUsers/{lineUserId} → users/{shopifyCustomerId}
+//
+// 設計正本: personalization-spec §3 引き継ぎ / ジャーニー S5「会員とつながったら好みが
+//   引き継がれた」/ 突合表 Table A #16（❌ 未実装だった箇所）/ 監査 #10 改善案。
+//   未連携時に貯めた好み（persona/tasteProfile）を、連携成立の瞬間に連携済みカルテへ統合し、
+//   「つながると自分向けに深まる」到達点を成立させる。data-only（Firestore のみ・外部送信なし）。
+// ---------------------------------------------------------------------------
+
+/**
+ * PersonaScores を mergePersonaScores 用の PersonaType[] シグナル列へ展開する（純粋）。
+ *
+ * 各軸のスコア n を「その軸トークン n 個」に開くことで、mergePersonaScores(base, signals, 1)
+ * が「別軸への累積加算」流儀のまま lineUsers 分を users の各軸へ正確に足し込めるようにする
+ * （＝上書きではなく加算・weight は展開済みなので 1）。非有限・0 以下の軸は無視する。
+ */
+export function personaScoresToSignals(scores: PersonaScores): PersonaType[] {
+  const signals: PersonaType[] = [];
+  for (const axis of ["serenity", "explorer", "sensory"] as const) {
+    const n = Math.floor(scores[axis] ?? 0);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    for (let i = 0; i < n; i++) signals.push(axis);
+  }
+  return signals;
+}
+
+/** persona に意味のあるスコアが 1 つでもあるか（純粋）。 */
+function personaHasScore(persona: PersonaProfile | undefined): boolean {
+  const s = persona?.scores;
+  if (!s) return false;
+  return (s.serenity ?? 0) > 0 || (s.explorer ?? 0) > 0 || (s.sensory ?? 0) > 0;
+}
+
+/** tasteProfile に引き継ぐべき手がかりが 1 つでもあるか（純粋）。 */
+function tasteHasSignal(taste: TasteProfile | undefined): boolean {
+  if (!taste) return false;
+  return (
+    (taste.preferredCategories?.length ?? 0) > 0 ||
+    (taste.flavorPreferences?.length ?? 0) > 0 ||
+    !!taste.scenePref
+  );
+}
+
+/**
+ * mergeLineUserIntoShopify の依存注入シーム（本番は未指定で実 Firestore I/O を使う）。
+ * ハーメティックテストはここに in-memory な get/update を注入し、実ネットワーク非接触で
+ * 「連携時に好みが users へ畳まれる」ことを検証する（Firestore REST はモック対象外＝要 DI）。
+ */
+export type CarryoverDeps = {
+  getLineUser?: (
+    lineUserId: string,
+    env: FirestoreEnv,
+  ) => Promise<LineUserProfile | null>;
+  getCustomer?: (
+    shopifyCustomerId: string,
+    env: FirestoreEnv,
+  ) => Promise<CustomerProfile | null>;
+  updateCustomer?: (
+    shopifyCustomerId: string,
+    updates: Partial<CustomerProfile>,
+    env: FirestoreEnv,
+  ) => Promise<void>;
+  updateLineUser?: (
+    lineUserId: string,
+    updates: Partial<LineUserProfile>,
+    env: FirestoreEnv,
+  ) => Promise<void>;
+};
+
+/**
+ * 連携成立時に未連携カルテ（lineUsers/{lineUserId}）の好みを、連携済みカルテ
+ * （users/{shopifyCustomerId}）へ統合する（設計 §3 引き継ぎ・S5「引き継がれた」の成立）。
+ *
+ * 統合方針:
+ *   - persona: 既存 `mergePersonaScores` の「別軸への累積加算」流儀で、lineUsers の各軸スコアを
+ *     users の各軸へ足し込む（上書きしない＝会員側の既存スコアを消さない）。primary は最大軸を再計算。
+ *   - tasteProfile: `computeTasteProfileUpdates` を共有し union（重複排除・上限50）。scenePref は
+ *     lineUsers 側があれば最新として採用。他の出し分けと同一ロジックを保証する（SoT 分裂しない）。
+ *   - lineUsers.mergedToShopify=true を立てる（＝二重加算防止フラグ・冪等性の機械的担保）。
+ *
+ * 冪等性: mergedToShopify===true のとき no-op（再連携・再送で二重加算しない）。
+ * graceful: lineUsers 不在／persona も taste も無いカルテ（例: 入口回答のみ）は no-op（何も書かない）。
+ * 順序: users を先に統合してから mergedToShopify を立てる（途中失敗時に「フラグだけ立って
+ *   引き継ぎ未了」を避ける。最悪でも mergedToShopify 未設定なら再連携時に再試行できる）。
+ *
+ * GA 状態: Shopify 連携（LIFF）は GA 前で、唯一の呼び出し元 identity/link-liff は本番で未発火。
+ *   本関数は「連携が GA したとき正しく動く」ことを保証する（hermetic mocked-link で実証）。
+ *
+ * @param env Firestore 資格情報（未設定なら呼び出し側 route が getFirestoreEnv で弾く）。
+ * @param deps テスト用 DI（本番は省略）。
+ * @returns 統合後の連携済みカルテ（no-op 時は現状の users カルテ・不在なら null）。
+ */
+export async function mergeLineUserIntoShopify(
+  lineUserId: string,
+  shopifyCustomerId: string,
+  env: FirestoreEnv,
+  deps?: CarryoverDeps,
+): Promise<CustomerProfile | null> {
+  const getLineUser = deps?.getLineUser ?? getLineUserProfile;
+  const getCustomer = deps?.getCustomer ?? getCustomerProfile;
+  const updateCustomer = deps?.updateCustomer ?? updateCustomerProfile;
+  const updateLineUser = deps?.updateLineUser ?? updateLineUserProfile;
+
+  const lineProfile = await getLineUser(lineUserId, env);
+
+  // graceful: 未連携カルテそのものが無い → 引き継ぐものが無い（no-op）。
+  if (!lineProfile) return getCustomer(shopifyCustomerId, env);
+
+  // 冪等性: 既にマージ済み → 二重加算しない（no-op）。
+  if (lineProfile.mergedToShopify === true) {
+    return getCustomer(shopifyCustomerId, env);
+  }
+
+  const foldPersona = personaHasScore(lineProfile.persona);
+  const foldTaste = tasteHasSignal(lineProfile.tasteProfile);
+
+  // graceful: persona も taste も無い（例: 入口回答のみ）→ 引き継ぐ好みが無い（no-op）。
+  if (!foldPersona && !foldTaste) return getCustomer(shopifyCustomerId, env);
+
+  const customerProfile = await getCustomer(shopifyCustomerId, env);
+  const now = new Date().toISOString();
+  const updates: Partial<CustomerProfile> = { lastActiveAt: now };
+
+  // persona: 別軸への累積加算（上書きしない）。lineUsers のスコアを signal 列へ展開して足し込む。
+  if (foldPersona) {
+    const baseScores = customerProfile?.persona?.scores ?? {
+      serenity: 0,
+      explorer: 0,
+      sensory: 0,
+    };
+    const { scores, primary } = mergePersonaScores(
+      baseScores,
+      personaScoresToSignals(lineProfile.persona!.scores),
+      1,
+    );
+    updates.persona = { primary, scores, lastUpdated: now };
+  }
+
+  // tasteProfile: 既存の union ロジック（computeTasteProfileUpdates）を共有。persona は上で
+  //   処理済みなので persona_signals は空にして二重加算を避ける（taste のみを畳む）。
+  if (foldTaste) {
+    const t = lineProfile.tasteProfile!;
+    const tasteSignals: PreferenceSignals = {
+      preferred_categories: t.preferredCategories ?? [],
+      flavor_preferences: t.flavorPreferences ?? [],
+      scene_preferences: t.scenePref ? [t.scenePref] : [],
+      persona_signals: [],
+      explicit_statements: [],
+    };
+    const mergedTaste = computeTasteProfileUpdates(
+      tasteSignals,
+      customerProfile?.tasteProfile,
+      customerProfile?.persona,
+      1,
+    );
+    updates.tasteProfile = mergedTaste.tasteProfile;
+  }
+
+  // 連携済みカルテへ統合を書く（PATCH・部分更新）。
+  await updateCustomer(shopifyCustomerId, updates, env);
+
+  // 未連携カルテに「統合済み」を立てる（二重加算防止フラグ＝冪等性の機械的担保）。
+  await updateLineUser(lineUserId, { mergedToShopify: true }, env);
+
+  // 統合後の連携済みカルテを返す（既存に updates を重ねた状態）。
+  return { ...(customerProfile ?? {}), ...updates };
+}
