@@ -321,6 +321,26 @@ it("イントロ+Q1: ラベル≤20字・3択・トークン形式", () => {
   }
 });
 
+console.log("\n--- (UX①) 診断結果ラベルの番号+名前統一（番号先頭を是正） ---");
+
+it("診断結果: 本文行が `名前（No.XXXXX）`（番号先頭ではない・break-proof）", () => {
+  const m = buildResultWithTeas("sensory", CATALOG, diagnosisRecommendationKarte("sensory", 3));
+  // 本文に `名前（No.XXXXX）` 形式が現れる（① 統一）。
+  assert(/（No\.\d{5}）/.test(m.text), "本文に 名前（No.）形式");
+  // 旧・番号先頭行（"11301 煎茶…"）を撲滅（従来コードなら行頭 5 桁+空白で失敗する = break-proof）。
+  assert(!/(^|\n)\d{5}\s/.test(m.text), "旧・番号先頭行 `11301 名前` を撲滅");
+});
+
+it("診断結果 QR: お茶ボタン label が `名前（No.XXXXX）`・≤20（番号保全 truncate）", () => {
+  const m = buildResultWithTeas("sensory", CATALOG, diagnosisRecommendationKarte("sensory", 3));
+  const teaBtns = m.quickReplies.filter((q) => /^このお茶｜\d{5}｜診断$/.test(q.action.text));
+  assert(teaBtns.length >= 1, "お茶ボタンがある");
+  for (const q of teaBtns) {
+    assert(q.action.label.includes("（No."), `QR 番号+名前 (${q.action.label})`);
+    assert(q.action.label.length <= LABEL_MAX, `≤20 (${q.action.label})`);
+  }
+});
+
 console.log("\n" + "=".repeat(60));
 console.log("Preference Diagnosis Unit Test Results");
 console.log("=".repeat(60));

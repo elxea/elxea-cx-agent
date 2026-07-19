@@ -52,6 +52,10 @@ function assertDefined<T>(value: T | undefined, label = "") {
   }
 }
 
+function assert(cond: boolean, label = "") {
+  if (!cond) throw new Error(label || "assertion failed");
+}
+
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -60,6 +64,9 @@ import {
   productIntroCard,
   recommendCarousel,
   feedbackCard,
+  teaRecommendCard,
+  teaRecommendCarousel,
+  preferDirectR2,
 } from "../../src/lib/flex-templates";
 
 // ---------------------------------------------------------------------------
@@ -271,6 +278,85 @@ describe("feedbackCard", () => {
       "monthly_feedback:love",
       "custom prefix",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// teaRecommendCard / teaRecommendCarousel / preferDirectR2 テスト（UX③）
+// ---------------------------------------------------------------------------
+
+describe("teaRecommendCard (UX③)", () => {
+  it("画像あり → hero.url に画像 URL を載せる", () => {
+    const r = teaRecommendCard({
+      name: "玉露（No.11301）",
+      description: "まろやかなうまみ。",
+      imageUrl: "https://pub-xxxx.r2.dev/cdn/11301.jpg",
+      productUrl: "https://elxea.com/ja",
+    }) as Record<string, Record<string, unknown>>;
+    assertDefined(r.hero, "hero");
+    assertEqual((r.hero as { url?: string }).url, "https://pub-xxxx.r2.dev/cdn/11301.jpg", "hero.url");
+  });
+
+  it("画像なし → hero を含まない（graceful・現況の主経路）", () => {
+    const r = teaRecommendCard({
+      name: "玉露（No.11301）",
+      description: "まろやかなうまみ。",
+      productUrl: "https://elxea.com/ja",
+    }) as Record<string, unknown>;
+    assertEqual(r.hero, undefined, "no hero when imageUrl omitted");
+  });
+
+  it("body 見出しに `（No.` を含む（① とカードの連結）+ footer は uri ボタン「見る」", () => {
+    const r = teaRecommendCard({
+      name: "玉露（No.11301）",
+      description: "説明",
+      productUrl: "https://elxea.com/ja/x",
+    }) as Record<string, Record<string, unknown>>;
+    const body = r.body as Record<string, unknown>;
+    const contents = body.contents as Record<string, unknown>[];
+    assert(String(contents[0].text).includes("（No."), "見出しに （No.");
+    const footer = r.footer as Record<string, unknown>;
+    const btn = (footer.contents as Record<string, Record<string, unknown>>[])[0];
+    const action = btn.action as Record<string, unknown>;
+    assertEqual(action.type as string, "uri", "uri button");
+    assertEqual(action.label as string, "見る", "button label");
+    assertEqual(action.uri as string, "https://elxea.com/ja/x", "button uri");
+  });
+});
+
+describe("teaRecommendCarousel (UX③)", () => {
+  it("carousel を生成し最大10件に制限", () => {
+    const items = Array.from({ length: 12 }, (_, i) => ({
+      name: `お茶${i}（No.1${String(i).padStart(4, "0")}）`,
+      description: "x",
+      productUrl: "https://elxea.com/ja",
+    }));
+    const r = teaRecommendCarousel(items) as Record<string, unknown>;
+    assertEqual(r.type as string, "carousel");
+    assertEqual((r.contents as unknown[]).length, 10, "max 10 bubbles");
+  });
+});
+
+describe("preferDirectR2 (UX③ 画像 URL 正規化)", () => {
+  it("wsrv.nl ラップ → 直 r2.dev を decode して返す", () => {
+    const wrapped =
+      "https://wsrv.nl/?url=" + encodeURIComponent("https://pub-abc.r2.dev/cdn/x.jpg") + "&w=2000";
+    assertEqual(preferDirectR2(wrapped), "https://pub-abc.r2.dev/cdn/x.jpg", "unwrapped direct r2.dev");
+  });
+  it("素の r2.dev はそのまま", () => {
+    assertEqual(
+      preferDirectR2("https://pub-abc.r2.dev/cdn/x.jpg"),
+      "https://pub-abc.r2.dev/cdn/x.jpg",
+      "passthrough",
+    );
+  });
+  it("空 / null / 非 https は null（hero を出さない graceful）", () => {
+    assertEqual(preferDirectR2(""), null, "empty");
+    assertEqual(preferDirectR2(null), null, "null");
+    assertEqual(preferDirectR2("ftp://x"), null, "non-https");
+  });
+  it("http は https に昇格", () => {
+    assertEqual(preferDirectR2("http://pub-abc.r2.dev/x.jpg"), "https://pub-abc.r2.dev/x.jpg", "upgrade");
   });
 });
 

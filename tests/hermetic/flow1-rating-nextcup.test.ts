@@ -40,12 +40,19 @@ describe("hermetic L1 — 動線1: 感想 → 次の一杯", () => {
     });
     expect(status).toBe(200);
 
-    const reply = h.line.texts().join("\n---\n");
-    expect(reply.length).toBeGreaterThan(0);
-    // お礼文（NEXT_CUP_GOOD_THANKS）が返っている。
-    expect(reply).toContain(NEXT_CUP_GOOD_THANKS);
-    // 次の一杯 = 同軸（rich+full）の番号最小 = 11401 が提案されている。
-    expect(reply).toContain("No.11401");
+    // UX③: rate-good は Flex カードで返る（実送信はモック＝OFF）。
+    const flexes = h.line.flexes();
+    expect(flexes.length, "rate-good は Flex カードで返る（UX③）").toBeGreaterThan(0);
+    // altText（テキスト fallback）に お礼文 + 次の一杯 = 同軸番号最小 11401 が入っている。
+    const altText = flexes.map((f) => String(f.altText ?? "")).join("\n---\n");
+    expect(altText).toContain(NEXT_CUP_GOOD_THANKS);
+    expect(altText).toContain("No.11401");
+    // カード構造: bubble で、見出しが `名前（No.11401）` に統一（① がカード見出しにも効く）。
+    const card = flexes[0].contents as Record<string, unknown>;
+    expect(card.type, "bubble カード").toBe("bubble");
+    expect(JSON.stringify(card), "カード見出しが 名前（No.11401）").toContain("（No.11401）");
+    // 画像なし銘柄（フィクスチャに画像なし）→ hero を出さない graceful カード。
+    expect(card.hero, "画像なしは hero を省く（graceful）").toBeUndefined();
 
     // DB 効果（モック Supabase）: product_ratings に rating=1 行が記録される。
     await settle(); // fire-and-forget の void 記録を落ち着かせる。

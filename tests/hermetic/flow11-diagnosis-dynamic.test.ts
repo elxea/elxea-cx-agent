@@ -79,7 +79,12 @@ describe("hermetic L1 — 動線6: 診断おすすめの動的解決（監査 #6
       await settle();
 
       const msgs = h.line.allMessages();
-      const reply = h.line.texts().join("\n---\n");
+      // UX③: 結果は Flex カルーセルで返る（persona 受け止め・おすすめ一覧は altText に入る）。
+      //   おすすめ番号（カードトークン）は Flex に添えた quickReply に載るため allFiveDigits で拾える。
+      const reply = [
+        ...h.line.texts(),
+        ...h.line.flexes().map((f) => String(f.altText ?? "")),
+      ].join("\n---\n");
       expect(reply.length, "診断結果が返る").toBeGreaterThan(0);
       // persona の受け止めが届く（結果段に到達している）。
       expect(reply).toMatch(/あなたは【/);

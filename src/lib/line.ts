@@ -174,14 +174,26 @@ function buildTextMessage(
   return message;
 }
 
-/** Flex message object を組み立てる（altText 400 文字上限）。 */
+/**
+ * Flex message object を組み立てる（altText 400 文字上限 + quickReply 最大 13）。
+ * quickReplyItems（UX③ の additive 拡張）は buildTextMessage と同一実装。省略時は付けない（無回帰）。
+ */
 function buildFlexMessage(
   altText: string,
   contents: Record<string, unknown>,
+  quickReplyItems?: QuickReplyItem[],
 ): Record<string, unknown> {
   const truncatedAltText =
     altText.length > 400 ? altText.slice(0, 397) + "..." : altText;
-  return { type: "flex", altText: truncatedAltText, contents };
+  const message: Record<string, unknown> = {
+    type: "flex",
+    altText: truncatedAltText,
+    contents,
+  };
+  if (quickReplyItems && quickReplyItems.length > 0) {
+    message.quickReply = { items: quickReplyItems.slice(0, 13) };
+  }
+  return message;
 }
 
 /** LINE Push API でテキストメッセージを送信 */
@@ -219,8 +231,12 @@ export async function pushFlexMessage(
 export interface LineResponder {
   /** テキストを送る（reply 優先・push フォールバック）。 */
   text(text: string, quickReplyItems?: QuickReplyItem[]): Promise<void>;
-  /** Flex を送る（reply 優先・push フォールバック）。 */
-  flex(altText: string, contents: Record<string, unknown>): Promise<void>;
+  /** Flex を送る（reply 優先・push フォールバック）。quickReplyItems は任意（UX③・省略で無回帰）。 */
+  flex(
+    altText: string,
+    contents: Record<string, unknown>,
+    quickReplyItems?: QuickReplyItem[],
+  ): Promise<void>;
 }
 
 /**
@@ -257,8 +273,12 @@ export function createResponder(
     async text(text: string, quickReplyItems?: QuickReplyItem[]): Promise<void> {
       await sendOne([buildTextMessage(text, quickReplyItems)]);
     },
-    async flex(altText: string, contents: Record<string, unknown>): Promise<void> {
-      await sendOne([buildFlexMessage(altText, contents)]);
+    async flex(
+      altText: string,
+      contents: Record<string, unknown>,
+      quickReplyItems?: QuickReplyItem[],
+    ): Promise<void> {
+      await sendOne([buildFlexMessage(altText, contents, quickReplyItems)]);
     },
   };
 }

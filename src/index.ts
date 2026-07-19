@@ -131,6 +131,8 @@ export type Env = {
   NOTION_SET_MENU_DB_ID: string;
   NOTION_TEA_MENU_DB_ID: string;
   NOTION_CONTENT_HUB_DB_ID?: string;
+  /** UX③ お茶写真ソース（Product Catalogue Info DB）。未設定は既定 ID（fallback 定数）で動く。 */
+  NOTION_PRODUCT_CATALOGUE_DB_ID?: string;
   // Shopify
   SHOPIFY_STORE_DOMAIN?: string;
   SHOPIFY_ADMIN_ACCESS_TOKEN?: string;

@@ -21,6 +21,7 @@ import {
   buildBrewAnswer,
   buildFlavorAnswer,
   buildStoryAnswer,
+  buildRateThanksGood,
   teaFlowEvents,
   TEA_LIST_PAGE_SIZE,
   type TeaItem,
@@ -408,6 +409,32 @@ it("handleTextMessage は onboarding / feedback を tea-menu より先に呼ぶ"
 it("feedback pending コメントに5桁が混じっても tea トリガーと衝突しない（解析上の独立性）", () => {
   assertEqual(parseTeaAction("味が薄いと感じました"), null, "free comment → not tea");
   assert(parseTeaAction("11301") !== null, "bare 5-digit is a tea action (guarded by ordering)");
+});
+
+console.log("\n--- (UX①) お茶ラベルの番号+名前統一（名前のみ表示の是正） ---");
+
+it("淹れ方一覧: 各お茶ボタンの label が `名前（No.XXXXX）`（① 是正・名前のみを撲滅）", () => {
+  const m = buildEntryMessage(FIXTURE, 0);
+  const teaLabels = m.quickReplies
+    .filter((q) => q.action.text.startsWith("このお茶｜"))
+    .map((q) => q.action.label);
+  assert(teaLabels.length > 0, "お茶ボタンがある");
+  for (const label of teaLabels) {
+    assert(label.includes("（No."), `番号+名前統一 (${label})`);
+    assert(label.length <= 20, `≤20 (${label})`);
+  }
+});
+
+it("次の一杯ボタン: buildRateThanksGood の提案 label が `名前（No.XXXXX）`（①）", () => {
+  const rated = FIXTURE.find((x) => x.number === "10101")!;
+  const suggestion = FIXTURE.find((x) => x.number === "40101")!;
+  const m = buildRateThanksGood(rated, suggestion);
+  const btn = m.quickReplies.find((q) => q.action.text === "このお茶｜40101");
+  assert(!!btn, "提案ボタンがある");
+  assert(btn!.action.label.includes("（No.40101）"), `番号+名前 (${btn!.action.label})`);
+  assert(btn!.action.label.length <= 20, "≤20");
+  // 本文にも `名前（No.）` の提案文が入る（従来どおり）。
+  assert(m.text.includes("（No.40101）"), "提案文にも番号+名前");
 });
 
 console.log("\n" + "=".repeat(60));

@@ -41,13 +41,24 @@ import {
   NEXT_CUP_GOOD_THANKS,
   NEXT_CUP_DECLINE_MESSAGE,
   nextCupSuggestionSentence,
+  formatTeaLabel,
+  formatTeaQuickReplyLabel,
+  SITE_URL_JA,
 } from "./brand-copy";
+import { teaRecommendCard, preferDirectR2 } from "./flex-templates";
 
 // ---------------------------------------------------------------------------
 // データモデル
 // ---------------------------------------------------------------------------
 
 export interface TeaItem {
+  /**
+   * Notion Tea Menu List のページ id（UX③ の Product Catalogue 画像 join キー）。
+   * Product Catalogue の `Tea Menu` relation の target id と突き合わせて画像を引く。
+   * 実データ（mapPage）では常に非空。合成 TeaItem（テスト等）では空になり得るが、
+   *   画像 join は number 側にフォールバックするため実害はない。
+   */
+  id: string;
   /** 一意な 5 桁番号（Notion「Menu Name」= title）。例: "11301" */
   number: string;
   /** 表示名（Notion「Menu Name - full」）。無ければ number にフォールバック */
@@ -323,7 +334,8 @@ export function buildEntryMessage(teas: TeaItem[], page = 0, karte?: NextCupKart
   const quickReplies: QuickReplyItem[] = [];
   // 前へ（2 ページ目以降）: 現在 1 始まりページ = safePage+1、その前 = safePage
   if (safePage > 0) quickReplies.push(qr("前へ", `${TOK.list}${safePage}`));
-  for (const t of slice) quickReplies.push(qr(t.name, `${TOK.card}${t.number}`));
+  // UX①: 淹れ方一覧の各ボタンを `名前（No.XXXXX）` に統一（番号保全 truncate で 20 字上限内・番号は切らない）。
+  for (const t of slice) quickReplies.push(qr(formatTeaQuickReplyLabel(t), `${TOK.card}${t.number}`));
   // 次へ: 次の 1 始まりページ = safePage+2
   if (sorted.length > start + TEA_LIST_PAGE_SIZE) {
     quickReplies.push(qr("次へ", `${TOK.list}${safePage + 2}`));
@@ -501,7 +513,8 @@ export function buildRateThanksGood(
   return {
     text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}`,
     quickReplies: [
-      qr(`${suggestion.name}を見る`, `${TOK.card}${suggestion.number}`),
+      // UX①: 次の一杯ボタンも `名前（No.XXXXX）` に統一（番号保全 truncate・番号は切らない）。
+      qr(formatTeaQuickReplyLabel(suggestion), `${TOK.card}${suggestion.number}`),
       qr("🍃 別のお茶を見る", BACK_TO_LIST),
     ],
   };
@@ -726,8 +739,13 @@ interface NotionProp {
   rich_text?: NotionRichText[];
   select?: { name: string } | null;
   multi_select?: Array<{ name: string }>;
+  /** url 型（UX③ Product Catalogue の Image Main_* 用）。 */
+  url?: string | null;
+  /** relation 型（UX③ Product Catalogue の Tea Menu 用・target = Tea Menu List page id）。 */
+  relation?: Array<{ id: string }>;
 }
 interface NotionPage {
+  id?: string;
   properties: Record<string, NotionProp>;
 }
 
@@ -743,6 +761,12 @@ function propSelect(p?: NotionProp): string {
 function propMulti(p?: NotionProp): string[] {
   return (p?.multi_select ?? []).map((s) => s.name);
 }
+function propUrl(p?: NotionProp): string {
+  return p?.url ?? "";
+}
+function propRelation(p?: NotionProp): string[] {
+  return (p?.relation ?? []).map((r) => r.id);
+}
 
 function mapPage(page: NotionPage): TeaItem | null {
   const pr = page.properties;
@@ -750,6 +774,7 @@ function mapPage(page: NotionPage): TeaItem | null {
   if (!/^\d{5}$/.test(number)) return null; // 5 桁番号を持たない行は対象外
   const full = propRich(pr["Menu Name - full"]);
   return {
+    id: page.id ?? "", // UX③ の画像 join キー（Product Catalogue relation の target id）。
     number,
     name: full || number,
     category: propSelect(pr["Category"]),
@@ -820,6 +845,119 @@ export function _resetTeaCache(): void {
 }
 
 // ---------------------------------------------------------------------------
+// UX③ お茶写真の取得（Product Catalogue Info DB・TTL キャッシュ・graceful）
+// ---------------------------------------------------------------------------
+
+/**
+ * Product Catalogue Info DB の fallback ID（UX③・plan で Notion API 実読検証済）。
+ * 単品 SKU の商品画像（Image Main_LINE Gift → fallback Image Main_Shopify）を持つ。
+ */
+const PRODUCT_CATALOGUE_FALLBACK_DB_ID = "58934cb5-228d-448f-b7e6-f8f9f296a538";
+
+/** Product Catalogue の単品判定タグ（Tags_Shopify に含まれる）。 */
+const SINGLE_PACK_TAG = "Single Pack";
+
+/** お茶 page id / 5 桁番号 → 正規化済み画像 URL のキャッシュ（fetchSellingTeas と同型・TTL 10 分）。 */
+let productImageCache: { at: number; map: Map<string, string> } | null = null;
+
+/**
+ * Product Catalogue の 1 行（単品 SKU）を「join キー群 → 画像 URL」に写す（純粋）。
+ *
+ * - 単品（Tags_Shopify に "Single Pack"）以外は対象外（null）。
+ * - 画像は Image Main_LINE Gift を優先、無ければ Image Main_Shopify。preferDirectR2 で正規化。
+ *   どちらも無い / 非 HTTPS は null（＝Map に載せず、カード側は画像なし graceful）。
+ * - join キー: (1) Tea Menu relation の target id（= Tea Menu List の page id = TeaItem.id）、
+ *   (2) SKU タイトルの `TEA-STMS-(\d{5})-` から抽出した 5 桁番号（relation 解決不要の fallback）。
+ */
+function mapProductImagePage(page: NotionPage): { imageUrl: string; keys: string[] } | null {
+  const pr = page.properties;
+  if (!propMulti(pr["Tags_Shopify"]).includes(SINGLE_PACK_TAG)) return null;
+
+  const imageUrl = preferDirectR2(
+    propUrl(pr["Image Main_LINE Gift"]) || propUrl(pr["Image Main_Shopify"]),
+  );
+  if (!imageUrl) return null;
+
+  const keys: string[] = [];
+  for (const id of propRelation(pr["Tea Menu"])) if (id) keys.push(id);
+  // SKU タイトル（type=title のプロパティ）から 5 桁を抽出（Menu Number_Shopify は単品で "Single" のため使わない）。
+  const skuTitle = Object.values(pr)
+    .filter((p) => p?.type === "title")
+    .map((p) => propTitle(p))
+    .join(" ");
+  const m = skuTitle.match(/TEA-STMS-(\d{5})-/);
+  if (m) keys.push(m[1]);
+
+  return keys.length > 0 ? { imageUrl, keys } : null;
+}
+
+async function notionQueryProductImages(env: Env): Promise<Map<string, string>> {
+  const dbId = env.NOTION_PRODUCT_CATALOGUE_DB_ID || PRODUCT_CATALOGUE_FALLBACK_DB_ID;
+  const map = new Map<string, string>();
+  let cursor: string | undefined;
+
+  do {
+    const body: Record<string, unknown> = { page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+
+    const res = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.NOTION_TOKEN}`,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Notion Product Catalogue query failed: ${res.status} ${await res.text().catch(() => "")}`,
+      );
+    }
+    const data = (await res.json()) as {
+      results: NotionPage[];
+      has_more: boolean;
+      next_cursor?: string;
+    };
+    for (const pg of data.results) {
+      const mapped = mapProductImagePage(pg);
+      if (mapped) for (const k of mapped.keys) if (!map.has(k)) map.set(k, mapped.imageUrl);
+    }
+    cursor = data.has_more ? data.next_cursor : undefined;
+  } while (cursor);
+
+  return map;
+}
+
+/**
+ * お茶写真マップ（page id / 5 桁番号 → 正規化 HTTPS 画像 URL）を取得（UX③・TTL キャッシュ）。
+ * fetchSellingTeas のミラー。現況は単品 SKU の画像がほぼ null のため空 Map が主（＝画像なし graceful）。
+ * Notion 充足に応じて additive に画像が載る（設計はこれ前提）。
+ */
+export async function fetchProductImages(
+  env: Env,
+  forceRefresh = false,
+): Promise<Map<string, string>> {
+  const now = Date.now();
+  if (!forceRefresh && productImageCache && now - productImageCache.at < CACHE_TTL_MS) {
+    return productImageCache.map;
+  }
+  const map = await notionQueryProductImages(env);
+  productImageCache = { at: now, map };
+  return map;
+}
+
+/** テスト用: 画像キャッシュを初期化する。 */
+export function _resetProductImageCache(): void {
+  productImageCache = null;
+}
+
+/** お茶 1 件の画像 URL を引く（page id 優先・5 桁番号フォールバック）。無ければ undefined（hero なし）。 */
+export function pickTeaImage(imageMap: Map<string, string>, tea: TeaItem): string | undefined {
+  return (tea.id ? imageMap.get(tea.id) : undefined) ?? imageMap.get(tea.number);
+}
+
+// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ本体）
 // ---------------------------------------------------------------------------
 
@@ -832,6 +970,12 @@ export interface TeaMenuFlowDeps {
    * ハーメティックテストは fake を注入して Firestore 非接触でカルテ影響を検証する。
    */
   loadKarte?: (lineUserId: string) => Promise<NextCupKarte>;
+  /**
+   * UX③: お茶写真マップ（page id / 5 桁番号 → 正規化 HTTPS 画像 URL）のローダ。
+   * 既定は Product Catalogue を読む fetchProductImages。ハーメティックテストは fake Map を注入して
+   * Notion 非接触で「写真あり→hero / なし→graceful」を検証する。
+   */
+  loadProductImages?: () => Promise<Map<string, string>>;
 }
 
 /**
@@ -929,6 +1073,8 @@ export async function handleTeaMenuFlow(
   //   deps.loadKarte はハーメティックテストの注入シーム（Firestore 非接触）。既定は fail-safe な loadCustomerKarte。
   const supabase = createSupabaseClient(env);
   const loadKarte = deps?.loadKarte ?? ((id: string) => loadCustomerKarte(id, env, supabase));
+  // UX③: 次の一杯カード用の写真ローダ（既定 = Product Catalogue・テストは fake Map 注入）。
+  const loadProductImages = deps?.loadProductImages ?? (() => fetchProductImages(env));
 
   // 監査 #②-2 出し分け: お茶一覧（entry）だけカルテを読み、好みに近い順へ並べ替える。
   //   他アクション（card/brew/感想…）は一覧の並びに関与しないためカルテ不要（余計な I/O を避ける）。
@@ -950,6 +1096,8 @@ export async function handleTeaMenuFlow(
   //   再評価は上書きせず追記（recordProductRating の仕様）。
   //   出所スレッディング（ブロック3-A 1(a)）: 診断のおすすめ由来なら source=diagnosis、通常は tea_card。
   let messages = plan.messages;
+  // UX③: rate-good で次の一杯が見つかったら、その 1 本を写真つき（無ければ写真なし graceful）Flex カードで送る。
+  let nextCupCard: TeaItem | null = null;
   if (action.kind === "rate-good" || action.kind === "rate-bad") {
     const rating: RatingValue = action.kind === "rate-good" ? 1 : -1;
     const source: RatingSource = action.origin === "diagnosis" ? "diagnosis" : "tea_card";
@@ -983,7 +1131,30 @@ export async function handleTeaMenuFlow(
         }
       }
       messages = [buildRateResponse(ratedTea, action.kind, suggestion)];
+      if (action.kind === "rate-good") nextCupCard = suggestion;
     }
+  }
+
+  // UX③: 次の一杯（rate-good で候補あり）は写真つき（無ければ写真なし graceful）Flex カードで送る。
+  //   altText = 従来のお礼＋提案文（テキスト fallback）、quickReply = 従来導線（① で `名前（No.）` 化済）。
+  //   画像取得は失敗しても握りつぶして画像なしカードに倒す（返信は必ず届ける）。
+  if (nextCupCard && messages.length === 1) {
+    const om = messages[0];
+    const imageMap = await loadProductImages().catch((e) => {
+      console.warn(
+        "[tea-menu] product images fetch failed (graceful no-image):",
+        e instanceof Error ? e.message : e,
+      );
+      return new Map<string, string>();
+    });
+    const card = teaRecommendCard({
+      name: formatTeaLabel(nextCupCard),
+      description: nextCupCard.descShort,
+      imageUrl: pickTeaImage(imageMap, nextCupCard),
+      productUrl: SITE_URL_JA,
+    });
+    await responder.flex(om.text, card, om.quickReplies);
+    return true;
   }
 
   // 返信（最初の 1 通が reply=無料・以降は push=有料フォールバック）。失敗しても記録は済んでいる。

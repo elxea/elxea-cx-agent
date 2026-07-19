@@ -31,8 +31,16 @@ import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { logFlowEvent, type FlowEventInput } from "./flow-events";
-import { diagnosisCardToken, fetchSellingTeas, type TeaItem } from "./tea-menu";
+import {
+  diagnosisCardToken,
+  fetchSellingTeas,
+  fetchProductImages,
+  pickTeaImage,
+  type TeaItem,
+} from "./tea-menu";
 import { karteAffinity, type NextCupKarte } from "./next-cup";
+import { formatTeaLabel, formatTeaQuickReplyLabel, SITE_URL_JA } from "./brand-copy";
+import { teaRecommendCarousel } from "./flex-templates";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
   getFirestoreEnv,
@@ -262,14 +270,6 @@ const PERSONA_INTRO: Record<PersonaType, string> = {
 /** おすすめ提示件数（販売中カタログから上位 N 件）。 */
 const DIAGNOSIS_RECOMMEND_COUNT = 3;
 
-/** LINE quick reply ラベル上限（20 文字・tea-menu.QR_LABEL_MAX と同値）。 */
-const QR_LABEL_MAX = 20;
-
-/** ラベルを 20 文字に収める（超過は末尾を … に置換）。 */
-function truncateLabel(s: string): string {
-  return s.length > QR_LABEL_MAX ? s.slice(0, QR_LABEL_MAX - 1) + "…" : s;
-}
-
 /**
  * 診断の味の問い（Q2）を「次の一杯」と同じ flavor 語彙へ写す（純粋）。軸解決は next-cup.karteAffinity に委譲。
  * これで診断結果（persona + 味の好み）が販売中カタログの銘柄選定に反映される（reuse・一貫性）。
@@ -345,7 +345,8 @@ export function buildResultWithTeas(
 
   const lines = picks.map((t) => {
     const desc = t.descShort.trim() ? `／${t.descShort.trim()}` : "";
-    return `${t.number} ${t.name}${desc}`;
+    // UX①: 診断結果の本文も `名前（No.XXXXX）` に統一（従来の「番号 名前」先頭を是正）。
+    return `${formatTeaLabel(t)}${desc}`;
   });
   const text =
     `${PERSONA_INTRO[winner]}\n\n` +
@@ -354,10 +355,32 @@ export function buildResultWithTeas(
     `気になるお茶は、下のボタンか、番号（例 ${picks[0].number}）を送ってくださいね。`;
 
   const quickReplies: QuickReplyItem[] = picks.map((t) =>
-    qr(truncateLabel(`${t.number} ${t.name}`), diagnosisCardToken(t.number)),
+    // UX①: 診断結果 QR も `名前（No.XXXXX）`（番号保全 truncate・番号は切らない。従来 truncateLabel は末尾＝名前ではなく番号を切りうる）。
+    qr(formatTeaQuickReplyLabel(t), diagnosisCardToken(t.number)),
   );
   quickReplies.push(qr("もっと相談する", CONSULT_MORE_TEXT));
   return { text, quickReplies };
+}
+
+/**
+ * 診断おすすめ（picks）を UX③ の Flex カルーセルに写す（純粋）。
+ *
+ * 各カードは `名前（No.XXXXX）`（formatTeaLabel）+ 抜粋 + 画像（あれば hero・なければ graceful）+「見る」。
+ * 画像は imageMap（page id / 5 桁番号 → 正規化 HTTPS URL）から引く。picks は最大 3 件で呼ぶ。
+ * quickReply（診断出所つきカードトークン + 相談導線）は buildResultWithTeas 側が持ち、ハンドラが Flex に添える。
+ */
+export function diagnosisRecommendCarousel(
+  picks: TeaItem[],
+  imageMap: Map<string, string>,
+): Record<string, unknown> {
+  return teaRecommendCarousel(
+    picks.map((t) => ({
+      name: formatTeaLabel(t),
+      description: t.descShort,
+      imageUrl: pickTeaImage(imageMap, t),
+      productUrl: SITE_URL_JA,
+    })),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +390,7 @@ export function buildResultWithTeas(
 export function planPreferenceFlow(
   userMessage: string,
   teas: TeaItem[] = [],
-): { message: OutMessage; winner: PersonaType | null } | null {
+): { message: OutMessage; winner: PersonaType | null; karte?: NextCupKarte | null } | null {
   const action = parsePreferenceAction(userMessage);
   if (!action) return null;
 
@@ -382,8 +405,9 @@ export function planPreferenceFlow(
       const winner = scoreDiagnosis(action.q1, action.q2, action.q3);
       // 監査 #6: おすすめは販売中カタログ（teas）から persona + 味の好み(Q2) で動的解決する。
       //   teas 未指定・空（呼び出し側の取得失敗含む）は buildResultWithTeas 内で graceful フォールバック。
+      // UX③: 同じ karte を返し、ハンドラが同一 picks で Flex カルーセルを組む（本文の並びとカードを一致させる）。
       const karte = diagnosisRecommendationKarte(winner, action.q2);
-      return { message: buildResultWithTeas(winner, teas, karte), winner };
+      return { message: buildResultWithTeas(winner, teas, karte), winner, karte };
     }
     case "invalid":
       // 範囲外・欠損は安全側で最初からやり直し（イントロ + Q1 を再提示）。
@@ -638,9 +662,35 @@ export async function handlePreferenceDiagnosis(
 
   const supabase = createSupabaseClient(env);
 
+  // UX③: 結果段は写真つき（無ければ写真なし graceful）Flex カルーセルで返す。
+  //   picks 空（カタログ取得失敗・在庫ゼロ）はテキスト（persona 受け止め + 相談導線）に倒す（buildResultFallback）。
+  //   altText = 従来テキスト（persona 受け止め + おすすめ一覧）、quickReply = 従来導線（① で `名前（No.）` 化済）。
+  //   picks は plan と同じ karte で再解決し、カルーセルのカードと本文/quickReply の並びを一致させる。
+  let resultCarousel: Record<string, unknown> | null = null;
+  if (plan.winner) {
+    const picks = pickDiagnosisRecommendations(
+      teas,
+      plan.karte ?? diagnosisRecommendationKarte(plan.winner),
+    );
+    if (picks.length > 0) {
+      const imageMap = await fetchProductImages(env).catch((e) => {
+        console.warn(
+          "[preference-diagnosis] product images fetch failed (graceful no-image):",
+          e instanceof Error ? e.message : e,
+        );
+        return new Map<string, string>();
+      });
+      resultCarousel = diagnosisRecommendCarousel(picks, imageMap);
+    }
+  }
+
   await runDiagnosisSideEffects({
     // 返信は先に試みる（UX: reply 優先）。失敗しても記録を道連れにしない。
-    reply: () => responder.text(plan.message.text, plan.message.quickReplies),
+    //   UX③: 結果段でカルーセルがあれば Flex（altText=従来テキスト・quickReply 併用）、無ければ従来テキスト。
+    reply: () =>
+      resultCarousel
+        ? responder.flex(plan.message.text, resultCarousel, plan.message.quickReplies)
+        : responder.text(plan.message.text, plan.message.quickReplies),
     // 診断ファネル記録（P0-2・fire-and-forget・失敗は握りつぶし）。
     logFlowEvents: () => {
       for (const ev of diagnosisFlowEvents(userMessage, lineUserId, plan.winner)) {

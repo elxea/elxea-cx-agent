@@ -81,7 +81,11 @@ describe("hermetic L1 — 動線4: QR同梱ウェルカム → 感想カード �
       channelSecret: String(env.LINE_CHANNEL_SECRET),
       events: [messageEvent(user, `感想よい${"｜"}11301`)],
     });
-    const reply2 = h.line.texts().join("\n---\n");
+    // UX③: 次の一杯は Flex カードで返る（従来のお礼＋提案文は altText に入る・fallback）。
+    const reply2 = [
+      ...h.line.texts(),
+      ...h.line.flexes().map((f) => String(f.altText ?? "")),
+    ].join("\n---\n");
     expect(reply2).toContain(NEXT_CUP_GOOD_THANKS);
     expect(reply2).toContain("No.11401");
 
