@@ -21,6 +21,8 @@ import {
   buildSubscriptionMessage,
 } from "../../src/lib/menu-actions";
 import { parseTeaAction } from "../../src/lib/tea-menu";
+import { MY_KARTE_TRIGGER } from "../../src/lib/my-karte";
+import { READING_TRIGGER } from "../../src/lib/journal";
 
 let total = 0,
   passed = 0,
@@ -50,15 +52,24 @@ function assertEqual<T>(actual: T, expected: T, label = "") {
 
 console.log("\n--- (a) トリガー文言はリッチメニューの message text と一致 ---");
 
-it("トリガー定数が setup-rich-menu.ts の各枠 message text と一致", () => {
+it("トリガー定数が setup-rich-menu.ts の各枠 message text と一致（6枠 Option A）", () => {
   const src = readFileSync(new URL("../../scripts/setup-rich-menu.ts", import.meta.url), "utf8");
-  assert(src.includes(`text: "${CONSULTATION_TRIGGER}"`), "③相談 text matches");
-  assert(src.includes(`text: "${SUBSCRIPTION_TRIGGER}"`), "④定期便 text matches");
-  assert(src.includes(`text: "${ABOUT_TRIGGER}"`), "⑤elxea text matches");
+  // 6枠 Option A: ①お茶の淹れ方 / ②好み診断 / ③マイカルテ / ④定期便 / ⑤読みもの / ⑥elxeaについて
+  //   （③相談 は 2026-07 に意図的に廃止 = リッチメニューから削除済み）。
   // ①お茶の淹れ方 は tea-menu が処理（トリガー一致は tea-menu 側で担保）
   assert(src.includes(`text: "お茶の淹れ方を知りたい"`), "①tea text present");
   // ②好み診断 は AI 会話へ（本モジュール非対象）
   assert(src.includes(`text: "好みに合うお茶を診断してほしいです"`), "②diagnosis text present");
+  // ③マイカルテ（★新規 = my-karte.ts MY_KARTE_TRIGGER と一致）
+  assert(src.includes(`text: "${MY_KARTE_TRIGGER}"`), "③マイカルテ text matches");
+  // ④定期便
+  assert(src.includes(`text: "${SUBSCRIPTION_TRIGGER}"`), "④定期便 text matches");
+  // ⑤読みもの（★新規 = journal.ts READING_TRIGGER と一致）
+  assert(src.includes(`text: "${READING_TRIGGER}"`), "⑤読みもの text matches");
+  // ⑥elxeaについて
+  assert(src.includes(`text: "${ABOUT_TRIGGER}"`), "⑥elxea text matches");
+  // ③相談（CONSULTATION_TRIGGER）は 6枠 Option A で廃止 = リッチメニューに存在しないことを固定。
+  assert(!src.includes(`text: "${CONSULTATION_TRIGGER}"`), "③相談 は削除済み（メニューに無い）");
 });
 
 console.log("\n--- (b) ③相談: 初手 quick reply ---");

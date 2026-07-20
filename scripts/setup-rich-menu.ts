@@ -1,24 +1,29 @@
 /**
- * LINE リッチメニュー設定スクリプト（5 枠版・オーナー確定 2026-07-13）。
+ * LINE リッチメニュー設定スクリプト（6 枠 Option A・オーナー確定 2026-07-20）。
  *
  * ⚠ このスクリプトが「正」。旧 scripts/setup-richmenu.ts（6 分割）は廃止。二重管理しないこと。
  *
- * 5 枠レイアウト（2500x1686px）:
- *   上段（各 833x843・3 枠）: ① お茶の淹れ方 | ② 好み診断 | ③ 相談
- *   下段（各 1250x843・2 枠）: ④ 定期便            | ⑤ elxea について
+ * 6 枠レイアウト（2500x1686px・2×3 グリッド・各枠 833×843）:
+ *   上段（3 枠）: ① お茶の淹れ方 | ② 好み診断 | ③ マイカルテ
+ *   下段（3 枠）: ④ 定期便       | ⑤ 読みもの | ⑥ elxea について
+ *   （旧 5 枠版の「相談」を削除し、③ マイカルテ・⑤ 読みもの を新設。★=新規）
+ *   ※ 列幅は 833 / 833 / 834（合計 2500）。右列のみ 834 で端数を吸収する。
  *
- * アクション方針（オーナー確定 2026-07-13・全枠 message アクション / postback 未実装のため）:
+ * アクション方針（全枠 message アクション / postback 未実装のため）:
  *   すべて message アクションでユーザーの自然発話を送信し、CX エージェント（webhook →
- *   src/routes/line.ts handleTextMessage）で決定的に処理する。各枠の応答フロー:
- *     ① "お茶の淹れ方を知りたい"          → tea-menu.ts の入口（販売中のお茶を一覧・3 タップ以内）
- *     ② "好みに合うお茶を診断してほしいです" → 既存 AI 会話（好み診断）へ素通り
- *     ③ "相談したいことがあります"          → menu-actions.ts が初手 quick reply を提示（以降 AI 会話）
- *     ④ "定期便について知りたい"            → menu-actions.ts が Shopify 連携 × isSubscriber で出し分け
- *     ⑤ "elxeaについて教えて"               → menu-actions.ts がブランド紹介 1 通
- *   ①③④⑤ のトリガー文言は各インターセプタの完全一致トリガーと一致させること（整合必須）。
+ *   src/routes/line.ts）で決定的に処理する。各枠のトリガー文言は実装側の完全一致トリガーと
+ *   一致させること（整合必須）:
+ *     ① "お茶の淹れ方を知りたい"          → src/lib/menu-tap.ts BREW_RICH_MENU_TRIGGER（tea-menu 入口）
+ *     ② "好みに合うお茶を診断してほしいです" → src/lib/preference-diagnosis.ts DIAGNOSIS_TRIGGER
+ *     ③ "マイカルテ"                       → src/routes/line.ts マイカルテ完全一致（customer-karte・read-only）
+ *     ④ "定期便について知りたい"            → src/lib/menu-actions.ts SUBSCRIPTION_TRIGGER
+ *     ⑤ "読みもの"                         → src/lib/journal.ts READING_TRIGGER
+ *     ⑥ "elxeaについて教えて"               → src/lib/menu-actions.ts ABOUT_TRIGGER
  *
  * 実行: pnpm setup-rich-menu
- *   （※ 画像は別途 LINE Official Account Manager でアップロード。本スクリプトは構造のみ作成）
+ *   - 構造（枠・アクション）を作成し、既定リッチメニューに設定する。
+ *   - 画像は環境変数 RICH_MENU_IMAGE_PATH が指す PNG を自動アップロードする（未指定なら構造のみ作成し、
+ *     画像は別途 LINE Official Account Manager でアップロードする）。
  *
  * チャネル選択（取り違え防止・テスト優先の fail-safe）:
  *   - LINE_CHANNEL_ACCESS_TOKEN_TEST があればテスト OA（@426vlcyb）に載せる（staging 既定）。
@@ -26,7 +31,10 @@
  *   - どちらに載せるかを起動時にラベル表示する（トークン値は絶対に出さない）。
  */
 
+import { readFileSync } from "node:fs";
+
 const LINE_API_BASE = "https://api.line.me/v2/bot";
+const LINE_API_DATA_BASE = "https://api-data.line.me/v2/bot";
 
 // テスト優先: *_TEST があればテスト OA に載せる（staging 既定）。無ければ本番トークンにフォールバック。
 const testToken = process.env.LINE_CHANNEL_ACCESS_TOKEN_TEST;
@@ -50,16 +58,16 @@ const headers = {
 };
 
 /** リッチメニュー名（べき等な差し替えのキーにも使う）。 */
-const MENU_NAME = "elxea メインメニュー（5 枠）";
+const MENU_NAME = "elxea メインメニュー（6 枠 Option A）";
 
-/** リッチメニュー定義（5 枠 — 2500x1686px） */
+/** リッチメニュー定義（6 枠 — 2500x1686px・2×3・各 833×843 / 右列のみ 834） */
 const richMenuBody = {
   size: { width: 2500, height: 1686 },
   selected: true,
   name: MENU_NAME,
   chatBarText: "メニュー",
   areas: [
-    // 上段左: ① お茶の淹れ方（tea-menu 入口 = ENTRY_PHRASES と一致）
+    // 上段左: ① お茶の淹れ方（tea-menu 入口 = menu-tap.ts BREW_RICH_MENU_TRIGGER と一致）
     {
       bounds: { x: 0, y: 0, width: 833, height: 843 },
       action: {
@@ -68,7 +76,7 @@ const richMenuBody = {
         text: "お茶の淹れ方を知りたい",
       },
     },
-    // 上段中: ② 好み診断（既存 AI 会話へ）
+    // 上段中: ② 好み診断（preference-diagnosis.ts DIAGNOSIS_TRIGGER と一致）
     {
       bounds: { x: 833, y: 0, width: 833, height: 843 },
       action: {
@@ -77,27 +85,36 @@ const richMenuBody = {
         text: "好みに合うお茶を診断してほしいです",
       },
     },
-    // 上段右: ③ 相談（menu-actions の初手 quick reply = CONSULTATION_TRIGGER と一致）
+    // 上段右: ③ マイカルテ（★新規 = routes/line.ts の「マイカルテ」完全一致・customer-karte read-only）
     {
       bounds: { x: 1666, y: 0, width: 834, height: 843 },
       action: {
         type: "message",
-        label: "相談",
-        text: "相談したいことがあります",
+        label: "マイカルテ",
+        text: "マイカルテ",
       },
     },
-    // 下段左: ④ 定期便（menu-actions の出し分け = SUBSCRIPTION_TRIGGER と一致）
+    // 下段左: ④ 定期便（menu-actions.ts SUBSCRIPTION_TRIGGER と一致）
     {
-      bounds: { x: 0, y: 843, width: 1250, height: 843 },
+      bounds: { x: 0, y: 843, width: 833, height: 843 },
       action: {
         type: "message",
         label: "定期便",
         text: "定期便について知りたい",
       },
     },
-    // 下段右: ⑤ elxea について（menu-actions の紹介 = ABOUT_TRIGGER と一致）
+    // 下段中: ⑤ 読みもの（★新規 = journal.ts READING_TRIGGER と一致）
     {
-      bounds: { x: 1250, y: 843, width: 1250, height: 843 },
+      bounds: { x: 833, y: 843, width: 833, height: 843 },
+      action: {
+        type: "message",
+        label: "読みもの",
+        text: "読みもの",
+      },
+    },
+    // 下段右: ⑥ elxea について（menu-actions.ts ABOUT_TRIGGER と一致）
+    {
+      bounds: { x: 1666, y: 843, width: 834, height: 843 },
       action: {
         type: "message",
         label: "elxea について",
@@ -130,8 +147,26 @@ async function deleteRichMenu(richMenuId: string): Promise<void> {
   }
 }
 
+/** 画像を content エンドポイントへアップロード（RICH_MENU_IMAGE_PATH 指定時のみ）。 */
+async function uploadImage(richMenuId: string, imagePath: string): Promise<boolean> {
+  const bytes = readFileSync(imagePath);
+  const res = await fetch(`${LINE_API_DATA_BASE}/richmenu/${richMenuId}/content`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "image/png",
+      Authorization: `Bearer ${token}`,
+    },
+    body: bytes,
+  });
+  if (!res.ok) {
+    console.error(`❌ 画像アップロード失敗 [${res.status}]:`, await res.text());
+    return false;
+  }
+  return true;
+}
+
 async function main() {
-  console.log("📋 リッチメニュー（5 枠）をセットアップします...\n");
+  console.log("📋 リッチメニュー（6 枠 Option A）をセットアップします...\n");
 
   // 1. 既存の同名メニューを削除（べき等性）
   console.log("既存の同名メニューを確認中...");
@@ -161,7 +196,21 @@ async function main() {
   const { richMenuId } = (await createRes.json()) as { richMenuId: string };
   console.log(`✅ 作成完了: ${richMenuId}`);
 
-  // 3. デフォルトに設定
+  // 3. 画像アップロード（RICH_MENU_IMAGE_PATH 指定時のみ・未指定なら手動アップロード）
+  const imagePath = process.env.RICH_MENU_IMAGE_PATH;
+  let imageUploaded = false;
+  if (imagePath) {
+    console.log(`\n画像をアップロード中... (${imagePath})`);
+    imageUploaded = await uploadImage(richMenuId, imagePath);
+    if (imageUploaded) console.log("✅ 画像アップロード完了");
+  } else {
+    console.log(
+      "\nℹ️  RICH_MENU_IMAGE_PATH 未指定のため画像アップロードはスキップ。" +
+        "\n   画像は LINE Official Account Manager から手動でアップロードしてください。",
+    );
+  }
+
+  // 4. デフォルトに設定
   console.log("\nデフォルトリッチメニューに設定中...");
   const defaultRes = await fetch(
     `${LINE_API_BASE}/user/all/richmenu/${richMenuId}`,
@@ -179,12 +228,14 @@ async function main() {
 
   console.log(
     "\n📎 次のステップ:\n" +
-      `   1. LINE Official Account Manager でリッチメニュー画像をアップロード\n` +
-      `      Rich Menu ID: ${richMenuId}\n` +
-      `   2. 画像サイズ: 2500x1686px\n` +
-      `   3. 5 枠レイアウト（上段3=各833×843 / 下段2=各1250×843）:\n` +
-      `      上段: お茶の淹れ方 | 好み診断 | 相談\n` +
-      `      下段: 定期便 | elxea について`,
+      (imageUploaded
+        ? `   画像アップロード済み。Rich Menu ID: ${richMenuId}\n`
+        : `   1. LINE Official Account Manager でリッチメニュー画像をアップロード\n` +
+          `      Rich Menu ID: ${richMenuId}\n` +
+          `      画像サイズ: 2500x1686px\n`) +
+      `   6 枠レイアウト（2×3・各 833×843 / 右列 834）:\n` +
+      `      上段: お茶の淹れ方 | 好み診断 | マイカルテ\n` +
+      `      下段: 定期便 | 読みもの | elxea について`,
   );
 }
 
