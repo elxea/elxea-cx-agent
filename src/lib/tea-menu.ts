@@ -426,12 +426,22 @@ function brewText(tea: TeaItem): string {
   return structured;
 }
 
-/** 🌡温度・抽出時間の回答。 */
+/**
+ * 🌡温度・抽出時間の回答。
+ *
+ * UX③（淹れ方 + 楽しみ方の同時提示）: 淹れ方（How to Brew）に続けて、データがある時だけ
+ * 「楽しみ方」（和菓子との相性・水出し・レモンを添える 等の創造的なヒント。Notion「楽しみ方」列・
+ * 既存 30/30 充足）をひと区切り置いて併記する。楽しみ方が空なら淹れ方だけを返す（従来挙動）。
+ * 楽しみ方の中身はオーナーが Notion で編集する前提で、ここは表示配線のみ（本文は再創作しない）。
+ * 静か・丁寧のトーンと既存の次の1手（quickReplies）は維持する。
+ */
 export function buildBrewAnswer(tea: TeaItem): OutMessage {
   const brew = brewText(tea);
-  const body = brew
+  const brewBody = brew
     ? `おすすめの淹れ方はこちらです。\n\n${brew}`
     : "申し訳ありません、このお茶の淹れ方はまだ登録されていません。";
+  const enjoy = tea.enjoy.trim();
+  const body = enjoy ? `${brewBody}\n\n― 楽しみ方 ―\n${enjoy}` : brewBody;
   const text = `【${formatTeaLabel(tea)}】\n${body}`;
   return { text, quickReplies: nextStepQuickReplies(tea, "flavor") };
 }

@@ -32,6 +32,8 @@ interface FixtureTea {
   flavorProfiles: string[];
   descShort?: string;
   howToBrew?: string;
+  /** 楽しみ方（Notion「楽しみ方」列）。UX③ の淹れ方+楽しみ方 併記 E2E 用。未指定は空。 */
+  enjoy?: string;
 }
 
 /** 販売中お茶フィクスチャ（4 銘柄）。 */
@@ -100,7 +102,7 @@ function toNotionPage(tea: FixtureTea): { properties: Record<string, unknown> } 
       "How-to_Temp(℃)": richText(undefined),
       "How-to_Time(Sec)": richText(undefined),
       "How-to_Water(ml)": richText(undefined),
-      楽しみ方: richText(undefined),
+      楽しみ方: richText(tea.enjoy),
       農家の物語: richText(undefined),
     },
   };
