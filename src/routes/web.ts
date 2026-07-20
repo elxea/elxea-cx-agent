@@ -68,6 +68,25 @@ export function effectiveEventUserId(
   return trusted && shopifyCustomerId ? shopifyCustomerId : sessionId;
 }
 
+/**
+ * [SEC-3] チャットハンドラでクロスチャネル個人データ（別チャネル/別 session の
+ * 履歴・連携済み顧客プロファイル）を返してよいかを決める純粋関数。
+ *
+ * `resolveUnifiedUserId`（Web）は `user_identity_map.web_session_id === session_id`
+ * のときに isLinked=true を返す。これは「session_id を知っている」だけの弱い証明であり、
+ * 束縛経路（SEC-1/SEC-2）が破られれば攻撃者の session が被害者の unified_user に
+ * 解決され得る。したがってチャットハンドラでは isLinked だけでクロスチャネル個人
+ * データを開かない。
+ *
+ * 開いてよいのは「ライブ検証済みの信頼経路」＝サーバ経由（X-API-Key 検証済み）で
+ * かつ検証済み Shopify セッション由来の customer_id が付いているとき（trusted=true）
+ * だけに限定する（fail-closed）。生の web_session_id 一致には依拠しない。
+ * webChatHistoryHandler の `ownsIdentity` ゲートと同じ精神の多層防御。
+ */
+export function crossChannelHistoryAllowed(isLinked: boolean, trusted: boolean): boolean {
+  return isLinked && trusted;
+}
+
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
 const TIMEOUT_PRE_PARALLEL_MS = 10_000;
 
@@ -144,7 +163,14 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
       ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
-    identityIsLinked = identity.isLinked;
+    // [SEC-3] クロスチャネル個人データ（別チャネル履歴・連携済みプロファイル）は
+    // ライブ検証済みの信頼経路（trustedCustomerId 由来）のときだけ開く。生の
+    // web_session_id 一致（isLinked）だけでは開かない（fail-closed・多層防御）。
+    const crossChannelAllowed = crossChannelHistoryAllowed(
+      identity.isLinked,
+      !!trustedCustomerId,
+    );
+    identityIsLinked = crossChannelAllowed;
 
     console.log("[web] step=pre-parallel");
     const [, fetchedHistory, emb] = await withTimeout(
@@ -155,7 +181,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
           role: "user",
           content: processedMessage,
         }),
-        identity.isLinked
+        crossChannelAllowed
           ? getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId)
           : getRecentMessages(supabase, effectiveUserId, "web"),
         createEmbedding(processedMessage, c.env),
@@ -678,6 +704,12 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
       ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId as string)
       : await resolveUnifiedUserId(supabase, sessionId as string, "web");
     const effectiveUserId = identity.unifiedUserId;
+    // [SEC-3] クロスチャネル個人データはライブ検証済みの信頼経路
+    // （trustedCustomerId 由来）のときだけ開く（生の web_session_id 一致では開かない）。
+    const crossChannelAllowed = crossChannelHistoryAllowed(
+      identity.isLinked,
+      !!trustedCustomerId,
+    );
 
     // メッセージ保存
     await saveMessage(supabase, {
@@ -688,7 +720,7 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
     });
 
     // 履歴取得
-    const history = identity.isLinked
+    const history = crossChannelAllowed
       ? await getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId as string)
       : await getRecentMessages(supabase, effectiveUserId, "web");
 
@@ -705,7 +737,7 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
         effectiveUserId,
         "web",
         c.env,
-        { isLinked: identity.isLinked, imageContent: { base64, mediaType } },
+        { isLinked: crossChannelAllowed, imageContent: { base64, mediaType } },
       ),
       TIMEOUT_RUN_AGENT_MS,
       "runAgent (image)",
