@@ -417,6 +417,57 @@ describe("identityLinkLiffHandler -- 成功経路の配線（source / link.compl
 });
 
 // ---------------------------------------------------------------------------
+// 5. SEC-1 境界（email 等値では連携できない）
+//    Phase 1 SEC-1 の要: LINE identity の束縛は「サーバ確定 Shopify ログイン（link-liff /
+//    requireAuth）」だけを正とし、email 一致では束縛も認証も一切行わない。link-liff 経路が
+//    email-equality の連携路（linkLineByEmail / email lookup）を持ち込んでいないことを
+//    ソース検査で固定回帰する（将来 email 連携を混ぜ戻したら検知して失敗させる）。
+// ---------------------------------------------------------------------------
+
+describe("identityLinkLiffHandler -- SEC-1: email 等値では連携できない", () => {
+  const src = readFileSync(
+    new URL("../../src/routes/identity.ts", import.meta.url),
+    "utf8",
+  );
+  const fn = src.slice(
+    src.indexOf("export async function identityLinkLiffHandler"),
+  );
+
+  it("link-liff 経路は linkLineByEmail を呼ばない（email 等値束縛路を持たない）", () => {
+    assertTrue(!fn.includes("linkLineByEmail"), "link-liff must not call linkLineByEmail");
+  });
+
+  it("link-liff 経路は email で identity を lookup しない（.eq(\"email\" ...) が無い）", () => {
+    assertTrue(!fn.includes('.eq("email"'), "no email-equality lookup in link-liff");
+  });
+
+  it("連携キーは line_messaging_user_id（検証済 sub）+ 正規化 shopify_customer_id（server 由来）", () => {
+    // upsert に渡すキーは Messaging userId と正規化済み数値 customer id のみ。
+    assertTrue(
+      fn.includes("lineUserId: line_messaging_user_id"),
+      "linkage keyed by verified messaging userId",
+    );
+    assertTrue(
+      fn.includes("shopifyCustomerId: normalized.numericId"),
+      "linkage keyed by normalized server customer id",
+    );
+  });
+
+  it("shopify_email は任意メタデータとしてのみ渡る（連携キー・lookup に使わない）", () => {
+    // email は upsert の shopifyEmail（メタデータ列）へ流すだけ。onConflict や検索キーにしない。
+    assertTrue(
+      fn.includes("shopifyEmail: shopify_email"),
+      "email passed only as metadata field",
+    );
+    assertTrue(
+      !fn.includes("onConflict: \"shopify_email\"") &&
+        !fn.includes("onConflict: 'shopify_email'"),
+      "email is never a conflict/merge key",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ランナー（直列 await）
 // ---------------------------------------------------------------------------
 
