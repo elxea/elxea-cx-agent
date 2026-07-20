@@ -932,9 +932,30 @@ export function teaRecommendCard(params: {
 }
 
 /**
- * お茶レコメンドカルーセル（UX③・最大 10・診断結果は最大 3 件で呼ぶ）。
- * 各 bubble は teaRecommendCard と同一構成（写真あり/なし graceful を各カードで踏襲）。
- * carousel は全 bubble が同一 size である必要があり、teaRecommendCard は常に "mega" のため整合する。
+ * 実写真か（UX②・all-or-nothing 判定の SoT）。
+ *
+ * 「実写真」= Product Catalogue join（`Image Main_LINE Gift` → fallback `Image Main_Shopify`）を
+ * preferDirectR2 で解決した HTTPS URL。null / 空 / 非 https は写真なし扱い。
+ * placeholder（穴埋め画像）は静か・丁寧のブランド方針で使わないため、判定はあくまで
+ * 「実写真 URL が解決できたか」だけを見る。
+ */
+export function hasRealPhoto(imageUrl: string | null | undefined): boolean {
+  return typeof imageUrl === "string" && imageUrl.trim().startsWith("https://");
+}
+
+/**
+ * お茶レコメンドカルーセル（UX③ + UX② all-or-nothing・最大 10・診断結果は最大 3 件で呼ぶ）。
+ *
+ * UX②（写真の統一感）: カルーセル内で「写真あり／なし」が混在するとカードの高さがばらつき、
+ * 静か・丁寧の体験を壊す。よって **all-or-nothing** に倒す:
+ *   - カルーセル内の **全カード**が実写真を持つときだけ hero を出す。
+ *   - **1 枚でも実写真が無ければ、全カードを hero 抜き（テキスト調）で揃える**。
+ *   - placeholder（穴埋め画像）は使わない（実写真が揃わない ＝ 全カードテキスト調）。
+ * 単体カード（teaRecommendCard 直呼び・次の一杯の 1 枚等）はこの制約の対象外で、
+ * 実写真があれば hero を出してよい（カルーセルの統一感問題は 1 枚には生じないため）。
+ *
+ * 各 bubble は teaRecommendCard と同一構成。carousel は全 bubble が同一 size である必要があり、
+ * teaRecommendCard は常に "mega" のため整合する。
  */
 export function teaRecommendCarousel(
   items: Array<{
@@ -945,8 +966,13 @@ export function teaRecommendCarousel(
     matchReason?: string;
   }>,
 ): Record<string, unknown> {
+  const shown = items.slice(0, 10);
+  // all-or-nothing: 全カードが実写真を持つ時だけ hero を許可。1 枚でも欠ければ全カードテキスト調へ。
+  const allHavePhoto = shown.length > 0 && shown.every((t) => hasRealPhoto(t.imageUrl));
   return {
     type: "carousel",
-    contents: items.slice(0, 10).map((t) => teaRecommendCard(t)),
+    contents: shown.map((t) =>
+      teaRecommendCard(allHavePhoto ? t : { ...t, imageUrl: undefined }),
+    ),
   };
 }
