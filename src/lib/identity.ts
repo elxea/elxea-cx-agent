@@ -153,15 +153,20 @@ export async function mergeAnonymousSession(
       console.warn("[identity] merge feedback failed:", fbError.message);
     }
 
-    // 3. user_identity_map の web_session_id を更新
-    const { error: mapError } = await supabase
-      .from("user_identity_map")
-      .update({ web_session_id: anonymousSessionId })
-      .eq("unified_user_id", identifiedUserId);
-
-    if (mapError) {
-      console.warn("[identity] update identity map failed:", mapError.message);
-    }
+    // 3. [SEC-2] web_session_id の再束縛は行わない（無条件上書きを廃止）。
+    //
+    //    以前はここで identity 行の web_session_id を、呼び出し側が渡した
+    //    anonymousSessionId（caller-supplied session_id）へ無条件で上書きしていた。
+    //    これは所有証明のない再束縛であり、乗っ取り経路になっていた:
+    //    攻撃者が被害者の unified_user_id と攻撃者自身の session_id でこの経路を
+    //    通せば、被害者の identity 行の web_session_id が攻撃者の session に向き、
+    //    以後 session_id だけ（X-API-Key 無しの resolveUnifiedUserId）で被害者の
+    //    unified_user に解決され、クロスチャネル履歴に到達できてしまう。
+    //
+    //    resolveWithShopifyCustomerId の [SEC-B] 前例（本ファイル）に倣い、
+    //    多層防御として web_session_id の再束縛そのものを廃止する。会話・
+    //    フィードバックの統合（上の 1・2）だけを行い、identity 行の session 束縛は
+    //    変更しない（所有証明のある link 経路＝新規レコード作成時のみ確立される）。
 
     const mergedCount = count ?? 0;
     if (mergedCount > 0) {
@@ -257,7 +262,21 @@ export async function linkLineByEmail(
       return { unifiedUserId: existingByLine.unified_user_id, action: "updated" };
     }
 
-    // 2. email で既存レコードを検索（email-based auto-linking）
+    // 2. [SEC-1] email は「ヒント」に過ぎず、identity を束縛する権限を持たせない。
+    //
+    //    以前はここで email 一致だけで line_login_user_id を既存レコードに束縛し、
+    //    その unified_user_id を「認証済み」として返していた（email-based auto-linking）。
+    //    これはアカウント乗っ取り経路だった: 攻撃者が被害者の email と同じ email で
+    //    LINE Login を通せば、被害者の（shopify_customer_id を持つ）identity 行に
+    //    束縛され、以後その unified_user_id で被害者のクロスチャネル履歴・カルテに
+    //    到達できた。
+    //
+    //    LINE identity を Shopify 保有 identity に束縛してよいのは、サーバ検証済みの
+    //    Shopify ログイン経路（link-liff / requireAuth）だけであり、email 等値は不可。
+    //    よって email 一致では束縛も認証も一切行わず、この LINE Login 専用の
+    //    新規 identity を作成する（下の 3. にフォールスルー）。email は新規行に
+    //    ヒントとして保存されるが、他人の（特に shopify 保有の）unified_user_id は
+    //    決して返さない（non-authorizing）。
     if (email) {
       const { data: existingByEmail } = await supabase
         .from("user_identity_map")
@@ -266,19 +285,13 @@ export async function linkLineByEmail(
         .single();
 
       if (existingByEmail) {
-        // Email match -- add line_login_user_id to existing record
-        await supabase
-          .from("user_identity_map")
-          .update({
-            line_login_user_id: lineLoginUserId,
-            display_name: displayName,
-          })
-          .eq("id", existingByEmail.id);
-
+        // 束縛せず・authorizing せず。ヒントとしてログのみ残し、新規作成へフォールスルー。
         console.log(
-          `[identity] Linked LINE Login ${lineLoginUserId} to existing email record (unified=${existingByEmail.unified_user_id})`,
+          `[identity] [SEC-1] Email hint only: an account with this email exists ` +
+            `(shopify_bearing=${!!existingByEmail.shopify_customer_id}); ` +
+            `NOT auto-linking LINE Login ${lineLoginUserId} by email equality. ` +
+            `Creating a separate identity — server-verified Shopify login is required to connect.`,
         );
-        return { unifiedUserId: existingByEmail.unified_user_id, action: "linked" };
       }
     }
 
