@@ -99,6 +99,10 @@ async function main() {
       mode: "active",
       timestamp: Date.now(),
       source: { type: "user", userId: KIT.lineUserId },
+      // processEvents は deliveryContext.isRedelivery と webhookEventId を必須で読む（line.ts:226,235）。
+      // 欠けると TypeError で 1 件も処理されず、HTTP 200 だけが返る（= E3「疎通 PASS」の偽陽性）。実測 2026-07-22。
+      webhookEventId: `e2e-block4-${Date.now()}`,
+      deliveryContext: { isRedelivery: false },
       replyToken: "00000000000000000000000000000000", // 合成: 実返信は LINE 側で失敗（誰にも届かない）
       message: { type: "text", id: "e2e-block4", text: LINKAGE_TRIGGER },
     }],
