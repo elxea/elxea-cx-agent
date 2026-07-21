@@ -26,10 +26,21 @@ import {
   LINKAGE_TRIGGER,
 } from "../../src/lib/subscriber-linkage";
 import type { Env } from "../../src/index";
+import {
+  assertAllowedTestTarget,
+  assertNotProdEnv,
+  installTestFetchGuard,
+  resolveStagingBaseUrl,
+} from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
 
-const STAGING_URL = process.env.CX_AGENT_BASE_URL ?? "https://elxea-agent-staging.setaka1103.workers.dev";
+// 宛先ガードを最初に敷く（.dev.vars 読み込み後・あらゆる fetch より前）。
+installTestFetchGuard("block4-linkage-e2e");
+
+// 宛先は staging 専用 env (STAGING_BASE_URL) からのみ解決する。
+// `.dev.vars` の CX_AGENT_BASE_URL は **本番 Worker** を指すため参照しない（本番 POST の根因）。
+const STAGING_URL = resolveStagingBaseUrl(undefined, "block4-linkage-e2e STAGING_BASE_URL");
 const UNLINKED_ID = "Ub10c4feedface0000000000000000000"; // 連携行を作っていない合成 ID
 
 let failed = 0;
@@ -39,7 +50,7 @@ function check(name: string, pass: boolean, detail: string) {
 }
 
 function stagingEnv(lineIdOverride?: string): Env {
-  return {
+  const env = {
     SUPABASE_URL: process.env.SUPABASE_URL_STAGING,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY_STAGING,
     FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID_STAGING,
@@ -47,7 +58,10 @@ function stagingEnv(lineIdOverride?: string): Env {
     FIREBASE_PRIVATE_KEY: process.env.FIREBASE_PRIVATE_KEY_STAGING,
     DELIVERY_TARGET_ENV: "test",
     TEST_SUBSCRIBER_LINE_IDS: lineIdOverride ?? KIT.lineUserId,
-  } as unknown as Env;
+  };
+  // 本番 ref / 本番 OA / 実送信フラグの混入を fail-closed で拒否する。
+  assertNotProdEnv(env as unknown as Record<string, unknown>);
+  return env as unknown as Env;
 }
 
 function signLineBody(body: string, secret: string): string {
@@ -98,7 +112,11 @@ async function main() {
   let lastStatus = 0;
   for (const [label, secret] of secretCandidates) {
     const sig = signLineBody(webhookBody, secret);
-    const res = await fetch(`${STAGING_URL}/webhook/line`, {
+    const target = assertAllowedTestTarget(
+      `${STAGING_URL}/webhook/line`,
+      "block4-linkage-e2e webhook POST",
+    );
+    const res = await fetch(target, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-line-signature": sig },
       body: webhookBody,

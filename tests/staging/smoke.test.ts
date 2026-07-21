@@ -5,12 +5,21 @@
  * Designed to run after staging deployment in CI or manually.
  *
  * Usage:
- *   npx tsx tests/staging/smoke.test.ts
- *   STAGING_WORKER_URL=https://elxea-agent-staging.setaka1103.workers.dev npx tsx tests/staging/smoke.test.ts
+ *   npx tsx tests/staging/smoke.test.ts                       # 既定は localhost:8787
+ *   STAGING_BASE_URL=https://elxea-agent-staging.setaka-on.workers.dev npx tsx tests/staging/smoke.test.ts
+ *
+ * 宛先は共有ガード（tests/lib/assert-not-prod）のホワイトリストを必ず通す。
+ * staging Worker と localhost 以外（本番 Worker を含む）は送信前に throw して中断する。
  */
 
-const STAGING_URL =
-  process.env.STAGING_WORKER_URL || "http://localhost:8787";
+import { assertAllowedTestTarget, installTestFetchGuard } from "../lib/assert-not-prod";
+
+installTestFetchGuard("staging smoke test");
+
+const STAGING_URL = assertAllowedTestTarget(
+  process.env.STAGING_BASE_URL || process.env.STAGING_WORKER_URL || "http://localhost:8787",
+  "staging smoke test STAGING_BASE_URL",
+);
 
 let passed = 0;
 let failed = 0;

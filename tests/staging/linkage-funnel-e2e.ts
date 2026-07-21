@@ -22,15 +22,20 @@ import {
   LINKAGE_TRIGGER,
 } from "../../src/lib/subscriber-linkage";
 import { SUBSCRIPTION_TRIGGER } from "../../src/lib/menu-actions";
+import {
+  assertAllowedTestTarget,
+  installTestFetchGuard,
+  resolveStagingBaseUrl,
+} from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
 
-// staging を明示（.dev.vars の CX_AGENT_BASE_URL は prod を指すため使わない）。prod URL 誤爆の二重ガード。
-const STAGING_URL = "https://elxea-agent-staging.setaka-on.workers.dev";
-if (!STAGING_URL.includes("-staging")) {
-  console.error("[FATAL] STAGING_URL が staging ではない。中断。");
-  process.exit(1);
-}
+// 宛先ガードを最初に敷く（あらゆる fetch より前）。
+installTestFetchGuard("linkage-funnel-e2e");
+
+// staging を明示（.dev.vars の CX_AGENT_BASE_URL は prod を指すため使わない）。
+// 共有ガードのホワイトリスト（staging Worker / localhost のみ）を通した値だけを宛先にする。
+const STAGING_URL = resolveStagingBaseUrl(undefined, "linkage-funnel-e2e STAGING_BASE_URL");
 
 const SUPA_URL = process.env.SUPABASE_URL_STAGING!;
 const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY_STAGING!;
@@ -105,7 +110,11 @@ async function postWebhook(userId: string, text: string): Promise<number> {
   ].filter(Boolean) as string[];
   let last = 0;
   for (const secret of secrets) {
-    const res = await fetch(`${STAGING_URL}/webhook/line`, {
+    const target = assertAllowedTestTarget(
+      `${STAGING_URL}/webhook/line`,
+      "linkage-funnel-e2e webhook POST",
+    );
+    const res = await fetch(target, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-line-signature": signLineBody(body, secret) },
       body,
@@ -160,7 +169,9 @@ async function main() {
   await cleanup();
 
   // health
-  const h = await fetch(`${STAGING_URL}/`).catch(() => null);
+  const h = await fetch(
+    assertAllowedTestTarget(`${STAGING_URL}/`, "linkage-funnel-e2e health"),
+  ).catch(() => null);
   check("staging worker health 200", h?.status === 200, `HTTP ${h?.status}`);
 
   // A. 未連携 + トリガー → invite_shown surface=trigger
@@ -184,11 +195,14 @@ async function main() {
     shopify_customer_id: SHOPIFY_LIFF,
     shopify_email: "block4-funnel+staging@example.com",
   });
-  const liffRes = await fetch(`${STAGING_URL}/api/identity/link-liff`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": SYNC_SECRET },
-    body: liffBody,
-  }).catch(() => null);
+  const liffRes = await fetch(
+    assertAllowedTestTarget(`${STAGING_URL}/api/identity/link-liff`, "linkage-funnel-e2e link-liff"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": SYNC_SECRET },
+      body: liffBody,
+    },
+  ).catch(() => null);
   check("link-liff 200", liffRes?.status === 200, `HTTP ${liffRes?.status}`);
   // 連携行 + source 列（migration 026 適用後は select=source が 200・値は 'liff'）。
   let linkRow: { shopify_customer_id?: string; source?: string | null } | null = null;

@@ -27,8 +27,13 @@ import {
 } from "../../src/lib/product-ratings";
 import type { LineResponder, QuickReplyItem } from "../../src/lib/line";
 import type { Env } from "../../src/index";
+import { assertNotProdEnv, installTestFetchGuard } from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
+
+// 宛先ガードを最初に敷く（本 E2E は worker を叩かないが、src/lib 経由の outbound も含めて
+// 本番マーカー・許可外 Worker への到達を fail-closed で塞ぐ）。
+installTestFetchGuard("personalization-a2a-e2e");
 
 let failed = 0;
 function check(name: string, pass: boolean, detail: string) {
@@ -39,12 +44,16 @@ function check(name: string, pass: boolean, detail: string) {
 const SYNTH_ID = "U" + crypto.randomBytes(16).toString("hex"); // U + 32 hex（合成・実在しない）
 
 function stagingEnv(): Env {
-  return {
+  const env = {
     SUPABASE_URL: process.env.SUPABASE_URL_STAGING,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY_STAGING,
     NOTION_TOKEN: process.env.NOTION_TOKEN,
     NOTION_TEA_MENU_DB_ID: process.env.NOTION_TEA_MENU_DB_ID,
-  } as unknown as Env;
+    DELIVERY_TARGET_ENV: "test",
+  };
+  // 本番 Supabase ref / 本番 OA / 実送信フラグの混入を fail-closed で拒否する。
+  assertNotProdEnv(env as unknown as Record<string, unknown>);
+  return env as unknown as Env;
 }
 
 /** 応答を捕捉する fake responder（実 LINE 送信をしない）。 */

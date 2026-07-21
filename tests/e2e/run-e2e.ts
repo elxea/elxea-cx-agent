@@ -14,15 +14,25 @@
 
 import * as crypto from "node:crypto";
 import * as dotenv from "dotenv";
+import {
+  assertAllowedTestTarget,
+  installTestFetchGuard,
+  resolveStagingBaseUrl,
+} from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
+
+// 宛先ガードを最初に敷く（あらゆる fetch より前）。
+installTestFetchGuard("e2e run-e2e");
 
 // ---------------------------------------------------------------------------
 // 設定
 // ---------------------------------------------------------------------------
 
-const STAGING_WORKER_URL =
-  process.env.STAGING_WORKER_URL ?? "https://elxea-agent-staging.workers.dev";
+// 宛先は staging 専用 env（STAGING_BASE_URL / CI 互換の STAGING_WORKER_URL）からのみ解決し、
+// 共有ガードのホワイトリスト（staging Worker と localhost のみ）を必ず通す。
+// `.dev.vars` の CX_AGENT_BASE_URL は本番 Worker を指すため参照しない。
+const STAGING_WORKER_URL = resolveStagingBaseUrl(undefined, "run-e2e STAGING_BASE_URL");
 
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET ?? "";
 
@@ -112,7 +122,10 @@ async function sendWebhook(
   const bodyStr = JSON.stringify(payload);
   const signature = computeLineSignature(bodyStr, LINE_CHANNEL_SECRET);
 
-  const res = await fetch(`${targetUrl}/webhook/line`, {
+  // 送信直前に宛先を再検査する（targetUrl は引数で上書きできるため、ここが最終の砦）。
+  const endpoint = assertAllowedTestTarget(`${targetUrl}/webhook/line`, "run-e2e sendWebhook");
+
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

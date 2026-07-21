@@ -28,7 +28,7 @@ wrangler rollback --env staging
 
 ```bash
 # Worker が正常に動作しているか確認
-curl https://elxea-agent.elxea.workers.dev/
+curl https://elxea-agent.setaka-on.workers.dev/
 # 期待: {"status":"ok","service":"elxea-agent"}
 ```
 

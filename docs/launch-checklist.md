@@ -9,7 +9,7 @@
 pnpm smoke-test
 
 # スモークテスト（ステージング）
-pnpm smoke-test -- --target=https://elxea-agent-staging.setaka1103.workers.dev
+pnpm smoke-test -- --target=https://elxea-agent-staging.setaka-on.workers.dev
 
 # 入力バリデーションテスト
 pnpm test:e2e:web:validation

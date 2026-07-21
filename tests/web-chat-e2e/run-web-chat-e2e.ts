@@ -15,8 +15,11 @@
  *   npx tsx tests/web-chat-e2e/run-web-chat-e2e.ts --target=https://custom-url.workers.dev
  *
  * 環境変数:
- *   WEB_CHAT_BASE_URL  - Web Chat API のベース URL（デフォルト: 本番 Worker）
+ *   STAGING_BASE_URL   - 宛先ベース URL（既定: staging Worker）。WEB_CHAT_BASE_URL も互換で受ける。
  *   TEST_SESSION_ID    - テスト用セッション ID（UUID v4、省略時は自動生成）
+ *
+ * 宛先は共有ガード（tests/lib/assert-not-prod）のホワイトリストを必ず通す。
+ * staging Worker と localhost 以外（本番 Worker を含む）は送信前に throw して中断する。
  *
  * 注意:
  *   - このテストは実際の API を呼び出すため、Claude API / Supabase の利用が発生する
@@ -25,8 +28,12 @@
 
 import * as crypto from "node:crypto";
 import * as dotenv from "dotenv";
+import { installTestFetchGuard, resolveStagingBaseUrl } from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
+
+// 宛先ガードを最初に敷く（あらゆる fetch より前）。
+installTestFetchGuard("web-chat-e2e");
 
 // ---------------------------------------------------------------------------
 // 設定
@@ -35,10 +42,12 @@ dotenv.config({ path: ".dev.vars" });
 const args = process.argv.slice(2);
 const targetArg = args.find((a) => a.startsWith("--target="))?.split("=")[1];
 
-const BASE_URL =
-  targetArg ??
-  process.env.WEB_CHAT_BASE_URL ??
-  "https://elxea-agent.elxea.workers.dev";
+// 既定は staging Worker。--target / WEB_CHAT_BASE_URL / STAGING_BASE_URL のいずれで来ても
+// ホワイトリスト検査を通る（本番 Worker を既定にしていた旧実装の本番接触経路を塞ぐ）。
+const BASE_URL = resolveStagingBaseUrl(
+  targetArg ?? process.env.WEB_CHAT_BASE_URL,
+  "web-chat-e2e BASE_URL",
+);
 
 /** テスト用セッション ID（未ログインユーザー） */
 const TEST_SESSION_ID =

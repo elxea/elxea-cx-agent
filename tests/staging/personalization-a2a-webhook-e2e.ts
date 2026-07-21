@@ -29,12 +29,24 @@ import { fetchSellingTeas } from "../../src/lib/tea-menu";
 import { createSupabaseClient } from "../../src/lib/supabase";
 import { getUserRatings, PRODUCT_RATINGS_TABLE } from "../../src/lib/product-ratings";
 import type { Env } from "../../src/index";
+import {
+  assertAllowedTestTarget,
+  assertNotProdEnv,
+  installTestFetchGuard,
+  resolveStagingBaseUrl,
+} from "../lib/assert-not-prod";
 
 dotenv.config({ path: ".dev.vars" });
 
+// 宛先ガードを最初に敷く（あらゆる fetch より前）。
+installTestFetchGuard("personalization-a2a-webhook-e2e");
+
 // staging worker を必ず対象にする（CX_AGENT_BASE_URL は本番 URL を指すため使わない）。
-// 明示上書きは STAGING_WEBHOOK_URL のみ許可（本番へ誤送信しないためのガード）。
-const STAGING_URL = process.env.STAGING_WEBHOOK_URL ?? "https://elxea-agent-staging.setaka-on.workers.dev";
+// 明示上書きは STAGING_BASE_URL のみ許可し、共有ガードのホワイトリストを必ず通す。
+const STAGING_URL = resolveStagingBaseUrl(
+  undefined,
+  "personalization-a2a-webhook-e2e STAGING_BASE_URL",
+);
 const SYNTH_ID = "U" + crypto.randomBytes(16).toString("hex"); // U + 32 hex（合成・実在しない）
 
 let failed = 0;
@@ -45,12 +57,15 @@ function check(name: string, pass: boolean, detail: string) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function stagingSupabaseEnv(): Env {
-  return {
+  const env = {
     SUPABASE_URL: process.env.SUPABASE_URL_STAGING,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY_STAGING,
     NOTION_TOKEN: process.env.NOTION_TOKEN,
     NOTION_TEA_MENU_DB_ID: process.env.NOTION_TEA_MENU_DB_ID,
-  } as unknown as Env;
+    DELIVERY_TARGET_ENV: "test",
+  };
+  assertNotProdEnv(env as unknown as Record<string, unknown>);
+  return env as unknown as Env;
 }
 
 function signBody(body: string, secret: string): string {
@@ -82,7 +97,11 @@ async function postSigned(text: string): Promise<{ status: number; label: string
   ].filter(([, v]) => !!v) as Array<[string, string]>;
   let last = { status: 0, label: "none" };
   for (const [label, secret] of candidates) {
-    const res = await fetch(`${STAGING_URL}/webhook/line`, {
+    const target = assertAllowedTestTarget(
+      `${STAGING_URL}/webhook/line`,
+      "personalization-a2a-webhook-e2e webhook POST",
+    );
+    const res = await fetch(target, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-line-signature": signBody(body, secret) },
       body,
