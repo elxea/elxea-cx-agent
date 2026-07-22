@@ -23,6 +23,11 @@ import {
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
 import { upsertCustomerLinkage } from "../lib/customer-linkage";
+import {
+  issueAccountLinkNonce,
+  isValidLinkTokenFormat,
+  buildAccountLinkRedirectUrl,
+} from "../lib/account-link";
 import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 import { logFlowEvent } from "../lib/flow-events";
 
@@ -347,6 +352,93 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     });
   } catch (err) {
     console.error("[identity/link-liff] error:", err);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+}
+
+/**
+ * POST /api/identity/account-link-nonce
+ *
+ * LINE 純正 Account Link の 3〜4 手目（自社ユーザー確定 → nonce 発行 → 連携ダイアログへ）。
+ * web-app の /{locale}/link から **サーバ間**で呼ばれる。
+ *
+ * 認証（link-liff と同一方式・fail-closed）:
+ *   X-API-Key（SYNC_API_SECRET）必須。ブラウザから直叩きさせない。
+ *   これを緩めると「他人の shopify_customer_id を送って nonce を貰う」＝連携の乗っ取りが成立する。
+ *
+ * なりすまし不能性の分担（このハンドラの外にある前提）:
+ *   shopify_customer_id は web-app が **サーバ認証済み Shopify セッション（requireAuth）** から
+ *   確定した値であること。ブラウザ自己申告の customer_id を web-app が転送してはならない
+ *   （link-liff の設計コメントと同じ約束。cx-agent 側では検証できないため web-app 側の責務）。
+ *
+ * リクエストボディ:
+ * {
+ *   shopify_customer_id: string,  // 必須。GID or 数値。内部で数値へ正規化
+ *   link_token?: string,          // 任意。あればリダイレクト先 URL まで組んで返す
+ * }
+ *
+ * レスポンス:
+ * { success: true, nonce: string, expires_at: string, redirect_url?: string }
+ *
+ * ⚠ nonce / link_token の値はログに出さない（漏れると連携を横取りできる）。
+ */
+export async function identityAccountLinkNonceHandler(
+  c: Context<{ Bindings: Env }>,
+) {
+  // C: server-to-server 認証（SYNC_API_SECRET）。fail-closed。ブラウザ直叩き不可。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
+  let body: {
+    shopify_customer_id?: string;
+    link_token?: string;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { shopify_customer_id, link_token } = body;
+
+  // shopify_customer_id を数値へ正規化（GID / 数値のどちらでも受ける）
+  const normalized = normalizeShopifyCustomerId(shopify_customer_id);
+  if ("error" in normalized) {
+    return c.json({ error: normalized.error }, 400);
+  }
+
+  // link_token は任意。渡すなら形式ゲートを通す（URL に載せる前のゴミ・過大長を弾く）。
+  if (link_token !== undefined && !isValidLinkTokenFormat(link_token)) {
+    return c.json({ error: "Invalid link_token" }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+
+  try {
+    const issued = await issueAccountLinkNonce(
+      supabase,
+      normalized.numericId,
+    );
+    if (!issued.ok) {
+      console.error("[identity/account-link-nonce] nonce issue failed:", issued.reason);
+      return c.json({ error: "Failed to issue nonce" }, 500);
+    }
+
+    // 値そのものは出さない（顧客 ID だけで足跡は追える）。
+    console.log(
+      `[identity/account-link-nonce] issued nonce for shopify ${normalized.numericId}`,
+    );
+
+    return c.json({
+      success: true,
+      nonce: issued.nonce,
+      expires_at: issued.expiresAt,
+      ...(link_token
+        ? { redirect_url: buildAccountLinkRedirectUrl(link_token, issued.nonce) }
+        : {}),
+    });
+  } catch (err) {
+    console.error("[identity/account-link-nonce] error:", err);
     return c.json({ error: "Internal server error" }, 500);
   }
 }

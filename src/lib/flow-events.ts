@@ -43,9 +43,11 @@ export type FlowEventName =
   | "optout.confirm"
   // 連携ファネル（ブロック4・売上重大1対応）: 招待ボタン提示 → 連携完了。
   //   link.invite_shown: 未連携ユーザーの連携文脈で便益+ボタンを出したとき（metadata.surface = trigger|menu4）。
-  //   link.completed:    identity/link-liff の連携成功時（metadata.source = liff 等）。
+  //   link.completed:    連携成功時（metadata.source = liff | account_link）。
+  //   link.unlinked:     お客さま自身が連携を解除したとき（LINE 必須義務の解除導線・ファネルの対）。
   | "link.invite_shown"
   | "link.completed"
+  | "link.unlinked"
   // 計測（treatment 記録・設計 v2.1 #1 最優先・spec §6-3「どの版を見せたか」）:
   //   next_cup_shown: rate-good 後に「次の一杯」を実際に見せたとき。
   //     product_no = 見せた銘柄（5桁）／ value = 版（"karte" = 個別化が baseline と別の銘柄を選んだ /

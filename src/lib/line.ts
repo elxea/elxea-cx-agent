@@ -343,6 +343,18 @@ export type LineEvent = {
   postback?: {
     data: string;
   };
+  /**
+   * accountLink イベント固有のプロパティ（LINE 純正のアカウント連携）。
+   *
+   * 出典: https://raw.githubusercontent.com/line/line-openapi/main/webhook.yml
+   *   result: "ok" = LINE が所有者検証を完了した / "failed" = 検証に失敗した
+   *   nonce:  自社サーバが発行し、連携ダイアログへのリダイレクトに載せた一度きりの文字列
+   * ⚠ result="failed" のときは連携行を作らないこと（src/lib/account-link.ts が強制する）。
+   */
+  link?: {
+    result: "ok" | "failed";
+    nonce: string;
+  };
   source: {
     type: string;
     userId?: string;

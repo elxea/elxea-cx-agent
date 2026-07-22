@@ -14,6 +14,7 @@ import {
   identityLinkHandler,
   identityLinkLineHandler,
   identityLinkLiffHandler,
+  identityAccountLinkNonceHandler,
 } from "./routes/identity";
 import { shopifyOrderWebhook } from "./routes/shopify-webhook";
 import { classifyCron } from "./lib/cron-routing";
@@ -61,6 +62,14 @@ export type Env = {
    *   本番へは GA 判断まで値を置かない（wrangler.toml の [env.staging.vars] にのみ設定）。
    */
   LIFF_LINKAGE_URL?: string;
+  /**
+   * LINE 純正 Account Link の連携入口 URL（web-app の /{locale}/link）。
+   * 設定時は連携ボタンの遷移先を「この URL + そのお客さま専用の ?linkToken=...」に切り替える
+   * （linkToken は Messaging API で 1 人 1 回ずつ発行する。10 分・1 回限り）。
+   * ⚠ 未設定・空は fail-safe: 従来の LIFF_LINKAGE_URL（それも無ければテキスト案内）に倒れる。
+   *   Account Link は LINE Login チャネル不要のため、本番 OA と LIFF が別プロバイダでも成立する。
+   */
+  ACCOUNT_LINK_ENTRY_URL?: string;
   /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
   DELIVERY_SEND_ENABLED?: string;
   /**
@@ -208,6 +217,8 @@ app.post("/api/identity/link", identityLinkHandler);
 app.post("/api/identity/link-line", identityLinkLineHandler);
 // 案A（LIFF 連携）: customer_linkages への冪等 upsert（web-app サーバから X-API-Key 付きで呼ぶ）
 app.post("/api/identity/link-liff", identityLinkLiffHandler);
+// LINE 純正 Account Link: nonce 発行（web-app サーバから X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）
+app.post("/api/identity/account-link-nonce", identityAccountLinkNonceHandler);
 
 /**
  * LIFF Follow Ref API。
