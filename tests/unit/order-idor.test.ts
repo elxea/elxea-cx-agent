@@ -72,7 +72,6 @@ function customerOrderResponse(hasOrder: boolean, orderName = "#1234") {
                     ],
                   },
                   fulfillments: [],
-                  shippingAddress: null,
                 },
               },
             ]

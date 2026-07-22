@@ -286,7 +286,6 @@ export async function lookupMyOrders(
     query getCustomerOrders($customerId: ID!) {
       customer(id: $customerId) {
         displayName
-        email
         orders(first: 5, sortKey: CREATED_AT, reverse: true) {
           edges {
             node {
@@ -320,7 +319,6 @@ export async function lookupMyOrders(
 
     const customer = data.customer as {
       displayName: string;
-      email: string;
       orders: {
         edges: Array<{
           node: {
@@ -499,10 +497,6 @@ export async function getOrderDetail(
                 status
                 createdAt
               }
-              shippingAddress {
-                province
-                city
-              }
             }
           }
         }
@@ -548,7 +542,6 @@ export async function getOrderDetail(
             status: string;
             createdAt: string;
           }>;
-          shippingAddress: { province: string; city: string } | null;
         };
       }>;
       };
