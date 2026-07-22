@@ -3,7 +3,7 @@
  *
  * なぜ必要か（事実）:
  *   m6-shopify-linkage-e2e.ts は staging の `customer_linkages` に合成行
- *   （`Ue6a11...0001` → 開発ストアのテスト顧客 `9432276402259` / `source=test`）を作る。
+ *   （`Ue6a11...0001` → 開発ストア elxea-test2 のテスト顧客 `24858806714740` / `source=test`）を作る。
  *   この行を残したまま実機で **同じテスト顧客**を LIFF 連携すると、同一 `shopify_customer_id` の
  *   行が 2 本できる。すると web チャネルの解決
  *   （`src/lib/shopify.ts:35-39` の `.eq("shopify_customer_id", userId).single()`）が
@@ -37,8 +37,14 @@ installTestFetchGuard("cleanup-m6-test-linkages");
 const STAGING_SUPABASE_REF = "espeokdhutgztksdrpzt";
 /** m6 e2e が使う合成 Messaging userId の前缀（`U` + `e6a11` マーカー）。 */
 const SYNTHETIC_PREFIX = "Ue6a11";
-/** 開発ストアのテスト顧客（重複検知の表示用）。 */
-const TEST_SHOPIFY_CUSTOMER_ID = "9432276402259";
+/**
+ * 開発ストアのテスト顧客（重複検知の表示用）。
+ * 2026-07-22: 新開発ストア `elxea-test2` のテスト顧客に張替（旧 `9432276402259` は
+ * 旧ストア `elxea-test-ugen0voh` の id で、もう参照先が無い）。
+ */
+const TEST_SHOPIFY_CUSTOMER_ID = "24858806714740";
+/** 旧開発ストアのテスト顧客 id（残骸検知の表示用・削除条件には使わない）。 */
+const LEGACY_SHOPIFY_CUSTOMER_ID = "9432276402259";
 
 const apply = process.argv.includes("--apply");
 const anySource = process.argv.includes("--any-source");
@@ -89,6 +95,19 @@ async function main() {
       `${(dup?.length ?? 0) > 1 ? "  ← 2 本以上あると web チャネルの .single() が壊れる" : ""}`,
   );
   for (const r of dup ?? []) {
+    console.log(`  - ${r.line_user_id} (source=${r.source ?? "null"})`);
+  }
+
+  // 2b. 旧開発ストアの customer id を指す残骸（張替漏れ）を可視化する。
+  const { data: legacy } = await supabase
+    .from("customer_linkages")
+    .select("line_user_id, shopify_customer_id, source")
+    .eq("shopify_customer_id", LEGACY_SHOPIFY_CUSTOMER_ID);
+  console.log(
+    `\n[旧ストア残骸] shopify_customer_id=${LEGACY_SHOPIFY_CUSTOMER_ID}（旧 elxea-test-ugen0voh）を指す行: ` +
+      `${legacy?.length ?? 0} 本${(legacy?.length ?? 0) > 0 ? "  ← 新ストアに張り替えるか削除する" : ""}`,
+  );
+  for (const r of legacy ?? []) {
     console.log(`  - ${r.line_user_id} (source=${r.source ?? "null"})`);
   }
 

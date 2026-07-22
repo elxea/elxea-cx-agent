@@ -104,10 +104,23 @@ const OUTBOUND_HOSTS = new Set<string>();
 
 const STAGING_URL = resolveStagingBaseUrl(undefined, "m6 STAGING_BASE_URL");
 
-/** 開発ストア（テスト用・本番ストアではない）。 */
-const DEV_STORE_DOMAIN = "elxea-test-ugen0voh.myshopify.com";
-/** 開発ストアのテスト顧客 Shopify customer id（実測済み）。 */
-const TEST_SHOPIFY_CUSTOMER_ID = "9432276402259";
+/**
+ * 開発ストア（テスト用・本番ストアではない）。
+ *
+ * 2026-07-22 張替: 旧 `elxea-test-ugen0voh` → `elxea-test2`。
+ *   旧ストアのアプリは管理画面「アプリを開発」製で protected customer data Level 2 が
+ *   プラン依存（Grow 以上）となり `customer{displayName}` 等が ACCESS_DENIED になっていた
+ *   （T-3 FAIL → T-4 BLOCKED の根因）。新ストアは本番 `elxea-ec-api` と **同型** の
+ *   Dev Dashboard 製 custom distribution アプリで Level 2 がプラン非依存に使えるため、
+ *   本番同等の条件で測れる。
+ */
+const DEV_STORE_DOMAIN = "elxea-test2.myshopify.com";
+/** 開発ストアのテスト顧客 Shopify customer id（2026-07-22 Admin API 実測）。 */
+const TEST_SHOPIFY_CUSTOMER_ID = "24858806714740";
+/** 開発ストアの実在商品名（#1001 / #1002 の唯一の品目・照合語）。 */
+const DEV_STORE_PRODUCT_TITLE = "テスト商品A";
+/** 開発ストアのテスト顧客の displayName（PII・漏洩判定の照合語）。 */
+const DEV_STORE_CUSTOMER_DISPLAY_NAME = "Test Shopify";
 /** staging Supabase ref（設計 §5）。 */
 const STAGING_SUPABASE_REF = "espeokdhutgztksdrpzt";
 
@@ -530,8 +543,12 @@ async function main() {
   if (!t4.ok) {
     record("FAIL", T4_NAME, t4.reason);
   } else {
-    // 漏洩判定: 開発ストアの注文番号・商品名・顧客名が 1 つでも出たら FAIL（本質はここ）。
-    const t4Leak = /(#?\b100[12]\b|Snowboard|Ski Wax|setaka-on\+shopifytest)/i.test(t4.reply);
+    // 漏洩判定: 開発ストアの注文番号・商品名・顧客名・メールが 1 つでも出たら FAIL（本質はここ）。
+    const leakPattern = new RegExp(
+      `(#?\\b100[12]\\b|${DEV_STORE_PRODUCT_TITLE}|${DEV_STORE_CUSTOMER_DISPLAY_NAME}|setaka-on\\+shopifytest)`,
+      "i",
+    );
+    const t4Leak = leakPattern.test(t4.reply);
     // 案内判定: 連携（紐付け）を求める / 注文番号を求める 方向に誘導していること。
     const t4Guides = /(連携|紐付|ログイン|注文番号)/.test(t4.reply);
     const observed = `leak=${t4Leak} guides=${t4Guides} ${corr(t4)} ${JSON.stringify(t4.reply.slice(0, 260))}`;
@@ -564,20 +581,26 @@ async function main() {
     if (t6.reason.startsWith("stream desynced")) blockedCheck(T6_NAME, t6.reason);
     else record("FAIL", T6_NAME, t6.reason);
   } else {
+    // 「品目」「商品」のような**質問文の語のエコー**では PASS にしない。
+    // 開発ストアの実在品目名（#1001 の唯一の line item）が出ていることを要求する。
     check(
       T6_NAME,
-      /1001/.test(t6.reply) && /(Snowboard|スノーボード|品目|商品)/i.test(t6.reply),
+      /1001/.test(t6.reply) && t6.reply.includes(DEV_STORE_PRODUCT_TITLE),
       `${corr(t6)} ${JSON.stringify(t6.reply.slice(0, 400))}`,
     );
   }
 
   // -------------------------------------------------------------------------
   // T-7 カート生成（Storefront API・PII 非依存）
-  //   既定は開発ストアの **実在 variant**（The Complete Snowboard / Dawn・在庫あり）。
-  //   別の variant で測るときは CART_VARIANT_ID で上書きする。
+  //   既定は新開発ストア elxea-test2 の **実在 variant**（テスト商品A / S）。
+  //   別の variant で測るときは CART_VARIANT_ID で上書きする（M サイズ = 55001939738996）。
+  //   ⚠ 実測（2026-07-22）: この variant は availableForSale=false（在庫 -1）のため
+  //      cartCreate は成功して checkoutUrl を返すが cart.lines は空（totalQuantity=0）になる。
+  //      T-7 が測るのは「**開発ストアのドメイン**の checkoutUrl が **今回新規に**発行されたこと」
+  //      であり、購入可能性ではないため判定は成立する（在庫は Admin 書き込み権限が無く変更不可）。
   // -------------------------------------------------------------------------
   const cartVariantId =
-    process.env.CART_VARIANT_ID ?? "gid://shopify/ProductVariant/45848800362579";
+    process.env.CART_VARIANT_ID ?? "gid://shopify/ProductVariant/55001939706228";
   console.log(`\n[T-7] 連携済み ID でカート生成（variant_id=${cartVariantId}）`);
   const t7 = await ask(
     supabase,
