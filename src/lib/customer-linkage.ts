@@ -38,7 +38,37 @@ export type CustomerLinkageInput = {
 /** 連携 upsert の結果。 */
 export type CustomerLinkageResult =
   | { ok: true; lineUserId: string; shopifyCustomerId: string }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * 失敗が「shopify_customer_id の UNIQUE 制約（migration 002）と衝突」だった場合の識別子（QA M-1）。
+       * 世帯共有/付け替え（複数 LINE → 1 Shopify 顧客 = N:1）を staging では migration 027 で許可するが、
+       * 027 未適用の環境（prod 過渡期）ではここに入り、呼び出し側は 500 でなく 409 に倒す。
+       */
+      conflict?: "shopify_customer_id";
+    };
+
+/** Messaging userId 形式（U + 32 hex）。upsert 前の防御的検証に使う（QA S-2・別プロバイダ罠の一次防波堤）。 */
+const MESSAGING_USER_ID_RE = /^U[0-9a-f]{32}$/;
+
+/**
+ * shopify_customer_id の UNIQUE 制約違反（N:1 を阻む衝突）か（QA M-1）。
+ * Postgres 23505 = unique_violation。制約名 `customer_linkages_shopify_customer_id_key`
+ * または列名 shopify_customer_id を含むメッセージで判定する（onConflict=line_user_id では吸収されない衝突）。
+ */
+function isShopifyCustomerIdConflict(error: {
+  code?: string;
+  message?: string;
+  details?: string;
+}): boolean {
+  if ((error.code ?? "") !== "23505") return false;
+  const hay = `${error.message ?? ""} ${error.details ?? ""}`;
+  return (
+    /shopify_customer_id/i.test(hay) ||
+    /customer_linkages_shopify_customer_id_key/i.test(hay)
+  );
+}
 
 /**
  * customer_linkages に 1 行 upsert する（冪等・onConflict=line_user_id）。
@@ -71,6 +101,17 @@ export async function upsertCustomerLinkage(
   supabase: SupabaseClient,
   input: CustomerLinkageInput,
 ): Promise<CustomerLinkageResult> {
+  // QA S-2（別プロバイダ罠）の防御ログ: line_user_id は本来「トーク用(Messaging) id_token の sub」。
+  //   Login チャネルと Messaging チャネルが別プロバイダだと sub が Messaging userId と一致せず、
+  //   連携は成功表示でも Bot が永久に未連携扱いになる（サイレント全損）。形式が Messaging userId で
+  //   なければ強く警告する（route 側の validateLineMessagingUserId を通っていれば通常は発火しない多層防御）。
+  if (!MESSAGING_USER_ID_RE.test(input.lineUserId)) {
+    console.warn(
+      "[customer-linkage] line_user_id が Messaging userId 形式(U+32hex)でない — 別プロバイダ/取り違えの疑い:",
+      input.lineUserId.slice(0, 4) + "…",
+    );
+  }
+
   const nowIso = new Date().toISOString();
 
   const baseRow: Record<string, unknown> = {
@@ -102,6 +143,9 @@ export async function upsertCustomerLinkage(
         .from("customer_linkages")
         .upsert(baseRow, { onConflict: "line_user_id" });
       if (retryError) {
+        if (isShopifyCustomerIdConflict(retryError)) {
+          return { ok: false, error: retryError.message, conflict: "shopify_customer_id" };
+        }
         return { ok: false, error: retryError.message };
       }
       return {
@@ -109,6 +153,10 @@ export async function upsertCustomerLinkage(
         lineUserId: input.lineUserId,
         shopifyCustomerId: input.shopifyCustomerId,
       };
+    }
+    // 世帯共有/付け替え（N:1）が shopify_customer_id の UNIQUE と衝突（QA M-1）。500 でなく 409 に倒すため識別する。
+    if (isShopifyCustomerIdConflict(error)) {
+      return { ok: false, error: error.message, conflict: "shopify_customer_id" };
     }
     return { ok: false, error: error.message };
   }

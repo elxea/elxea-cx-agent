@@ -13,6 +13,7 @@ import { setBroadcastOptOut } from "../lib/broadcast-optout";
 import {
   getCustomerProfile,
   getLineUserProfile,
+  mergeLineUserIntoShopify,
   addBehaviorEvent,
   getFirestoreEnv,
   type CustomerProfile,
@@ -346,6 +347,7 @@ export async function runAgent(
     userId,
     ratingUserRef: options?.ratingUserRef ?? userId,
     customerProfile,
+    firestoreCustomerId,
   });
 
   // 会話履歴を Claude のメッセージ形式に変換
@@ -761,6 +763,7 @@ export async function runAgentStreaming(
     userId,
     ratingUserRef: options?.ratingUserRef ?? userId,
     customerProfile,
+    firestoreCustomerId,
   });
 
   // メッセージ構築
@@ -1031,8 +1034,10 @@ async function buildPersonalizationBlock(params: {
   userId: string;
   ratingUserRef: string;
   customerProfile: CustomerProfile | null;
+  /** 連携済み LINE ユーザーの Shopify 顧客 ID（customer_linkages 解決値）。QA S-1 のマージに使う。 */
+  firestoreCustomerId?: string | null;
 }): Promise<string> {
-  const { supabase, env, fsEnv, channel, userId, ratingUserRef, customerProfile } = params;
+  const { supabase, env, fsEnv, channel, userId, ratingUserRef, customerProfile, firestoreCustomerId } = params;
   try {
     let persona: PersonaType | null = customerProfile?.persona?.primary ?? null;
     let tasteProfile: TasteProfile | null = customerProfile?.tasteProfile ?? null;
@@ -1047,6 +1052,30 @@ async function buildPersonalizationBlock(params: {
         source = lineProfile?.onboarding?.source ?? null;
       } catch (err) {
         console.warn("[agent] lineUsers personalization read skipped:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    // QA S-1 読み取り時フォールバック: 連携済みでも lineUsers の好みが users へ未統合なら統合して使う。
+    //   連携ハンドラでの書込マージが（Firestore 一時不通等で）漏れても、以後の会話で取りこぼさない。
+    //   mergeLineUserIntoShopify は mergedToShopify フラグで冪等（二重加算しない）。best-effort。
+    if (
+      customerProfile &&
+      channel === "line" &&
+      fsEnv &&
+      firestoreCustomerId &&
+      LINE_USER_ID_RE.test(userId)
+    ) {
+      try {
+        const merged = await mergeLineUserIntoShopify(userId, firestoreCustomerId, fsEnv, {
+          existingShopify: customerProfile,
+        });
+        if (merged) {
+          persona = merged.persona?.primary ?? persona;
+          tasteProfile = merged.tasteProfile ?? tasteProfile;
+          source = merged.onboarding?.source ?? source;
+        }
+      } catch (err) {
+        console.warn("[agent] lineUsers→users merge (read fallback) skipped:", err instanceof Error ? err.message : err);
       }
     }
 
