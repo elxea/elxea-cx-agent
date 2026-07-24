@@ -45,8 +45,14 @@ import {
   LINKAGE_BUTTON_LABEL,
   MARCHE_LINKAGE_SOFT_ACK,
   SITE_URL_JA,
+  ACCOUNT_LINK_UNLINK_TRIGGER,
+  ACCOUNT_LINK_UNLINKED_BODY,
+  ACCOUNT_LINK_NOT_LINKED_BODY,
+  ACCOUNT_LINK_UNLINK_FAILED_BODY,
 } from "./brand-copy";
 import { logFlowEvent } from "./flow-events";
+import { issueLinkToken, buildAccountLinkEntryUrl } from "./account-link";
+import { clearCustomerLinkage } from "./customer-linkage";
 
 // ---------------------------------------------------------------------------
 // トリガー / リンク
@@ -273,6 +279,52 @@ export function resolveLiffLinkageUrl(env: { LIFF_LINKAGE_URL?: string }): strin
 }
 
 /**
+ * Account Link 方式の連携入口 URL（web-app の /{locale}/link）を env から解決する（純粋）。
+ * 未設定・空白のみは null（＝ 従来の LIFF / テキスト導線に倒す）。
+ */
+export function resolveAccountLinkEntryUrl(env: {
+  ACCOUNT_LINK_ENTRY_URL?: string;
+}): string | null {
+  const raw = env.ACCOUNT_LINK_ENTRY_URL?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+/** 連携 URL 解決のテスト用依存注入（本番は未指定で実 API を使う）。 */
+export type LinkageUrlDeps = {
+  issueLinkToken?: typeof issueLinkToken;
+};
+
+/**
+ * **このお客さま専用**の連携 URL を解決する（Account Link 優先 / LIFF フォールバック）。
+ *
+ * なぜユーザーごとに URL を作るのか:
+ *   Account Link は「Bot が発行した linkToken（10 分・1 回限り・そのユーザー専用）」を
+ *   自社の連携入口に載せて初めて成立する。静的な 1 本の URL では成立しない。
+ *   よってボタンを出すたびに linkToken を発行し、`?linkToken=...` を付けた URL を組む。
+ *
+ * fail-safe（既存挙動を壊さない）:
+ *   - ACCOUNT_LINK_ENTRY_URL 未設定 → 従来どおり LIFF URL（未設定なら null）。
+ *   - linkToken 発行に失敗 → LIFF URL（未設定なら null）へ黙って倒す。連携導線が
+ *     LINE API の一時障害で完全に消えないようにする（ボタンが出ないより出るほうがよい）。
+ */
+export async function resolveLinkageUrlForUser(
+  lineUserId: string,
+  env: Env,
+  deps?: LinkageUrlDeps,
+): Promise<string | null> {
+  const entryUrl = resolveAccountLinkEntryUrl(env);
+  if (entryUrl) {
+    const issue = deps?.issueLinkToken ?? issueLinkToken;
+    const token = await issue(lineUserId, env);
+    if (token.ok) return buildAccountLinkEntryUrl(entryUrl, token.linkToken);
+    console.warn(
+      `[subscriber-linkage] linkToken issue failed (reason=${token.reason}) — 従来導線へ fail-safe`,
+    );
+  }
+  return resolveLiffLinkageUrl(env);
+}
+
+/**
  * 連携招待の Flex（便益 1 行 + LIFF を開く URI ボタン）を組む（純粋・テスト可能）。
  * leadText があれば便益行の前に添える（④定期便の generic 紹介を先頭に置く用途）。
  * 絵文字・感嘆符は使わない（体験原則）。altText は通知プレビュー用の素文。
@@ -331,8 +383,11 @@ export async function emitLinkageButton(
   responder: LineResponder,
   surface: LinkageSurface,
   leadText?: string,
+  deps?: LinkageUrlDeps,
 ): Promise<boolean> {
-  const liffUrl = resolveLiffLinkageUrl(env);
+  // ⚠ お客さまごとに URL を組む（Account Link の linkToken はユーザー専用・1 回限りのため）。
+  //    ACCOUNT_LINK_ENTRY_URL 未設定なら従来どおり静的な LIFF URL に倒れる（無回帰）。
+  const liffUrl = await resolveLinkageUrlForUser(lineUserId, env, deps);
   if (!liffUrl) return false;
 
   // 便益 + ボタンを出す事実を先に記録する（fire-and-forget・送信前）。
@@ -358,8 +413,16 @@ export async function sendLinkageInvite(
   env: Env,
   responder: LineResponder,
   fallbackText: string,
+  deps?: LinkageUrlDeps,
 ): Promise<void> {
-  const shown = await emitLinkageButton(lineUserId, env, responder, "trigger");
+  const shown = await emitLinkageButton(
+    lineUserId,
+    env,
+    responder,
+    "trigger",
+    undefined,
+    deps,
+  );
   if (!shown) await responder.text(fallbackText);
 }
 
@@ -404,17 +467,74 @@ export async function isMarcheSourceUser(
 }
 
 // ---------------------------------------------------------------------------
+// 連携解除（LINE 必須義務: いつでも解除できること）
+// ---------------------------------------------------------------------------
+
+/** 連携解除のテスト用依存注入（本番は未指定）。 */
+export type LinkageUnlinkDeps = {
+  supabase?: SupabaseClient;
+  clearLinkage?: typeof clearCustomerLinkage;
+};
+
+/**
+ * 連携解除を実行して結果をお伝えする（完全一致トリガー「連携を解除する」）。
+ *
+ * 必須義務（出典: https://developers.line.biz/ja/docs/messaging-api/linking-accounts/）:
+ *   「ユーザーがいつでもアカウントの連携を解除できるようにしておくこと」。
+ *   そのため解除は 1 手（トークで一言送るだけ）で完了し、確認の往復や画面遷移を挟まない。
+ *
+ * 何を消すか: 連携列だけ（shopify_customer_id / shopify_email / source）。行は消さない
+ *   （配信停止フラグ等が同居しているため。詳細は clearCustomerLinkage のコメント）。
+ *
+ * @returns 解除できたら true（元から未連携も true = 応答済み）。失敗しても応答はする。
+ */
+export async function handleLinkageUnlink(
+  lineUserId: string,
+  env: Env,
+  responder: LineResponder,
+  deps?: LinkageUnlinkDeps,
+): Promise<boolean> {
+  const supabase = deps?.supabase ?? createSupabaseClient(env);
+  const clear = deps?.clearLinkage ?? clearCustomerLinkage;
+
+  const result = await clear(supabase, lineUserId);
+
+  if (!result.ok) {
+    console.error("[subscriber-linkage] unlink failed:", result.error);
+    // 断定しない（「解除しました」と言わない）。もう一度お願いする。
+    await responder.text(ACCOUNT_LINK_UNLINK_FAILED_BODY);
+    return false;
+  }
+
+  if (!result.cleared) {
+    // 元から未連携。壊すものが無いので、そのままお伝えする（冪等）。
+    await responder.text(ACCOUNT_LINK_NOT_LINKED_BODY);
+    return true;
+  }
+
+  // 解除の事実を記録（fire-and-forget・連携ファネルの対）。
+  void logFlowEvent(supabase, {
+    eventName: "link.unlinked",
+    userRef: lineUserId,
+  });
+  await responder.text(ACCOUNT_LINK_UNLINKED_BODY);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ）
 // ---------------------------------------------------------------------------
 
 /**
  * アカウント連携導線（定期便客限定）の決定的応答インターセプタ。
  *
- * トリガー「アカウントを連携する」の完全一致のみ反応する。無関係発話は false を返して素通りさせ、
- * 既存の AI 会話・診断・注文照会・feedback を一切壊さない（menu-actions.ts と同じ後置・非侵襲設計）。
+ * トリガー「アカウントを連携する」「連携を解除する」の完全一致のみ反応する。無関係発話は false を
+ * 返して素通りさせ、既存の AI 会話・診断・注文照会・feedback を一切壊さない
+ * （menu-actions.ts と同じ後置・非侵襲設計）。
  *
  * 出し分け:
- *   - 未連携 → 便益 + 連携ボタン（LIFF 設定時）/ 従来の案内テキスト（未設定時・fail-safe）。surface=trigger。
+ *   - 「連携を解除する」→ 連携解除（LINE 必須義務の解除導線）。連携の有無に関わらずここで完結。
+ *   - 未連携 → 便益 + 連携ボタン（連携 URL 設定時）/ 従来の案内テキスト（未設定時・fail-safe）。surface=trigger。
  *   - 連携済み定期便 → 定期便客としての応答（従来どおり）。
  *   - 連携済み非定期便 → 丁寧なお断り（従来どおり）。
  *
@@ -425,8 +545,17 @@ export async function handleLinkageFlow(
   userMessage: string,
   env: Env,
   responder: LineResponder,
+  deps?: LinkageUrlDeps & LinkageUnlinkDeps,
 ): Promise<boolean> {
-  if (userMessage.trim() !== LINKAGE_TRIGGER) return false;
+  const trimmed = userMessage.trim();
+
+  // 解除（必須義務）: 連携中かどうかに関わらず、この一言で完結させる。
+  if (trimmed === ACCOUNT_LINK_UNLINK_TRIGGER) {
+    await handleLinkageUnlink(lineUserId, env, responder, deps);
+    return true;
+  }
+
+  if (trimmed !== LINKAGE_TRIGGER) return false;
 
   const resolution = await resolveLinkedSubscriber(lineUserId, env);
   if (!resolution.linked) {
@@ -437,12 +566,13 @@ export async function handleLinkageFlow(
       await responder.text(MARCHE_LINKAGE_SOFT_ACK);
       return true;
     }
-    // 未連携: 便益 + ボタン（LIFF 設定時）。fail-safe は従来の案内テキスト（着地先も env 連動）。
+    // 未連携: 便益 + ボタン（連携 URL 設定時）。fail-safe は従来の案内テキスト（着地先も env 連動）。
     await sendLinkageInvite(
       lineUserId,
       env,
       responder,
       buildLinkageInviteMessage(resolveLiffLinkageUrl(env)),
+      deps,
     );
     return true;
   }

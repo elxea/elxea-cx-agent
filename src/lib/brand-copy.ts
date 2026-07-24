@@ -241,6 +241,44 @@ export const NON_SUBSCRIBER_DECLINE_BODY =
   "アカウントの連携が完了しました。これからは、あなたの好みに合わせたご案内を、このトークでお届けしますね。" +
   "定期便のご案内をご希望のときは、こちらからいつでもご覧いただけます。";
 
+// --- アカウント連携（LINE 純正 Account Link）の完了・解除 ---
+//
+// LINE の必須義務（出典: https://developers.line.biz/ja/docs/messaging-api/linking-accounts/）:
+//   「ユーザーがいつでもアカウントの連携を解除できるようにしておくこと。
+//     ユーザーが連携するときに、解除できることを通知すること。」
+//   → 完了文言（ACCOUNT_LINK_COMPLETED_BODY）に解除の手段を必ず書く。これは体験上の親切ではなく
+//     仕様上の義務なので、文言を削るときも解除の一文だけは残すこと。
+// 体験原則: 静かで丁寧・絵文字/感嘆符なし・押し売りなし。
+
+/** 連携を解除するためのトリガー文（完全一致・ユーザーが送る言葉。文言と実装で共有する SoT）。 */
+export const ACCOUNT_LINK_UNLINK_TRIGGER = "連携を解除する";
+
+/**
+ * 解除できる旨のご案内（1 文）。連携完了時の通知に必ず含める（LINE 必須義務）。
+ * 解除完了の文言でも「また連携できる」ことを伝えるために再利用する。
+ */
+export const ACCOUNT_LINK_UNLINK_NOTE =
+  `連携はいつでも解除できます。解除したいときは、このトークで「${ACCOUNT_LINK_UNLINK_TRIGGER}」とお送りください。`;
+
+/** 連携が成立したときにお伝えする文言（accountLink イベント成功時）。解除の案内を含む。 */
+export const ACCOUNT_LINK_COMPLETED_BODY =
+  "アカウントの連携が完了しました。ご注文やお届けの状況を、このままメッセージでご確認いただけます。\n" +
+  ACCOUNT_LINK_UNLINK_NOTE;
+
+/** 連携解除が完了したときの文言（また連携できることを添える）。 */
+export const ACCOUNT_LINK_UNLINKED_BODY =
+  "アカウントの連携を解除しました。これまでのご案内はこのトークに残ります。" +
+  `また連携されるときは、「${LINKAGE_BUTTON_LABEL}」とお送りください。`;
+
+/** 連携していないお客さまが解除をご希望のときの文言（何も壊さずお伝えする）。 */
+export const ACCOUNT_LINK_NOT_LINKED_BODY =
+  "現在、連携されているアカウントはありません。" +
+  `ご購入時のアカウントと連携されるときは、「${LINKAGE_BUTTON_LABEL}」とお送りください。`;
+
+/** 解除の処理がうまくいかなかったときの文言（断定せず、もう一度をお願いする）。 */
+export const ACCOUNT_LINK_UNLINK_FAILED_BODY =
+  "解除の処理に少し時間がかかっているようです。恐れ入りますが、もう一度お送りいただけますか。";
+
 // --- 評価後の「次の一杯」（A-2a・個別最適化 Phase A）---
 //
 // 体験原則（統合設計書 §B / リポ CLAUDE.md）: 静かで丁寧・押し売り禁止・本文絵文字禁止・

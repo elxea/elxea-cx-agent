@@ -27,6 +27,7 @@ import {
 } from "../lib/tea-menu";
 import { handleMenuActionFlow, consultEntryValue } from "../lib/menu-actions";
 import { handleLinkageFlow } from "../lib/subscriber-linkage";
+import { handleAccountLinkEvent } from "../lib/account-link";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { handleMyKarteFlow } from "../lib/my-karte";
 import { handleJournalFlow } from "../lib/journal";
@@ -277,6 +278,20 @@ async function processEvents(
         await handleFollowEvent(lineUserId, env, responder);
       } catch (error) {
         console.error("Error processing follow event:", error);
+      }
+    }
+
+    // アカウント連携（LINE 純正 Account Link）の成立イベント。
+    //   LINE が所有者検証を終えたときだけここに来る（result="ok"）。nonce を single-use で消費し、
+    //   自社側で確定済みの Shopify 顧客 ID を引き当てて customer_linkages に連携行を書く。
+    //   ⚠ result="failed" では連携行を作らない（判断は handleAccountLinkEvent が担う）。
+    //   ⚠ source.userId は Messaging userId（トーク用）そのもの。LINE Login チャネル不要のため
+    //     Messaging チャネルと LIFF が別プロバイダでも成立する（本方式を採る理由）。
+    if (event.type === "accountLink") {
+      try {
+        await handleAccountLinkEvent(lineUserId, event.link, env, responder);
+      } catch (error) {
+        console.error("Error processing accountLink event:", error);
       }
     }
 

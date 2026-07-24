@@ -167,3 +167,56 @@ export async function upsertCustomerLinkage(
     shopifyCustomerId: input.shopifyCustomerId,
   };
 }
+
+/** 連携解除の結果。 */
+export type ClearLinkageResult =
+  | { ok: true; cleared: boolean }
+  | { ok: false; error: string };
+
+/**
+ * 連携を解除する（LINE のアカウント連携の必須義務「いつでも解除できる」の実体）。
+ *
+ * ⚠ 行は削除しない（DELETE しない）。customer_linkages の同じ行には
+ *   `broadcast_opted_out`（配信停止フラグ・migration 020）と `unfollowed_at`（除外・migration 020）が
+ *   同居しており、行ごと消すと **お客さまが設定した配信停止まで巻き戻る**（再び配信対象に戻る）。
+ *   よって連携に関する列だけを空にする:
+ *     - shopify_customer_id → null（= 未連携。resolveCallerShopifyCustomerId が null を返す状態）
+ *     - shopify_email       → null（連携由来の個人情報を残さない）
+ *     - source              → null（現在の連携が無いので発生源も無い）
+ *
+ * 冪等: 連携が無い行・行そのものが無い場合も成功扱い（cleared=false）。二度押しで壊れない。
+ * never throw（呼び出し側の会話を止めない）。
+ *
+ * @returns ok:true / cleared=true なら実際に連携を解除した。cleared=false は元から未連携。
+ */
+export async function clearCustomerLinkage(
+  supabase: SupabaseClient,
+  lineUserId: string,
+): Promise<ClearLinkageResult> {
+  if (!lineUserId) return { ok: false, error: "lineUserId is required" };
+
+  try {
+    const { data, error } = await supabase
+      .from("customer_linkages")
+      .update({
+        shopify_customer_id: null,
+        shopify_email: null,
+        source: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("line_user_id", lineUserId)
+      // 既に未連携（null）の行は更新しない → cleared=false で「元から未連携」を区別できる。
+      .not("shopify_customer_id", "is", null)
+      .select("line_user_id");
+
+    if (error) return { ok: false, error: error.message };
+
+    const rows = (data ?? []) as unknown[];
+    return { ok: true, cleared: rows.length > 0 };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
