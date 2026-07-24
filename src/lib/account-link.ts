@@ -130,6 +130,14 @@ export function buildLinkTokenEndpoint(lineUserId: string): string {
 /**
  * 自社の連携入口 URL に linkToken を付ける（トークのボタンの遷移先）。
  * 既存クエリは保持し、linkToken だけを上書きする。
+ *
+ * `openExternalBrowser=1` を必ず付ける（LINE 固有クエリ）:
+ *   このボタンはトーク内（LINE の内蔵ブラウザ = LIFF ではない web-app の入口 URL）で開かれる。
+ *   内蔵ブラウザだと Cookie/セッションが本人の既定ブラウザと分離し、ログイン状態や
+ *   linkToken cookie(TTL 600s) の受け渡しが不安定になる。`openExternalBrowser=1` を付けると
+ *   LINE が **端末の外部ブラウザ**で開き直すため、web-app 側のログイン→顧客 ID 確定が安定する。
+ *   これは Account Link の web-app 入口（`/{locale}/link` 系）専用の対処であり、
+ *   LIFF フォールバック URL には付けない（openExternalBrowser は LIFF に無効なため）。
  */
 export function buildAccountLinkEntryUrl(
   entryUrl: string,
@@ -137,6 +145,7 @@ export function buildAccountLinkEntryUrl(
 ): string {
   const url = new URL(entryUrl);
   url.searchParams.set("linkToken", linkToken);
+  url.searchParams.set("openExternalBrowser", "1");
   return url.toString();
 }
 

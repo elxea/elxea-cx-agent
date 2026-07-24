@@ -263,13 +263,30 @@ describe("URL 組み立て", () => {
     );
   });
 
-  it("buildAccountLinkEntryUrl: 自社入口に linkToken を付ける（既存クエリは保持）", () => {
+  it("buildAccountLinkEntryUrl: 自社入口に linkToken と openExternalBrowser=1 を付ける（既存クエリは保持）", () => {
     const u = new URL(
       buildAccountLinkEntryUrl("https://example.test/ja/link?from=line", "tok_123"),
     );
     assertEqual(u.pathname, "/ja/link");
     assertEqual(u.searchParams.get("linkToken"), "tok_123");
+    assertEqual(
+      u.searchParams.get("openExternalBrowser"),
+      "1",
+      "LINE 内蔵ブラウザではなく外部ブラウザで開かせる",
+    );
     assertEqual(u.searchParams.get("from"), "line", "既存クエリを壊さない");
+  });
+
+  it("resolveLinkageUrlForUser: LIFF フォールバックには openExternalBrowser を付けない（LIFF に無効）", async () => {
+    // ACCOUNT_LINK_ENTRY_URL 未設定 → LIFF URL へ倒れる。openExternalBrowser は付かない。
+    const env = { LIFF_LINKAGE_URL: "https://liff.line.me/1234567890-abcABC" } as unknown as Env;
+    const url = await resolveLinkageUrlForUser(SYN_LINE, env);
+    assertEqual(url, "https://liff.line.me/1234567890-abcABC", "LIFF URL をそのまま返す");
+    assertEqual(
+      new URL(url ?? "").searchParams.get("openExternalBrowser"),
+      null,
+      "LIFF フォールバックに openExternalBrowser を付けない",
+    );
   });
 
   it("buildAccountLinkRedirectUrl: LINE ダイアログに linkToken と nonce だけを載せる", () => {
@@ -770,13 +787,20 @@ describe("resolveLinkageUrlForUser（お客さまごとの連携 URL）", () => 
     assertEqual(url, "https://liff.line.me/x-y");
   });
 
-  it("ACCOUNT_LINK_ENTRY_URL 設定 → linkToken 付きの自社入口 URL", async () => {
+  it("ACCOUNT_LINK_ENTRY_URL 設定 → linkToken + openExternalBrowser=1 付きの自社入口 URL", async () => {
     const url = await resolveLinkageUrlForUser(
       SYN_LINE,
       testEnv({ ACCOUNT_LINK_ENTRY_URL: "https://elxea.test/ja/link" }),
       { issueLinkToken: async () => ({ ok: true, linkToken: "c".repeat(32) }) },
     );
-    assertEqual(url, `https://elxea.test/ja/link?linkToken=${"c".repeat(32)}`);
+    assertEqual(
+      url,
+      `https://elxea.test/ja/link?linkToken=${"c".repeat(32)}&openExternalBrowser=1`,
+    );
+    // 実運用経路（resolveLinkageUrlForUser）でも両クエリが載ることを明示する。
+    const q = new URL(url ?? "").searchParams;
+    assertEqual(q.get("linkToken"), "c".repeat(32));
+    assertEqual(q.get("openExternalBrowser"), "1");
   });
 
   it("linkToken 発行失敗 → LIFF URL へ fail-safe（導線を消さない）", async () => {
