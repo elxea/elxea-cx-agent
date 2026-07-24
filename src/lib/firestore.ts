@@ -855,75 +855,6 @@ export function mergeTasteProfiles(
   };
 }
 
-/**
- * 連携成立時に未連携カルテ（lineUsers/{lineUserId}）の好み（persona / tasteProfile）を
- * 連携済みカルテ（users/{shopifyCustomerId}）へ **累積統合** する（QA S-1 の恒久修正）。
- *
- * 冪等性（二重加算の防止）:
- *   - lineUsers.mergedToShopify === true なら即 no-op（既に統合済み）。統合が済んだら true を立てる。
- *   - 統合は「加算」なので本質的に非冪等だが、この mergedToShopify フラグでガードすることで
- *     書き込み経路（連携ハンドラ）と読み取り経路（core.ts のフォールバック）が何度呼んでも
- *     実際の加算は 1 回だけになる。
- *
- * fail-safe: 呼び出し側（連携ハンドラ / personalization）が try/catch で握る前提。ここでは
- *   握らず、Firestore エラーはそのまま投げる（呼び出し側が best-effort に倒す）。
- *
- * @returns 統合後の users プロファイル（読み取り時フォールバックがそのまま使えるよう返す）。
- *          統合不要（未マージの好みが無い / 既に統合済み）のときは既存 users プロファイルを返す。
- */
-export async function mergeLineUserIntoShopify(
-  lineUserId: string,
-  shopifyCustomerId: string,
-  env: FirestoreEnv,
-  opts?: {
-    existingShopify?: CustomerProfile | null;
-    existingLine?: LineUserProfile | null;
-  },
-): Promise<CustomerProfile | null> {
-  const lineProfile =
-    opts?.existingLine !== undefined
-      ? opts.existingLine
-      : await getLineUserProfile(lineUserId, env);
-
-  const resolveShopify = async (): Promise<CustomerProfile | null> =>
-    opts?.existingShopify !== undefined
-      ? opts.existingShopify
-      : await getCustomerProfile(shopifyCustomerId, env);
-
-  // 既に統合済み / lineUsers が無い → 何もしない（users をそのまま返す）。
-  if (!lineProfile || lineProfile.mergedToShopify === true) {
-    return resolveShopify();
-  }
-
-  const shopifyProfile = await resolveShopify();
-
-  // 統合すべき好みが無い → フラグだけ立てて以降の二度読みを止める。
-  if (!lineProfile.persona && !lineProfile.tasteProfile) {
-    await updateLineUserProfile(lineUserId, { mergedToShopify: true }, env);
-    return shopifyProfile;
-  }
-
-  const mergedPersona = mergePersonaProfiles(
-    shopifyProfile?.persona,
-    lineProfile.persona,
-  );
-  const mergedTaste = mergeTasteProfiles(
-    shopifyProfile?.tasteProfile,
-    lineProfile.tasteProfile,
-  );
-
-  const updates: Partial<CustomerProfile> = {};
-  if (mergedPersona) updates.persona = mergedPersona;
-  if (mergedTaste) updates.tasteProfile = mergedTaste;
-  if (Object.keys(updates).length > 0) {
-    await updateCustomerProfile(shopifyCustomerId, updates, env);
-  }
-  // 二重加算を防ぐため lineUsers 側に統合済みフラグを立てる（users 書込の後に立てる）。
-  await updateLineUserProfile(lineUserId, { mergedToShopify: true }, env);
-
-  return { ...(shopifyProfile ?? {}), ...updates };
-}
-
 // ---------------------------------------------------------------------------
 // TasteProfile / PersonaProfile 更新（嗜好抽出パイプライン用）
 // ---------------------------------------------------------------------------
@@ -1105,9 +1036,16 @@ function tasteHasSignal(taste: TasteProfile | undefined): boolean {
 }
 
 /**
- * mergeLineUserIntoShopify の依存注入シーム（本番は未指定で実 Firestore I/O を使う）。
- * ハーメティックテストはここに in-memory な get/update を注入し、実ネットワーク非接触で
- * 「連携時に好みが users へ畳まれる」ことを検証する（Firestore REST はモック対象外＝要 DI）。
+ * mergeLineUserIntoShopify の第4引数（opts）型。2 つの役割を 1 つに束ねる（統合済み）:
+ *   1. 依存注入シーム（DI）— getLineUser/getCustomer/updateCustomer/updateLineUser。本番は未指定で
+ *      実 Firestore I/O を使う。ハーメティックテストは in-memory な get/update を注入し、実ネットワーク
+ *      非接触で「連携時に好みが users へ畳まれる」ことを検証する（Firestore REST はモック対象外＝要 DI）。
+ *   2. 読み取りキャッシュ — existingShopify/existingLine。呼び出し側が既に読み込んだプロファイルを
+ *      渡して二度読みを避ける（core.ts の QA S-1 読み取りフォールバック / 既マージ短絡の I/O ゼロ化）。
+ *      `existingLine`/`existingShopify` が「指定された（undefined でない・null も可）」ときは対応する
+ *      getter を呼ばずその値を使う。
+ *
+ * 型名は歴史的経緯で `CarryoverDeps`（DI 由来）。cache フィールドは後付けで加えた superset。
  */
 export type CarryoverDeps = {
   getLineUser?: (
@@ -1128,6 +1066,10 @@ export type CarryoverDeps = {
     updates: Partial<LineUserProfile>,
     env: FirestoreEnv,
   ) => Promise<void>;
+  /** 読み取りキャッシュ: 既読の連携済みカルテ。指定時は getCustomer を呼ばずこれを使う。 */
+  existingShopify?: CustomerProfile | null;
+  /** 読み取りキャッシュ: 既読の未連携カルテ。指定時は getLineUser を呼ばずこれを使う。 */
+  existingLine?: LineUserProfile | null;
 };
 
 /**
@@ -1150,37 +1092,49 @@ export type CarryoverDeps = {
  *   本関数は「連携が GA したとき正しく動く」ことを保証する（hermetic mocked-link で実証）。
  *
  * @param env Firestore 資格情報（未設定なら呼び出し側 route が getFirestoreEnv で弾く）。
- * @param deps テスト用 DI（本番は省略）。
+ * @param opts テスト用 DI + 読み取りキャッシュ（本番は省略）。詳細は CarryoverDeps 参照。
  * @returns 統合後の連携済みカルテ（no-op 時は現状の users カルテ・不在なら null）。
+ *          `existingShopify` を渡した no-op 短絡ではそのオブジェクトを同一参照で返す。
  */
 export async function mergeLineUserIntoShopify(
   lineUserId: string,
   shopifyCustomerId: string,
   env: FirestoreEnv,
-  deps?: CarryoverDeps,
+  opts?: CarryoverDeps,
 ): Promise<CustomerProfile | null> {
-  const getLineUser = deps?.getLineUser ?? getLineUserProfile;
-  const getCustomer = deps?.getCustomer ?? getCustomerProfile;
-  const updateCustomer = deps?.updateCustomer ?? updateCustomerProfile;
-  const updateLineUser = deps?.updateLineUser ?? updateLineUserProfile;
+  const getLineUser = opts?.getLineUser ?? getLineUserProfile;
+  const getCustomer = opts?.getCustomer ?? getCustomerProfile;
+  const updateCustomer = opts?.updateCustomer ?? updateCustomerProfile;
+  const updateLineUser = opts?.updateLineUser ?? updateLineUserProfile;
 
-  const lineProfile = await getLineUser(lineUserId, env);
+  // 読み取りキャッシュ: existingLine/existingShopify が指定されていれば getter を呼ばない
+  //   （core.ts の読み取りフォールバックや既マージ短絡での I/O ゼロ化）。undefined 判定なので null も尊重。
+  const resolveLine = (): Promise<LineUserProfile | null> =>
+    opts?.existingLine !== undefined
+      ? Promise.resolve(opts.existingLine)
+      : getLineUser(lineUserId, env);
+  const resolveCustomer = (): Promise<CustomerProfile | null> =>
+    opts?.existingShopify !== undefined
+      ? Promise.resolve(opts.existingShopify)
+      : getCustomer(shopifyCustomerId, env);
+
+  const lineProfile = await resolveLine();
 
   // graceful: 未連携カルテそのものが無い → 引き継ぐものが無い（no-op）。
-  if (!lineProfile) return getCustomer(shopifyCustomerId, env);
+  if (!lineProfile) return resolveCustomer();
 
   // 冪等性: 既にマージ済み → 二重加算しない（no-op）。
   if (lineProfile.mergedToShopify === true) {
-    return getCustomer(shopifyCustomerId, env);
+    return resolveCustomer();
   }
 
   const foldPersona = personaHasScore(lineProfile.persona);
   const foldTaste = tasteHasSignal(lineProfile.tasteProfile);
 
   // graceful: persona も taste も無い（例: 入口回答のみ）→ 引き継ぐ好みが無い（no-op）。
-  if (!foldPersona && !foldTaste) return getCustomer(shopifyCustomerId, env);
+  if (!foldPersona && !foldTaste) return resolveCustomer();
 
-  const customerProfile = await getCustomer(shopifyCustomerId, env);
+  const customerProfile = await resolveCustomer();
   const now = new Date().toISOString();
   const updates: Partial<CustomerProfile> = { lastActiveAt: now };
 

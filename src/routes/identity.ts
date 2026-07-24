@@ -30,7 +30,6 @@ import {
 } from "../lib/account-link";
 import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 import { logFlowEvent } from "../lib/flow-events";
-import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 
 /**
  * POST /api/identity/link-line
