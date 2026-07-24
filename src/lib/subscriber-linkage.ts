@@ -43,6 +43,7 @@ import {
   NON_SUBSCRIBER_DECLINE_BODY,
   LINKAGE_BENEFIT_LINE,
   LINKAGE_BUTTON_LABEL,
+  LINKAGE_TOKEN_EXPIRY_NOTE,
   MARCHE_LINKAGE_SOFT_ACK,
   SITE_URL_JA,
   ACCOUNT_LINK_UNLINK_TRIGGER,
@@ -349,6 +350,15 @@ export function buildLinkageInviteFlex(
     wrap: true,
     size: "sm",
     color: "#333333",
+  });
+  // ボタンの有効期限（linkToken TTL 失効）を静かに添える。開けなくなったお客さまが
+  //   自力で再発行に戻れるよう、控えめな補助テキストとして benefit 行の下に置く。
+  bodyContents.push({
+    type: "text",
+    text: LINKAGE_TOKEN_EXPIRY_NOTE,
+    wrap: true,
+    size: "xs",
+    color: "#888888",
   });
 
   const contents: Record<string, unknown> = {

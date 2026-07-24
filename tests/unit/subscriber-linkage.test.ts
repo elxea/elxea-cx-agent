@@ -35,6 +35,7 @@ import {
   NON_SUBSCRIBER_DECLINE_BODY,
   LINKAGE_BENEFIT_LINE,
   LINKAGE_BUTTON_LABEL,
+  LINKAGE_TOKEN_EXPIRY_NOTE,
   SITE_URL_JA,
 } from "../../src/lib/brand-copy";
 
@@ -231,6 +232,7 @@ async function run() {
     const json = JSON.stringify(flex.contents);
     assert(json.includes(LINKAGE_BENEFIT_LINE), "benefit line present");
     assert(json.includes(LINKAGE_BUTTON_LABEL), "button label present");
+    assert(json.includes(LINKAGE_TOKEN_EXPIRY_NOTE), "token expiry note present");
     assert(!EMOJI_RE.test(json), "no emoji in flex");
   });
   it("buildLinkageInviteFlex: leadText を先頭に添えられる", () => {

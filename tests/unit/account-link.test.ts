@@ -263,7 +263,7 @@ describe("URL 組み立て", () => {
     );
   });
 
-  it("buildAccountLinkEntryUrl: 自社入口に linkToken と openExternalBrowser=1 を付ける（既存クエリは保持）", () => {
+  it("buildAccountLinkEntryUrl: 自社入口に linkToken だけを付ける・openExternalBrowser は付けない（既存クエリは保持）", () => {
     const u = new URL(
       buildAccountLinkEntryUrl("https://example.test/ja/link?from=line", "tok_123"),
     );
@@ -271,8 +271,8 @@ describe("URL 組み立て", () => {
     assertEqual(u.searchParams.get("linkToken"), "tok_123");
     assertEqual(
       u.searchParams.get("openExternalBrowser"),
-      "1",
-      "LINE 内蔵ブラウザではなく外部ブラウザで開かせる",
+      null,
+      "Account Link は LINE 内蔵ブラウザ（in-app）で開く前提。外部ブラウザは access.line.me のログイン壁で行き止まりになるため付けない",
     );
     assertEqual(u.searchParams.get("from"), "line", "既存クエリを壊さない");
   });
@@ -787,7 +787,7 @@ describe("resolveLinkageUrlForUser（お客さまごとの連携 URL）", () => 
     assertEqual(url, "https://liff.line.me/x-y");
   });
 
-  it("ACCOUNT_LINK_ENTRY_URL 設定 → linkToken + openExternalBrowser=1 付きの自社入口 URL", async () => {
+  it("ACCOUNT_LINK_ENTRY_URL 設定 → linkToken だけ付きの自社入口 URL（openExternalBrowser は付かない）", async () => {
     const url = await resolveLinkageUrlForUser(
       SYN_LINE,
       testEnv({ ACCOUNT_LINK_ENTRY_URL: "https://elxea.test/ja/link" }),
@@ -795,12 +795,12 @@ describe("resolveLinkageUrlForUser（お客さまごとの連携 URL）", () => 
     );
     assertEqual(
       url,
-      `https://elxea.test/ja/link?linkToken=${"c".repeat(32)}&openExternalBrowser=1`,
+      `https://elxea.test/ja/link?linkToken=${"c".repeat(32)}`,
     );
-    // 実運用経路（resolveLinkageUrlForUser）でも両クエリが載ることを明示する。
+    // 実運用経路（resolveLinkageUrlForUser）でも linkToken だけが載り、openExternalBrowser は載らないことを明示する。
     const q = new URL(url ?? "").searchParams;
     assertEqual(q.get("linkToken"), "c".repeat(32));
-    assertEqual(q.get("openExternalBrowser"), "1");
+    assertEqual(q.get("openExternalBrowser"), null);
   });
 
   it("linkToken 発行失敗 → LIFF URL へ fail-safe（導線を消さない）", async () => {
