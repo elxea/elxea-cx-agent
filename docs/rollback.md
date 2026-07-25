@@ -55,7 +55,7 @@ vercel promote <deployment-url>
 ### 確認
 
 ```bash
-curl https://elxea.jp
+curl https://elxea.com
 # ページが正常に表示されることを確認
 ```
 

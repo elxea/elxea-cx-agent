@@ -12,7 +12,7 @@
  *
  * Usage:
  *   npx tsx scripts/smoke-test.ts
- *   npx tsx scripts/smoke-test.ts --target=https://elxea-agent-staging.setaka1103.workers.dev
+ *   npx tsx scripts/smoke-test.ts --target=https://elxea-agent-staging.setaka-on.workers.dev
  *
  * 環境変数:
  *   WEB_CHAT_BASE_URL -- 省略時は本番 Worker URL を使用

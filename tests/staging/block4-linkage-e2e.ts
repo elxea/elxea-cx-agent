@@ -29,7 +29,7 @@ import type { Env } from "../../src/index";
 
 dotenv.config({ path: ".dev.vars" });
 
-const STAGING_URL = process.env.CX_AGENT_BASE_URL ?? "https://elxea-agent-staging.setaka1103.workers.dev";
+const STAGING_URL = process.env.CX_AGENT_BASE_URL ?? "https://elxea-agent-staging.setaka-on.workers.dev";
 const UNLINKED_ID = "Ub10c4feedface0000000000000000000"; // 連携行を作っていない合成 ID
 
 let failed = 0;

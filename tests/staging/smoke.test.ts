@@ -6,7 +6,7 @@
  *
  * Usage:
  *   npx tsx tests/staging/smoke.test.ts
- *   STAGING_WORKER_URL=https://elxea-agent-staging.setaka1103.workers.dev npx tsx tests/staging/smoke.test.ts
+ *   STAGING_WORKER_URL=https://elxea-agent-staging.setaka-on.workers.dev npx tsx tests/staging/smoke.test.ts
  */
 
 const STAGING_URL =

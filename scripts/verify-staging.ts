@@ -24,7 +24,7 @@ const customUrl = args.find((a) => a.startsWith("--url="))?.split("=")[1];
 const STAGING_URL =
   customUrl ??
   process.env.STAGING_WORKER_URL ??
-  "https://elxea-agent-staging.setaka1103.workers.dev";
+  "https://elxea-agent-staging.setaka-on.workers.dev";
 
 type CheckResult = {
   name: string;
