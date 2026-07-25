@@ -13,6 +13,7 @@
  */
 
 import type { Env } from "../index";
+import { parseTargetEnv } from "./delivery-channel";
 
 /** 配信コンテンツ DB のプロパティ名（Notion 実スキーマ・日本語）。 */
 export const DELIVERY_PROPS = {
@@ -35,8 +36,72 @@ export const DELIVERY_PROPS = {
   approvers: "承認者",
 } as const;
 
-/** 配信 DB の database_id（単一ソースのため DB ページ ID を使う）。env で上書き可能。 */
-export const DEFAULT_DELIVERY_DB_ID = "f95bb981-3c1a-4b6e-abd2-8b39551f6492";
+/**
+ * 本番配信 DB の database_id（Notion）。prod ワーカーの既定参照先。
+ * env NOTION_DELIVERY_DB_ID で上書き可能。従来の単一 DEFAULT と同一値のため prod 挙動は不変。
+ */
+export const PROD_DELIVERY_DB_ID = "f95bb981-3c1a-4b6e-abd2-8b39551f6492";
+
+/**
+ * @deprecated 後方互換の別名（値は PROD_DELIVERY_DB_ID と同一）。
+ * ランタイムの DB 解決は resolveDeliveryDbId(env) を使うこと（env 分離・fail-closed）。
+ * repository 関数のデフォルト引数（ユニットテストの明示 dbId 前提）でのみ残す。
+ */
+export const DEFAULT_DELIVERY_DB_ID = PROD_DELIVERY_DB_ID;
+
+/**
+ * 配信 DB 解決の fail-closed エラー。
+ * cross-env 誤配線（test ワーカーが prod DB を指す / test で専用 DB 未設定）を送信前に塞ぐ。
+ */
+export class DeliveryDbConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryDbConfigError";
+  }
+}
+
+/**
+ * 配信ワーカーが読む Notion 配信 DB を env から解決する（純粋・fail-closed）。
+ *
+ * 背景リスク: test/staging と prod が同一配信 DB を共有すると、テストで作った行が
+ *   prod ワーカー（DELIVERY_TARGET_ENV=prod）の 15 分毎 cron に拾われ、送信ON時に
+ *   本番 OA へ誤配信されうる（cross-env 送信）。これを「設計として不可能」にする。
+ *
+ * 不変条件（この 2 つで cross-send を構造的に排除する）:
+ *   - prod ワーカー: 明示 NOTION_DELIVERY_DB_ID があればそれ、無ければ PROD_DELIVERY_DB_ID。
+ *       現行 prod は NOTION_DELIVERY_DB_ID 未設定 → PROD_DELIVERY_DB_ID（＝従来 DEFAULT・挙動不変）。
+ *   - test/staging ワーカー: 専用 NOTION_DELIVERY_DB_ID を必須。prod DB へは絶対にフォールバック
+ *       しない。未設定なら throw（fail-closed）。値が PROD_DELIVERY_DB_ID なら throw
+ *       （test ワーカーが本番行を拾う逆方向も塞ぐ）。
+ *   → 2 つの env が同一 DB を解決することは起こらない（test 未設定は「共有 DB」ではなく「停止」に倒れる）。
+ *
+ * targetEnv の解釈は parseTargetEnv と同一（未設定・不正値は "test"＝厳しい側）。
+ */
+export function resolveDeliveryDbId(env: {
+  DELIVERY_TARGET_ENV?: string;
+  NOTION_DELIVERY_DB_ID?: string;
+}): string {
+  const targetEnv = parseTargetEnv(env.DELIVERY_TARGET_ENV);
+  const explicit = env.NOTION_DELIVERY_DB_ID?.trim();
+
+  if (targetEnv === "prod") {
+    // prod: 明示があれば優先、無ければ本番 DB 既定（従来どおり・挙動不変）。
+    return explicit && explicit.length > 0 ? explicit : PROD_DELIVERY_DB_ID;
+  }
+
+  // test/staging: 専用 DB を必須にし、prod DB へは決してフォールバックしない。
+  if (!explicit || explicit.length === 0) {
+    throw new DeliveryDbConfigError(
+      "test/staging に専用の NOTION_DELIVERY_DB_ID が未設定（prod 配信 DB へフォールバックしない fail-closed）",
+    );
+  }
+  if (explicit === PROD_DELIVERY_DB_ID) {
+    throw new DeliveryDbConfigError(
+      "test/staging ワーカーが本番配信 DB を参照している（cross-env 誤配線・fail-closed）",
+    );
+  }
+  return explicit;
+}
 
 /** query/PATCH 済みの配信ページ（正規化済み）。 */
 export interface DeliveryPage {

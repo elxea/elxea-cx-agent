@@ -1002,8 +1002,98 @@ import {
   pinApproval,
   resetApproval as repoResetApproval,
   DELIVERY_PROPS,
+  resolveDeliveryDbId,
+  DeliveryDbConfigError,
+  PROD_DELIVERY_DB_ID,
   type NotionRequest,
 } from "../../src/lib/delivery-repository";
+
+// ---------------------------------------------------------------------------
+// 配信 DB の env 分離（cross-env 誤配信の構造的排除・fail-closed）
+// ---------------------------------------------------------------------------
+describe("resolveDeliveryDbId（test/prod 配信 DB の env 分離・fail-closed）", () => {
+  const TEST_DB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  it("prod + NOTION_DELIVERY_DB_ID 未設定 → PROD_DELIVERY_DB_ID（従来挙動を厳密維持）", () => {
+    assertEqual(
+      resolveDeliveryDbId({ DELIVERY_TARGET_ENV: "prod" }),
+      PROD_DELIVERY_DB_ID,
+      "prod default",
+    );
+  });
+
+  it("prod + 明示 DB → 明示を優先", () => {
+    assertEqual(
+      resolveDeliveryDbId({
+        DELIVERY_TARGET_ENV: "prod",
+        NOTION_DELIVERY_DB_ID: "prod-explicit-db",
+      }),
+      "prod-explicit-db",
+      "prod explicit",
+    );
+  });
+
+  it("test + 専用 DB → その専用 DB", () => {
+    assertEqual(
+      resolveDeliveryDbId({
+        DELIVERY_TARGET_ENV: "test",
+        NOTION_DELIVERY_DB_ID: TEST_DB,
+      }),
+      TEST_DB,
+      "test dedicated",
+    );
+  });
+
+  it("test + 専用 DB 未設定 → throw（prod DB へフォールバックしない・最重要ガード）", () => {
+    let threw = false;
+    try {
+      resolveDeliveryDbId({ DELIVERY_TARGET_ENV: "test" });
+    } catch (e) {
+      threw = e instanceof DeliveryDbConfigError;
+    }
+    assertTrue(threw, "test unset fail-closed");
+  });
+
+  it("TARGET_ENV 未設定/不正 → test 扱い（厳しい側）で throw", () => {
+    let threwUnset = false;
+    try {
+      resolveDeliveryDbId({});
+    } catch (e) {
+      threwUnset = e instanceof DeliveryDbConfigError;
+    }
+    assertTrue(threwUnset, "unset target → test → fail-closed");
+
+    let threwBad = false;
+    try {
+      resolveDeliveryDbId({ DELIVERY_TARGET_ENV: "STAGING" });
+    } catch (e) {
+      threwBad = e instanceof DeliveryDbConfigError;
+    }
+    assertTrue(threwBad, "invalid target → test → fail-closed");
+  });
+
+  it("test ワーカーが prod DB を指す → throw（逆方向 cross-send も塞ぐ）", () => {
+    let threw = false;
+    try {
+      resolveDeliveryDbId({
+        DELIVERY_TARGET_ENV: "test",
+        NOTION_DELIVERY_DB_ID: PROD_DELIVERY_DB_ID,
+      });
+    } catch (e) {
+      threw = e instanceof DeliveryDbConfigError;
+    }
+    assertTrue(threw, "test pointing prod DB fail-closed");
+  });
+
+  it("prod と test は同一 DB を解決し得ない（分離の不変条件）", () => {
+    const prodDb = resolveDeliveryDbId({ DELIVERY_TARGET_ENV: "prod" });
+    const testDb = resolveDeliveryDbId({
+      DELIVERY_TARGET_ENV: "test",
+      NOTION_DELIVERY_DB_ID: TEST_DB,
+    });
+    assertTrue(prodDb !== testDb, "prod db !== test db");
+  });
+});
 
 describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
   it("日本語プロパティを正しく抽出する（files 画像あり → 形式 image 自動判定）", () => {

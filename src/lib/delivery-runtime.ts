@@ -40,7 +40,8 @@ import {
   clearDeliveryError,
   pinApproval,
   fetchDeliveryPage,
-  DEFAULT_DELIVERY_DB_ID,
+  resolveDeliveryDbId,
+  DeliveryDbConfigError,
 } from "./delivery-repository";
 import { computeContentHash } from "./content-hash";
 import {
@@ -337,7 +338,30 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
 
   const channel = resolveDeliveryChannel(env); // token 未設定は throw（fail-closed）
   const sendEnabled = env.DELIVERY_SEND_ENABLED === "true";
-  const dbId = env.NOTION_DELIVERY_DB_ID || DEFAULT_DELIVERY_DB_ID;
+  // env 分離: prod ワーカーは prod DB、test/staging ワーカーは専用 test DB のみ読む。
+  // 誤配線（共有 DB / cross-env）は送信前に fail-closed で塞ぐ（preflight 失敗として返す）。
+  let dbId: string;
+  try {
+    dbId = resolveDeliveryDbId(env);
+  } catch (e) {
+    if (e instanceof DeliveryDbConfigError) {
+      return {
+        scanned: 0,
+        processed: [
+          {
+            pageId: "-",
+            title: "-",
+            audience: null,
+            disposition: "failed",
+            reason: `配信 DB 解決 fail-closed: ${e.message}`,
+            recipients: 0,
+          },
+        ],
+        reaper: [],
+      };
+    }
+    throw e;
+  }
   const request = createNotionRequest(env);
 
   // Firestore env（ペルソナ配信で必要。全員配信のみなら未設定でも動く）。
@@ -529,9 +553,18 @@ export async function runScheduledDelivery(
   env: Env,
 ): Promise<ScheduledDeliveryResult> {
   const request = createNotionRequest(env);
-  const dbId = env.NOTION_DELIVERY_DB_ID || DEFAULT_DELIVERY_DB_ID;
+  // env 分離 + fail-closed。解決不能な env（例: 専用 test DB 未設定の staging）では
+  // due 取得を空にし pin/送信を一切行わない（run() 側の runDelivery も同じく fail-closed）。
+  let dbId: string | null;
+  try {
+    dbId = resolveDeliveryDbId(env);
+  } catch (e) {
+    if (!(e instanceof DeliveryDbConfigError)) throw e;
+    dbId = null;
+  }
   return runScheduledDeliveryWith({
     queryDue: async (nowIso) => {
+      if (dbId === null) return [];
       const pages = await queryDueDeliveries(request, nowIso, dbId);
       return pages.map((p) => ({ id: p.id, contentHash: p.contentHash }));
     },
