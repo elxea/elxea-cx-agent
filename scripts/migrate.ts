@@ -228,6 +228,17 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
     idempotent: true,
     specs: [{ kind: "table", table: "marche_activation_log" }],
   },
+  // 030 は 006 の本番ドリフト修復（unanswered_queries.channel / user_id を冪等に補う）。
+  // sentinel = 修復対象カラムそのもの。両カラムが不在の環境（＝ドリフト中の本番）では detected=absent
+  // → leave-absent → 台帳登録されず pending のまま残る（意図どおり。--apply で欠落を埋めたら applied 判定になる）。
+  // 全体が冪等（ADD COLUMN IF NOT EXISTS + rename 分岐の DO ブロック）なので idempotent: true。
+  "030_repair_006_unanswered_queries_columns": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "unanswered_queries", column: "channel" },
+      { kind: "column", table: "unanswered_queries", column: "user_id" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
