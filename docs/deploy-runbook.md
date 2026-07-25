@@ -132,6 +132,70 @@ npx tsx scripts/migrate.ts --apply     # 本適用（prod ref を HARD ASSERT）
 > ⚠ 旧 ad-hoc runner（`scripts/run-migration-*.ts`）は台帳外適用の drift 源のため hard-stop スタブ化済み。
 > migration は必ず `scripts/migrate.ts`（台帳ベース）経由で行う。
 
+### 本番 pending migration の適用手順（Setaka の明示 GO 後のみ実行）
+
+> 現状（2026-07-25 時点）: 本番 `schema_migrations` は baseline 初期化済み（24 version 登録）。
+> **pending = 001 / 024 / 025 / 030** の 4 件。以下は **Setaka の明示 GO（Tier 2 承認）を得てから**
+> 実行する手順。GO 前は `--apply` を打たない（この節は手順の記録であって着手許可ではない）。
+> 適用前に必ず `npx tsx scripts/migrate.ts --dry-run` で「適用予定 version」を目視確認する。
+
+#### 前提: GitHub Environment `production` の一度きり設定（未設定だと承認ゲートが無効）
+
+pending 適用を deploy-prod workflow 経由で回す場合、本ファイル上部
+「Production Deploy > 一度きりの必須設定」の設定が入っていることが前提。未実施なら先に済ませる:
+
+- [ ] GitHub **Settings → Environments → New environment** で `production` を作成。
+- [ ] **Required reviewers に Setaka を追加**（この環境を通す job は Setaka 承認なしに開始しない）。
+      未設定だと `deploy-prod.yml` の承認ゲートは実質無効（誰でも `workflow_dispatch` で本番反映可能になる）。
+- [ ] **Environment Secrets を 3 種投入**（値は GitHub 側のみ・リポジトリに書かない）:
+      `CLOUDFLARE_API_TOKEN` / `SUPABASE_URL`（本番 ref = `bquqzrbzdzjegdovxalu`）/ `SUPABASE_DB_PASSWORD`。
+- 一度設定すれば恒久。詳細は上部「一度きりの必須設定」を SoT とする（本節は入口の再掲）。
+
+#### 030（006 ドリフト修復・安全・冪等）
+
+- 内容: `unanswered_queries` に `channel`（`ADD COLUMN IF NOT EXISTS ... NOT NULL DEFAULT 'line'`）と
+  `user_id`（`line_user_id`→`user_id` の rename 優先 DO ブロック）を冪等に補う。006 本体は書き換えない。
+- 安全性: 全 DDL が冪等。006 が正しく当たっている環境では **完全 no-op**。既存データは backfill / rename のみで破壊しない。
+- 適用方法（台帳ベース・単独でよい・オフピーク不要）:
+
+  ```bash
+  npx tsx scripts/migrate.ts --dry-run        # 030 が適用予定に出ることを確認
+  npx tsx scripts/migrate.ts --apply          # prod ref を HARD ASSERT のうえ適用
+  ```
+
+- 適用後、introspection sentinel（`unanswered_queries.channel` / `.user_id`）が両方 present になり
+  台帳が 030=applied に更新される。
+
+#### 001（ANN index 欠落の復旧）— ⚠ 単独 `--apply` は不可・012 と同一実行で完走させる
+
+- 内容: `knowledge_chunks.embedding` を `vector(1024)` に揃え、ivfflat index
+  `knowledge_chunks_embedding_idx (lists=100)` を drop→再作成し、**3 引数版** `search_knowledge` を再作成する。
+- ⚠ **オーバーロード衝突（最重要）**: 本番は 012 適用済みで `search_knowledge` は **4 引数版**（`filter_source_type` 付き）。
+  001 の末尾は **3 引数版** `search_knowledge` を `create or replace` するため、**001 だけを適用すると 3 引数版が増設され、
+  4 引数版と共存 → PostgREST がオーバーロード解決に失敗**する（012 が消したはずの障害を復活させる）。
+  → **001 を適用したら、続けて 012 の関数修復
+  （`DROP FUNCTION IF EXISTS search_knowledge(vector(1024), int, float)` + 4 引数版 `create or replace`）を
+  同一実行内で必ず流し、最終状態を「4 引数版のみ」にする。** 012 は冪等（no-sentinel）なので再適用は安全。
+  - 注意: `scripts/migrate.ts --apply` は台帳登録済みの 012 を skip する（012 は pending ではない）ため、
+    001 だけ適用して終わると壊れた状態が残る。migrate.ts に任せきりにせず、001 適用直後に 012 の関数定義
+    （`src/db/migrations/012_fix_hybrid_search.sql` の該当ブロック）を手で再適用して 4 引数版へ収束させること。
+- ⚠ **populated table への ivfflat index**: 本番 `knowledge_chunks` は投入済み。ivfflat index の作成は
+  テーブルをロックしうるため、**`CREATE INDEX CONCURRENTLY` 相当・オフピーク実施を推奨**。
+  ただし `CREATE INDEX CONCURRENTLY` は **トランザクション内で実行不可**なので、index 再作成は単独ステップとし、
+  関数修復（001 末尾＋012・こちらは高速でトランザクション可）は別途まとめて流す。col 型 alter と index の
+  再構築でロック/再構築時間が発生しうる点を織り込み、トラフィックの少ない時間帯に行う。
+- 完走の受け入れ基準: (1) ivfflat index が存在、(2) `search_knowledge` は **4 引数版のみ**（3 引数版が残らない）、
+  (3) 実クエリで PostgREST がオーバーロード解決に失敗しない。
+
+#### 024 / 025（broadcast_stats / dormant_reengagement_log）— 機能有効化時のみ適用
+
+- これらの SQL ヘッダは明示的に **「適用: 本番未適用」= 本番へ当てないことが設計**（024 = 配信計測の集計テーブル、
+  025 = 休眠再訪「静かな一通」の意思決定台帳）。pending のまま残るのが正常。
+- 適用するのは **stats / dormant 機能を本番で有効化する時だけ**（それぞれ fetch ジョブ / cron 配線を本番で回す判断とセット）。
+  現状は友だち約 48 人で LINE Insight のユニーク値が null 返却域にある等、有効化前提が整っていない。
+- したがって「pending 解消」を目的に 024/025 を無条件適用しない。有効化判断が出たときに、当該機能の cron/フラグ投入と
+  同時に `--apply` する（両テーブルとも `IF NOT EXISTS` で冪等）。
+
 ### Deploy Order
 
 1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
