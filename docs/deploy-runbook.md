@@ -135,8 +135,13 @@ npx tsx scripts/migrate.ts --apply     # 本適用（prod ref を HARD ASSERT）
 ### 本番 pending migration の適用手順（Setaka の明示 GO 後のみ実行）
 
 > 現状（2026-07-25 時点）: 本番 `schema_migrations` は baseline 初期化済み（24 version 登録）。
-> **pending = 001 / 024 / 025 / 030** の 4 件。以下は **Setaka の明示 GO（Tier 2 承認）を得てから**
-> 実行する手順。GO 前は `--apply` を打たない（この節は手順の記録であって着手許可ではない）。
+> `npx tsx scripts/migrate.ts --dry-run` は **台帳未登録の全ファイルを pending として 7 件**
+> （`000 / 001 / 012 / 024 / 025 / 027 / 030`）表示する。このうち **schema の実変更を伴う"実 pending"は
+> `001 / 024 / 025 / 030` の 4 件**。残る `000 / 012 / 027` は **no-sentinel / 冪等設計により台帳未登録が正常**
+> （`000` = 台帳自身の bootstrap、`012 / 027` = 実在で一意判定できる正の sentinel を持たない冪等 redefinition。
+> baseline は意図的にこれらを登録せず、`--apply` が冪等に再適用する設計）。よって dry-run の「7 件」を見て
+> 慌てない。判断対象は実 pending の 4 件（`001 / 024 / 025 / 030`）である。以下は **Setaka の明示 GO
+> （Tier 2 承認）を得てから** 実行する手順。GO 前は `--apply` を打たない（この節は手順の記録であって着手許可ではない）。
 > 適用前に必ず `npx tsx scripts/migrate.ts --dry-run` で「適用予定 version」を目視確認する。
 
 #### 前提: GitHub Environment `production` の一度きり設定（未設定だと承認ゲートが無効）
@@ -156,15 +161,19 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 - 内容: `unanswered_queries` に `channel`（`ADD COLUMN IF NOT EXISTS ... NOT NULL DEFAULT 'line'`）と
   `user_id`（`line_user_id`→`user_id` の rename 優先 DO ブロック）を冪等に補う。006 本体は書き換えない。
 - 安全性: 全 DDL が冪等。006 が正しく当たっている環境では **完全 no-op**。既存データは backfill / rename のみで破壊しない。
-- 適用方法（台帳ベース・単独でよい・オフピーク不要）:
+- 適用方法（台帳ベース・単独でよい・オフピーク不要）— ⚠ **必ず `--only 030` で対象を絞る**:
 
   ```bash
-  npx tsx scripts/migrate.ts --dry-run        # 030 が適用予定に出ることを確認
-  npx tsx scripts/migrate.ts --apply          # prod ref を HARD ASSERT のうえ適用
+  npx tsx scripts/migrate.ts --only 030 --dry-run   # 030 だけが適用予定に出ることを事前確認（書き込みなし）
+  npx tsx scripts/migrate.ts --only 030 --apply     # prod ref を HARD ASSERT のうえ 030 だけを適用
   ```
 
+- ⚠ **bare `--apply`（`--only` なし）は打たない**: migrate.ts は version 選択なしの `--apply` を実行すると
+  **pending 全件**（`000 → 001 → 012 → 024 → 025 → 027 → 030` の未登録全ファイル）を番号順に適用する。
+  つまり 030 だけのつもりで bare `--apply` を打つと、`001`（ANN index 復旧・要オフピーク／012 同伴が必須）や
+  本番未適用が設計の `024 / 025` まで意図せず当ててしまう。**特定 version だけを当てるときは必ず `--only` を付ける。**
 - 適用後、introspection sentinel（`unanswered_queries.channel` / `.user_id`）が両方 present になり
-  台帳が 030=applied に更新される。
+  台帳が 030=applied に更新される（`--only 030 --apply` は 030 だけを台帳登録する）。
 
 #### 001（ANN index 欠落の復旧）— ⚠ 単独 `--apply` は不可・012 と同一実行で完走させる
 
@@ -173,12 +182,14 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 - ⚠ **オーバーロード衝突（最重要）**: 本番は 012 適用済みで `search_knowledge` は **4 引数版**（`filter_source_type` 付き）。
   001 の末尾は **3 引数版** `search_knowledge` を `create or replace` するため、**001 だけを適用すると 3 引数版が増設され、
   4 引数版と共存 → PostgREST がオーバーロード解決に失敗**する（012 が消したはずの障害を復活させる）。
-  → **001 を適用したら、続けて 012 の関数修復
-  （`DROP FUNCTION IF EXISTS search_knowledge(vector(1024), int, float)` + 4 引数版 `create or replace`）を
-  同一実行内で必ず流し、最終状態を「4 引数版のみ」にする。** 012 は冪等（no-sentinel）なので再適用は安全。
-  - 注意: `scripts/migrate.ts --apply` は台帳登録済みの 012 を skip する（012 は pending ではない）ため、
-    001 だけ適用して終わると壊れた状態が残る。migrate.ts に任せきりにせず、001 適用直後に 012 の関数定義
-    （`src/db/migrations/012_fix_hybrid_search.sql` の該当ブロック）を手で再適用して 4 引数版へ収束させること。
+  → **001 を適用するなら、`--only 001,012` で 001→012 を同一実行内で番号順に流し、最終状態を「4 引数版のみ」に
+  収束させる。** 012 の SQL は `search_knowledge` の 3 引数版を DROP し 4 引数版を `create or replace` するため、
+  001 が増設した 3 引数版を打ち消して 4 引数版へ揃う。012 は冪等（no-sentinel）なので同伴適用は安全。
+  - ⚠ **台帳の実態（誤解しやすい点）**: 本番 `schema_migrations` に **012 は登録されていない**（012 は dry-run の
+    pending 7 件に含まれる）。したがって bare `scripts/migrate.ts --apply` は **012 を skip せず自動適用する**
+    （＝「012 は登録済みだから skip される」という理解は誤り）。ただし bare `--apply` は 001/012 以外の pending
+    （`024 / 025` 等）まで巻き込むため、**001 の復旧では `--only 001,012` を使って対象を 001→012 の 2 件に限定する**。
+    これにより「4 引数版のみ」への収束を、他 migration を巻き込まずに同一実行で達成できる。
 - ⚠ **populated table への ivfflat index**: 本番 `knowledge_chunks` は投入済み。ivfflat index の作成は
   テーブルをロックしうるため、**`CREATE INDEX CONCURRENTLY` 相当・オフピーク実施を推奨**。
   ただし `CREATE INDEX CONCURRENTLY` は **トランザクション内で実行不可**なので、index 再作成は単独ステップとし、

@@ -21,6 +21,9 @@ import {
   versionsToRegister,
   listMigrationFiles,
   INTROSPECTION,
+  parseOnlyTokens,
+  versionMatchesToken,
+  selectOnlyVersions,
   type ObjectSpec,
 } from "../../scripts/migrate";
 
@@ -240,6 +243,71 @@ it("INTROSPECTION に実在しない version を定義していない", () => {
   const versions = new Set(listMigrationFiles().map(versionOf));
   const extra = Object.keys(INTROSPECTION).filter((v) => !versions.has(v));
   assertEqual(extra.length, 0, `INTROSPECTION 余剰: ${extra.join(", ")}`);
+});
+
+console.log("\n--- --only 選択ロジック（pending の部分適用）---");
+
+// 本番の「migrate.ts dry-run が pending として表示する 7 件」（= 台帳未登録の全ファイル）を再現。
+// うち schema 実変更を伴う実 pending は 001/024/025/030、000/012/027 は no-sentinel/冪等設計で未登録が正常。
+const PROD_PENDING = [
+  "000_schema_migrations",
+  "001_fix_vector_dimension",
+  "012_fix_hybrid_search",
+  "024_broadcast_stats",
+  "025_dormant_reengagement_log",
+  "027_customer_linkage_cardinality",
+  "030_repair_006_unanswered_queries_columns",
+];
+
+it("parseOnlyTokens はカンマ区切り・空白を正規化する", () => {
+  assertArrayEqual(parseOnlyTokens(["001,012"]), ["001", "012"]);
+  assertArrayEqual(parseOnlyTokens(["030"]), ["030"]);
+  assertArrayEqual(parseOnlyTokens([" 001 , 012 "]), ["001", "012"]);
+  assertArrayEqual(parseOnlyTokens(["001", "012"]), ["001", "012"]); // 複数 --only
+  assertArrayEqual(parseOnlyTokens([""]), []); // 空は捨てる
+});
+
+it("versionMatchesToken はフル一致 / 番号一致 / 先頭一致で照合", () => {
+  const v = "030_repair_006_unanswered_queries_columns";
+  assert(versionMatchesToken(v, "030_repair_006_unanswered_queries_columns"), "full");
+  assert(versionMatchesToken(v, "030"), "prefix/number 030");
+  assert(versionMatchesToken(v, "30"), "number 30");
+  assert(!versionMatchesToken(v, "003"), "003 must not match 030");
+  assert(!versionMatchesToken(v, "0300"), "0300 must not match");
+});
+
+it("--only 030 は 030 のみを対象とし 001/024/025 を含まない（本番誤適用防止の中核）", () => {
+  const { selected, unmatched } = selectOnlyVersions(PROD_PENDING, parseOnlyTokens(["030"]));
+  assertArrayEqual(selected, ["030_repair_006_unanswered_queries_columns"], "selected");
+  assertArrayEqual(unmatched, [], "unmatched");
+  // 明示的に「意図せぬ本番適用」対象が含まれないことを検証
+  for (const v of ["001_fix_vector_dimension", "024_broadcast_stats", "025_dormant_reengagement_log"]) {
+    assert(!selected.includes(v), `${v} must NOT be selected by --only 030`);
+  }
+});
+
+it("--only 001,012 は 2 件のみを pending の番号順で対象にする", () => {
+  const { selected, unmatched } = selectOnlyVersions(PROD_PENDING, parseOnlyTokens(["001,012"]));
+  assertEqual(selected.length, 2, "count");
+  assertEqual(selected[0], "001_fix_vector_dimension", "order[0]");
+  assertEqual(selected[1], "012_fix_hybrid_search", "order[1]");
+  assertArrayEqual(unmatched, [], "unmatched");
+  // 024/025/030 は含まれない
+  for (const v of ["024_broadcast_stats", "025_dormant_reengagement_log", "030_repair_006_unanswered_queries_columns"]) {
+    assert(!selected.includes(v), `${v} must NOT be selected`);
+  }
+});
+
+it("--only は指定順に関わらず pending の番号順で返す", () => {
+  const { selected } = selectOnlyVersions(PROD_PENDING, parseOnlyTokens(["030,001"]));
+  assertEqual(selected[0], "001_fix_vector_dimension", "001 first (numeric order)");
+  assertEqual(selected[1], "030_repair_006_unanswered_queries_columns", "030 second");
+});
+
+it("pending に無い version 指定は unmatched（呼び出し側で中断）", () => {
+  const { selected, unmatched } = selectOnlyVersions(PROD_PENDING, parseOnlyTokens(["999", "030"]));
+  assertArrayEqual(selected, ["030_repair_006_unanswered_queries_columns"], "matched のみ選択");
+  assertArrayEqual(unmatched, ["999"], "999 は unmatched");
 });
 
 // ---------------------------------------------------------------------------

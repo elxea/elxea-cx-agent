@@ -5,9 +5,10 @@
  * ─ 何をするか ─
  *   1. schema_migrations 台帳（000_schema_migrations.sql）を bootstrap（IF NOT EXISTS）。
  *   2. 台帳の適用済み version 集合を読む。
- *   3. src/db/migrations/*.sql を「ファイル名昇順」（= 000,001,...,029 の番号順）に走査し、
+ *   3. src/db/migrations/*.sql を「ファイル名昇順」（= 000,001,...,030 の番号順）に走査し、
  *      未適用のものだけを 1 本ずつトランザクション内で適用し、直後に version を台帳へ記録する
  *      （apply と記録が同一 tx でアトミック。失敗時は当該 migration ごと巻き戻る）。
+ *      `--only <versions>`（カンマ区切り）で pending の一部だけに絞って適用できる（下記「使い方」）。
  *
  * ─ version の規約 ─
  *   ファイル名から拡張子 .sql を除いた文字列（例 "026_customer_linkage_source"）。026 の同番号衝突は
@@ -48,8 +49,15 @@
  *   npx tsx scripts/migrate.ts --baseline                      # baseline 検証 + 台帳登録（tx アトミック）
  *   SUPABASE_DB_PASSWORD=xxx npx tsx scripts/migrate.ts --apply
  *   npx tsx scripts/migrate.ts --apply --env staging
+ *   npx tsx scripts/migrate.ts --only 030 --dry-run            # pending のうち 030 だけの適用予定（非破壊）
+ *   SUPABASE_DB_PASSWORD=xxx npx tsx scripts/migrate.ts --only 030 --apply    # pending のうち 030 だけを適用
+ *   npx tsx scripts/migrate.ts --only 001,012 --apply          # 001→012 を同一実行で番号順に適用
  *
  *   ※ 引数無しは安全側に倒して dry-run 相当（案内を出して終了）。
+ *   ※ `--only <versions>`: カンマ区切りで pending の一部だけを対象に絞る（番号順に適用・それらだけ台帳登録）。
+ *      bare `--apply`（--only 無し）は **pending を全件適用する**。特定 version だけ当てたいときは必ず --only を付ける。
+ *      version は "030" / "30"（番号）でも "030_repair_006_unanswered_queries_columns"（フル）でも照合可。
+ *      --only で指定した version が pending に無い（既適用 or 不存在）場合は中断する。
  */
 
 import dotenv from "dotenv";
@@ -69,6 +77,8 @@ interface Cli {
   dryRun: boolean;
   baseline: boolean;
   env: TargetEnv;
+  /** --only の指定トークン（空 = 絞り込み無し = pending 全件が対象）。 */
+  only: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +353,55 @@ export function versionsToRegister(plan: BaselineDecision[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// --only（pending の部分適用）選択ロジック（DB 非依存・ユニットテスト対象）
+// ---------------------------------------------------------------------------
+
+/** "--only 001,012" のような生文字列群を正規化トークン配列にする（空要素は捨てる）。 */
+export function parseOnlyTokens(raws: string[]): string[] {
+  return raws
+    .flatMap((raw) => raw.split(","))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * version 文字列が --only トークンに一致するか（純粋）。
+ *   - フル一致（"030_repair_006_unanswered_queries_columns"）
+ *   - 番号一致（"030" / "30" → versionNumber が等しい）
+ *   - 先頭一致（"030" → "030_repair_..." のような prefix）
+ */
+export function versionMatchesToken(version: string, token: string): boolean {
+  if (version === token) return true;
+  if (/^\d+$/.test(token)) {
+    const n = parseInt(token, 10);
+    if (!Number.isNaN(n) && versionNumber(version) === n) return true;
+  }
+  if (version.startsWith(token)) return true;
+  return false;
+}
+
+/**
+ * pending（未適用 version 一覧）から --only 指定に一致する version だけを、pending の順序（= 番号順）で返す（純粋）。
+ * どの pending にも一致しない token は unmatched に入れる（呼び出し側で中断させる）。
+ * 「指定した version だけを対象とし、他の pending は対象にしない」ことを保証する中核ロジック。
+ */
+export function selectOnlyVersions(
+  pending: string[],
+  tokens: string[],
+): { selected: string[]; unmatched: string[] } {
+  const matched = new Set<string>();
+  const unmatched: string[] = [];
+  for (const token of tokens) {
+    const hits = pending.filter((v) => versionMatchesToken(v, token));
+    if (hits.length === 0) unmatched.push(token);
+    else for (const h of hits) matched.add(h);
+  }
+  // pending の並び（ファイル名昇順 = 番号順）を維持したまま抽出する。
+  const selected = pending.filter((v) => matched.has(v));
+  return { selected, unmatched };
+}
+
+// ---------------------------------------------------------------------------
 // CLI パース
 // ---------------------------------------------------------------------------
 
@@ -359,7 +418,25 @@ export function parseCli(argv: string[]): Cli {
     }
     return raw as TargetEnv;
   })();
-  return { apply: has("--apply"), dryRun: has("--dry-run"), baseline: has("--baseline"), env: envArg };
+  // --only <versions>（カンマ区切り可・"--only=030" / "--only 030" の両形式）。複数指定も許容し全て集める。
+  const onlyRaws: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--only") {
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        onlyRaws.push(next);
+        i++;
+      } else {
+        console.error("[FATAL] --only の後に version 指定がありません（例: --only 030 / --only 001,012）。中断。");
+        process.exit(1);
+      }
+    } else if (a.startsWith("--only=")) {
+      onlyRaws.push(a.slice("--only=".length));
+    }
+  }
+  const only = parseOnlyTokens(onlyRaws);
+  return { apply: has("--apply"), dryRun: has("--dry-run"), baseline: has("--baseline"), env: envArg, only };
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +585,26 @@ function printBaselineReport(plan: BaselineDecision[], willWrite: boolean): void
   console.log("=========================================================\n");
 }
 
+/**
+ * pending（ファイル一覧）に --only を適用して対象ファイルだけに絞る。
+ * どの pending にも一致しない token があれば中断する（誤指定を黙って無視しない）。
+ * only 空ならそのまま返す（= pending 全件が対象）。
+ */
+function applyOnlyFilter(pendingFiles: string[], only: string[]): string[] {
+  if (only.length === 0) return pendingFiles;
+  const pendingVersions = pendingFiles.map(versionOf);
+  const { selected, unmatched } = selectOnlyVersions(pendingVersions, only);
+  if (unmatched.length > 0) {
+    console.error(
+      `[FATAL] --only の指定 [${unmatched.join(", ")}] は対象集合に一致しません（既適用 or 不存在）。` +
+        `対象候補: ${pendingVersions.join(", ") || "(なし)"}。中断。`,
+    );
+    process.exit(1);
+  }
+  const sel = new Set(selected);
+  return pendingFiles.filter((f) => sel.has(versionOf(f)));
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -527,6 +624,15 @@ async function main() {
   console.log(`migrations dir: ${MIGRATIONS_DIR}（${files.length} files）`);
 
   const { url, password } = resolveConn(cli.env);
+
+  // --only は pending の部分適用専用（baseline は台帳取り込みで別軸のため併用不可）。
+  if (cli.only.length > 0 && cli.baseline) {
+    console.error("[FATAL] --only は --baseline と併用できません（--only は pending の部分適用専用）。中断。");
+    process.exit(1);
+  }
+  if (cli.only.length > 0) {
+    console.log(`[--only] 対象を pending の [${cli.only.join(", ")}] に絞ります（他の pending は適用しません）。`);
+  }
 
   // ─ baseline（検証 + 登録。--dry-run 併用で検証のみ）─
   if (cli.baseline) {
@@ -589,8 +695,15 @@ async function main() {
       );
     }
     if (!url || !password) {
-      console.log("\n[dry-run] 接続情報が未設定のため適用済み判定はできません。全 migration を番号順に列挙します:");
-      for (const f of files) console.log(`   - ${versionOf(f)}`);
+      const displayFiles = applyOnlyFilter(files, cli.only);
+      if (cli.only.length > 0) {
+        console.log(
+          `\n[dry-run] 接続情報が未設定（適用済み判定は不可）。--only [${cli.only.join(", ")}] で指定した version の適用予定を番号順に列挙します（書き込みなし）:`,
+        );
+      } else {
+        console.log("\n[dry-run] 接続情報が未設定のため適用済み判定はできません。全 migration を番号順に列挙します:");
+      }
+      for (const f of displayFiles) console.log(`   - ${versionOf(f)}`);
       console.log(
         "\n   （SUPABASE_URL[_STAGING] と SUPABASE_DB_PASSWORD[_STAGING] を設定すると、" +
           "適用済みを除いた「未適用のみ」を表示します。）",
@@ -604,12 +717,16 @@ async function main() {
     try {
       const applied = await fetchAppliedReadOnly(client);
       const pending = files.filter((f) => !applied.has(versionOf(f)));
-      console.log(`\n[dry-run] 適用済み: ${applied.size} 件 / 未適用: ${pending.length} 件`);
-      if (pending.length === 0) {
-        console.log("   → 未適用なし（すべて適用済み）。");
+      const target = applyOnlyFilter(pending, cli.only);
+      console.log(
+        `\n[dry-run] 適用済み: ${applied.size} 件 / 未適用: ${pending.length} 件` +
+          (cli.only.length > 0 ? ` / --only 対象: ${target.length} 件` : ""),
+      );
+      if (target.length === 0) {
+        console.log(cli.only.length > 0 ? "   → --only 対象の未適用なし。" : "   → 未適用なし（すべて適用済み）。");
       } else {
-        console.log("   適用予定（この順で適用されます）:");
-        for (const f of pending) console.log(`   - ${versionOf(f)}`);
+        console.log(cli.only.length > 0 ? "   適用予定（--only 指定分・この順で適用されます）:" : "   適用予定（この順で適用されます）:");
+        for (const f of target) console.log(`   - ${versionOf(f)}`);
         if (applied.size === 0) {
           console.log(
             "\n   ⚠ 台帳が空です。既存 DB なら先に baseline を実行してください（非冪等 migration の二重適用を防ぐ）:\n" +
@@ -651,8 +768,21 @@ async function main() {
       return;
     }
 
-    console.log(`未適用 ${pending.length} 件を番号順に適用します...`);
-    for (const file of pending) {
+    // --only 指定があれば pending をその version だけに絞る（他の pending は適用しない）。
+    const target = applyOnlyFilter(pending, cli.only);
+    if (target.length === 0) {
+      console.log("[--only] 対象の未適用なし。何もしません。");
+      return;
+    }
+    if (cli.only.length > 0) {
+      console.log(
+        `未適用 ${pending.length} 件のうち --only 対象 ${target.length} 件` +
+          `（${target.map(versionOf).join(", ")}）だけを番号順に適用します...`,
+      );
+    } else {
+      console.log(`未適用 ${pending.length} 件を番号順に適用します...`);
+    }
+    for (const file of target) {
       const version = versionOf(file);
       const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
       // apply と台帳記録を同一トランザクションでアトミックに行う（失敗時は当該 migration が丸ごと巻き戻る）。
@@ -674,7 +804,7 @@ async function main() {
         );
       }
     }
-    console.log(`Done. ${pending.length} 件を適用し schema_migrations に記録しました（${cli.env}）。`);
+    console.log(`Done. ${target.length} 件を適用し schema_migrations に記録しました（${cli.env}）。`);
   } finally {
     await client.end();
   }
