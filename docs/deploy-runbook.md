@@ -52,7 +52,7 @@ LINE Developers Console で **テストチャネル（@426vlcyb）** の Messagi
 Webhook URL を staging の受け口に向ける（**本番チャネルの Webhook は触らない**）:
 
 ```
-https://elxea-agent-staging.setaka1103.workers.dev/webhook/line
+https://elxea-agent-staging.setaka-on.workers.dev/webhook/line
 ```
 
 「Webhook の利用」を ON にし、Verify で 200 が返ることを確認する。
@@ -91,10 +91,10 @@ pnpm deploy:staging
 npx tsx scripts/verify-staging.ts
 
 # 3. Run E2E tests against staging
-pnpm test:e2e:web -- --target=https://elxea-agent-staging.setaka1103.workers.dev
+pnpm test:e2e:web -- --target=https://elxea-agent-staging.setaka-on.workers.dev
 
 # 4. Run LINE E2E tests (requires LINE_CHANNEL_SECRET)
-STAGING_WORKER_URL=https://elxea-agent-staging.setaka1103.workers.dev pnpm test:e2e
+STAGING_WORKER_URL=https://elxea-agent-staging.setaka-on.workers.dev pnpm test:e2e
 ```
 
 ## Production Deploy (Tier 2: Setaka Approval Required)

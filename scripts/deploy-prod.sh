@@ -21,7 +21,8 @@
 # ⚠ LINE 設定について（表現の是正）: 「LINE 設定＝全部手動」ではない。OA Manager 固有設定（応答モード・
 #   あいさつ・リッチメニュー画像）のみ手動で、webhook URL の設定・到達性は LINE Messaging API で検証できる（step4）。
 #
-# ⚠ このスクリプトは source されただけでは何も実行しない（main を末尾で 1 回呼ぶだけ）。
+# ⚠ このスクリプトは末尾で main "$@" を無条件に呼ぶ（source ガードは無い＝source でも main が走る）。
+#   誤爆防止は「source 無害化」ではなく preflight の CONFIRM=="DEPLOY-PROD" 検証と各 HARD ASSERT が担う。
 #   本番反映は必ず「明示実行 + CONFIRM=DEPLOY-PROD」が揃ったときだけ進む。
 #
 # 使い方（ローカル）:
