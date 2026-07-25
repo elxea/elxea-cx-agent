@@ -20,5 +20,5 @@
     "baseUrl": "."
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["node_modules", "scripts/run-migration-*.ts"]
+  "exclude": ["node_modules", "scripts/run-migration-*.ts", "scripts/migrate.ts"]
 }

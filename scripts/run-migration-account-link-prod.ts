@@ -1,5 +1,5 @@
 /**
- * REMOVED 2026-07-25（feat/deploy-prod-full）— 旧 ad-hoc runner（R1 復旧（018））。
+ * REMOVED 2026-07-25（feat/deploy-prod-full）— 旧 ad-hoc runner（Account Link cutover（026/029/027/028））。
  *
  * 【なぜ hard-stop スタブにしたか（削除ではなく）】
  *   この runner は schema_migrations 台帳に **書かない**ため、実行すると台帳と実 DB が乖離する

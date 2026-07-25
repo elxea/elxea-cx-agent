@@ -99,11 +99,55 @@ STAGING_WORKER_URL=https://elxea-agent-staging.setaka1103.workers.dev pnpm test:
 
 ## Production Deploy (Tier 2: Setaka Approval Required)
 
+### 一度きりの必須設定（本番反映の前提・未設定だと承認ゲートが無効）
+
+以下は**コードではなく GitHub 側の設定作業**。`.github/workflows/deploy-prod.yml` は
+`environment: production` の Required reviewers を前提にした二重ゲート（confirm 入力 + GitHub 承認）だが、
+**この設定を入れないと承認ゲートは実質無効**（誰でも `workflow_dispatch` で本番反映できてしまう）。初回に必ず実施する:
+
+- [ ] **GitHub Environment `production` を作成**（Settings → Environments → New environment）。
+- [ ] **Required reviewers に Setaka を追加**（この環境を通す job は Setaka の承認なしに開始しない）。
+- [ ] **Environment Secrets を 3 種投入**（値は GitHub 側にのみ保持・リポジトリには書かない）:
+      `CLOUDFLARE_API_TOKEN` / `SUPABASE_URL`（本番 ref = `bquqzrbzdzjegdovxalu`）/ `SUPABASE_DB_PASSWORD`。
+- [ ] （Worker secret は別系統）本番 Worker の secret は `wrangler secret put` で人手投入する。deploy-prod.sh の
+      preflight は**名前の存在だけ**を `wrangler secret list` で確認する（値は検証しない・投入は人手のまま）。
+
+### migration の初回（既存 DB の台帳取り込み = baseline・要 Setaka 承認）
+
+本番/staging は ad-hoc runner で**非連続**に適用されてきたため、`schema_migrations` 台帳が空/部分的。
+`--apply` の前に **introspection baseline** を通して「実在が確認できた version のみ」を台帳へ取り込む。
+high-water-mark（N 以下は全部適用済み）は使わない。
+
+```bash
+# 1. 検証レポートのみ（非破壊・この出力を Setaka 承認に回す）
+npx tsx scripts/migrate.ts --baseline --dry-run              # prod
+npx tsx scripts/migrate.ts --baseline --dry-run --env staging
+# 2. 承認後に台帳登録（単一 tx でアトミック）
+npx tsx scripts/migrate.ts --baseline
+# 3. 以降の未適用のみ適用
+npx tsx scripts/migrate.ts --dry-run   # 適用予定の確認
+npx tsx scripts/migrate.ts --apply     # 本適用（prod ref を HARD ASSERT）
+```
+
+> ⚠ 旧 ad-hoc runner（`scripts/run-migration-*.ts`）は台帳外適用の drift 源のため hard-stop スタブ化済み。
+> migration は必ず `scripts/migrate.ts`（台帳ベース）経由で行う。
+
 ### Deploy Order
 
-1. **Supabase migrations** (if any pending)
-2. **elxea-cx-agent**: `pnpm deploy`
-3. **elxea-web-app**: Vercel production deploy (merge to main)
+1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
+2. **elxea-cx-agent**: `pnpm deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflow が
+   preflight → migration → deploy → health(+webhook 検証) → version_skew_report を一括実行）
+3. **elxea-web-app**: Vercel production deploy（merge to main の Git 連携自動デプロイ・**別レーン**）
+
+### web-app は別レーン（版ずれは束ねず可視化する）
+
+- cx-agent の本番反映（deploy-prod）は **web-app を発火しない**（Vercel Deploy Hook を足さない）。
+  web-app は従来どおり main push の Git 連携で自動デプロイされる。
+- 代わりに deploy-prod は**反映した cx-agent の git SHA を出力**する（`DEPLOYED_CX_AGENT_SHA=...`）。
+  web-app 側 SHA（Vercel の `VERCEL_GIT_COMMIT_SHA` 等）を `WEB_APP_SHA=<sha>` で渡すと簡易 compare が出る
+  （版ずれは消せないが**検知可能**にする）。
+- **API 契約変更を跨ぐときは後方互換 1 リリースを挟む**（cx-agent の API 変更を先行リリースし、web-app が
+  旧・新どちらでも動く 1 リリースを経てから web-app を切り替える）。両レーンの同時破壊的変更は避ける。
 
 ### Deploy Steps
 

@@ -17,6 +17,12 @@ pnpm test:e2e:web:validation
 
 ## 手動確認項目
 
+> LINE 設定の切り分け（表現の是正）: 「LINE 設定＝全部手動」ではない。**OA Manager 固有設定のみ手動**
+> （応答モード・あいさつメッセージ・リッチメニュー画像）で、**webhook URL の設定・到達性は Messaging API で
+> 検証できる**。本番フル反映（`scripts/deploy-prod.sh`）は health check 段で
+> `GET /v2/bot/channel/webhook/endpoint`（active 判定）＋ `POST /v2/bot/channel/webhook/test`（到達性）を
+> read-only で自動検証する（ユーザーへは何も送信しない）。以下の手動項目は OA Manager 固有・実機挙動の確認。
+
 ### LINE チャネル
 
 - [ ] LINE で質問を送信 -> 応答が返る
