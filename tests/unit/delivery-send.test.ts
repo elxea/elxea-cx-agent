@@ -248,7 +248,7 @@ describe("hasIndependentApprover（承認者!=著者）", () => {
 // ---------------------------------------------------------------------------
 // 自己承認緩和ポリシー（テスト環境限定・prod では緩和不可）
 // ---------------------------------------------------------------------------
-describe("selfApprovalRelaxed（prod では絶対に緩まない）", () => {
+describe("selfApprovalRelaxed（prod は専用フラグでのみ緩和・既定は fail-closed）", () => {
   it("test + フラグ true → 緩和 true", () => {
     assertTrue(
       selfApprovalRelaxed({
@@ -258,13 +258,35 @@ describe("selfApprovalRelaxed（prod では絶対に緩まない）", () => {
       "test relaxed",
     );
   });
-  it("prod + フラグ true → 緩和されない（false・最重要ガード）", () => {
+  it("prod + TEST フラグ true → 緩和されない（TEST フラグは prod に効かない）", () => {
     assertFalse(
       selfApprovalRelaxed({
         DELIVERY_TARGET_ENV: "prod",
         DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
       }),
-      "prod never relaxes",
+      "prod not relaxed by TEST flag",
+    );
+  });
+  it("prod + PROD フラグ true → 緩和 true（Tier2 例外ゲート）", () => {
+    assertTrue(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "prod",
+        DELIVERY_ALLOW_SELF_APPROVAL_PROD: "true",
+      }),
+      "prod relaxed only by explicit PROD flag",
+    );
+  });
+  it("prod + PROD フラグ未設定/非true → 緩和されない（既定 fail-closed）", () => {
+    assertFalse(
+      selfApprovalRelaxed({ DELIVERY_TARGET_ENV: "prod" }),
+      "prod no flag → fail-closed",
+    );
+    assertFalse(
+      selfApprovalRelaxed({
+        DELIVERY_TARGET_ENV: "prod",
+        DELIVERY_ALLOW_SELF_APPROVAL_PROD: "1",
+      }),
+      "prod flag must be exactly 'true'",
     );
   });
   it("test + フラグ未設定/非true → 緩和されない", () => {

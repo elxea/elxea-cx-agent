@@ -73,6 +73,13 @@ export type Env = {
   /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
   DELIVERY_SEND_ENABLED?: string;
   /**
+   * prod 限定の自己承認緩和フラグ（Tier2 一時例外・Setaka 明示承認 2026-07-25）。
+   * "true" のときだけ prod でも「承認者!=著者」の独立性を免除する（自己承認を許容）。
+   * 未設定/非 "true" は従来どおり fail-closed（独立承認者必須）に戻る＝可逆。
+   * delivery-approval.ts の selfApprovalRelaxed が唯一の参照点。
+   */
+  DELIVERY_ALLOW_SELF_APPROVAL_PROD?: string;
+  /**
    * 休眠一通（ブロック3-B）の実送信許可フラグ。"true" のときのみ実送信。
    * 既定 未設定=false（dry-run: 候補と本文を台帳へ記録するだけで LINE には送らない）。
    * DELIVERY_SEND_ENABLED とは独立（休眠機能だけを別ゲートで制御する）。

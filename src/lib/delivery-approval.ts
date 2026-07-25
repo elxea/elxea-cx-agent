@@ -30,20 +30,28 @@ export function hasIndependentApprover(
 }
 
 /**
- * テスト環境限定の自己承認緩和ポリシー（純粋）。
+ * 自己承認緩和ポリシー（純粋）。既定は fail-closed（独立承認者を要求）。
  *
- * DELIVERY_TARGET_ENV=test かつ DELIVERY_ALLOW_SELF_APPROVAL_TEST="true" のときだけ
- * 「承認者!=著者」の独立性チェックを免除する（テスト検証用）。
+ * test（DELIVERY_TARGET_ENV=test / 未設定・不正）:
+ *   DELIVERY_ALLOW_SELF_APPROVAL_TEST="true" のときだけ「承認者!=著者」の独立性を免除する。
  *
- * ⚠ prod（DELIVERY_TARGET_ENV=prod）では **フラグの値に関わらず常に false**
- *    （緩和不可・fail-closed）。targetEnv の解釈は parseTargetEnv と同一
- *    （未設定・不正値は "test"）。
+ * prod（DELIVERY_TARGET_ENV=prod）:
+ *   既定は **常に false**（緩和不可・fail-closed）。
+ *   ただし明示フラグ DELIVERY_ALLOW_SELF_APPROVAL_PROD="true" のときだけ独立性を免除する。
+ *   これは「独立した承認者を人的に置けない一時状況」向けの Tier2 例外ゲート
+ *   （Setaka 明示承認・2026-07-25 導入）。フラグ未設定/非 "true" は従来どおり fail-closed に戻り、
+ *   チェック本体は削除していない（=フラグを外せば即座に独立承認者必須へ復帰・可逆）。
+ *
+ * targetEnv の解釈は parseTargetEnv と同一（未設定・不正値は "test"）。
  */
 export function selfApprovalRelaxed(env: {
   DELIVERY_TARGET_ENV?: string;
   DELIVERY_ALLOW_SELF_APPROVAL_TEST?: string;
+  DELIVERY_ALLOW_SELF_APPROVAL_PROD?: string;
 }): boolean {
-  if (parseTargetEnv(env.DELIVERY_TARGET_ENV) === "prod") return false;
+  if (parseTargetEnv(env.DELIVERY_TARGET_ENV) === "prod") {
+    return env.DELIVERY_ALLOW_SELF_APPROVAL_PROD === "true";
+  }
   return env.DELIVERY_ALLOW_SELF_APPROVAL_TEST === "true";
 }
 
