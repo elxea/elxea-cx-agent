@@ -12,9 +12,22 @@
 #   - 承認 pin / コンテンツハッシュ / 通数台帳 / 無料枠ガード等の多層安全弁は維持されますが、
 #     「送信そのものを止める最後のスイッチ」はここで外れます。
 #
-# ロールバック（即時に dry-run へ戻す・実送信を再封鎖する）:
-#   pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED
-#   （secret を消すと DELIVERY_SEND_ENABLED !== "true" となり、全経路 dry-run に復帰）
+# ロールバック（即時に dry-run へ戻す・実送信を再封鎖する）— 次の 2 通りはどちらも等価に OFF:
+#   (a) pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED
+#       （secret を消すと未設定 = DELIVERY_SEND_ENABLED !== "true" となり全経路 dry-run に復帰）
+#   (b) printf 'false' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED
+#       （値を "false" にしても DELIVERY_SEND_ENABLED !== "true" なので同じく dry-run に復帰）
+#   ※ OFF の条件は「secret が無いこと」ではなく「値が文字列 "true" でないこと」（完全一致判定）。
+#      GA 前の本番の既定状態は (b) 側、すなわち「値 "false" で secret が存在する」状態である。
+#
+# ⚠ 本スクリプト末尾の read-back は secret 「名」の存在だけを確認する（Cloudflare は値を返さない）。
+#   したがって **read-back の [OK] は「値が "true" になった」ことの証明ではない**。
+#   実際に ON/OFF どちらであるかは cron 実行ログで判定する:
+#     pnpm exec wrangler tail --format pretty
+#       -> [delivery] env=prod(@307tzhkw) sendEnabled=true   ... ON（実送信する）
+#       -> [delivery] env=prod(@307tzhkw) sendEnabled=false  ... OFF（dry-run）
+#   （検証環境 staging は「未設定 = OFF」運用のため `secret list` で確認できるが、
+#     本番はこの方法が使えない。詳細は docs/deploy-runbook.md「LINE 配信の運用ゲート」節。）
 #
 # 前提:
 #   - カレントディレクトリが elxea-cx-agent リポジトリ直下（wrangler.toml name=elxea-agent）。
