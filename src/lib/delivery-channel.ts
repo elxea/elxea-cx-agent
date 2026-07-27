@@ -1,7 +1,8 @@
 /**
  * 2 環境（本番 / テスト）の LINE チャネル切替（設計 確定要件 1）。
  *
- * 本番 OA @307tzhkw（友だち 38） / テスト OA @426vlcyb（友だち 4）。
+ * 本番 OA @307tzhkw（友だち約 48 人・LINE Insight targetedReaches 実測 2026-07-27／変動する）
+ * / テスト OA @426vlcyb（友だち数名）。
  * チャネルトークン・想定友だち数を prod/test で切り替える。secret 名を分ける。
  *
  * fail-closed 方針:
