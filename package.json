@@ -32,6 +32,7 @@
     "prober": "npx tsx scripts/knowledge-prober.ts",
     "regression": "npx tsx scripts/knowledge-regression.ts",
     "test:staging-smoke": "npx tsx tests/staging/smoke.test.ts",
+    "test:staging-webhook-contract": "npx tsx tests/staging/webhook-contract.test.ts",
     "test:hermetic": "vitest run"
   },
   "dependencies": {
