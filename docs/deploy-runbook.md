@@ -16,7 +16,9 @@ staging（`elxea-agent-staging`）を「テスト OA（@426vlcyb）」に載せ�
 > - `wrangler.toml [env.staging.vars]` に `DELIVERY_TARGET_ENV = "test"` を固定済み。
 >   staging は常にテスト OA を対象にする（`src/lib/delivery-channel.ts` が
 >   `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択）。
-> - `DELIVERY_SEND_ENABLED` は **未設定のまま**（= dry-run）。実送信は GA 時にのみ ON にする。
+> - staging の `DELIVERY_SEND_ENABLED` は **未設定のまま**（= dry-run）。実送信は GA 時にのみ ON にする。
+>   （**本番は事情が違う**: 本番は値 `"false"` で secret が存在する。詳細は「LINE 配信の運用ゲート」節の
+>   「本番の ON/OFF は `wrangler secret list` の有無では判定できない」を参照）
 
 ### 1. secret を staging に投入（値はコミットしない）
 
@@ -271,11 +273,44 @@ curl -s https://elxea-agent.elxea.workers.dev/ | jq .
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
-| 本番 `DELIVERY_SEND_ENABLED` | **OFF**（実送信なし・dry-run） | `delivery-orchestrator.ts` が `sendEnabled=false` で step(g) 前に非破壊 early-return |
+| 本番 `DELIVERY_SEND_ENABLED` | **OFF**（実送信なし・dry-run）。ただし **secret 自体は「値 `"false"` で存在」する** | `delivery-orchestrator.ts` が `sendEnabled=false` で step(g) 前に非破壊 early-return。値の固定根拠は `wrangler.toml` 冒頭コメント（GA まで `"false"` 固定） |
 | prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
+
+#### ⚠ 本番の ON/OFF は `wrangler secret list` の有無では判定できない（最重要・staging と手順が違う）
+
+**事実**: 本番 Worker（`elxea-agent`）の secret 一覧には `DELIVERY_SEND_ENABLED` が **存在する**。
+値は `"false"` に固定してある（`wrangler.toml` 冒頭コメントが SoT・GA まで変えない）ため、機能的には OFF である。
+**secret が存在すること＝ON ではない。** 送信ゲートは `sendEnabled = env.DELIVERY_SEND_ENABLED === "true"` の
+**文字列完全一致**であり（`src/lib/delivery-runtime.ts` / `tests/unit/golive-broadcast-dryrun.test.ts`）、
+ON になるのは値が文字列 `"true"` のときだけ。`"false"` / 空 / 未設定はすべて OFF。
+
+したがって、**本番で `pnpm exec wrangler secret list | grep DELIVERY_SEND_ENABLED` がヒットしても、それは ON の証拠にならない**
+（secret の値は API で読み出せないので、名前の有無からは何も判定できない）。
+
+**本番 ON/OFF の正しい判定方法** = cron 実行ログの `sendEnabled=` を読む:
+
+```bash
+# 本番 Worker のログを追う（--env を付けない = 本番 elxea-agent）。読み取り専用。
+pnpm exec wrangler tail --format pretty
+# 15 分ごとの cron tick で次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
+#   [delivery] env=prod(@307tzhkw) sendEnabled=false month=... scanned=... processed=... reaper=...
+# sendEnabled=false → OFF（実送信なし）/ sendEnabled=true → ON（実送信する）
+```
+
+出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] env=... sendEnabled=...")`、
+ラベル `prod(@307tzhkw)` / `test(@426vlcyb)` は `src/lib/delivery-channel.ts` が組み立てる。
+
+> **staging とは確認方法が違う（混同禁止）**: staging（`elxea-agent-staging`）は「**未設定＝OFF**」で運用しており、
+> 後述のテスト配信手順では `secret list --env staging | grep DELIVERY_SEND_ENABLED` が **出ないのが正**。
+> この「出ないのが正」は **staging 限定のローカル規約**であって、**本番には当てはまらない**
+> （本番は値 `"false"` で存在するのが正常状態）。本番に staging の確認法を当てると ON と誤読する。
+
+> **なぜ secret を消して「未設定」に揃えないか**: 現状の値 `"false"` で機能的に OFF は成立しており、
+> 本番 secret を触ること自体が事故リスク（誤削除・誤投入）を生む。よって **実状態は変えず、表記側を実態に合わせる**方針を採る
+> （2026-07-27 判断）。`DELIVERY_SEND_ENABLED` の本番 secret を GA 前に put / delete しない。
 
 ### ⚠ 禁止事項: 本番 Worker に `NOTION_DELIVERY_DB_ID` を設定しない
 
@@ -321,9 +356,16 @@ curl -s https://elxea-agent.elxea.workers.dev/ | jq .
 # ON（本番の実送信を有効化。確認フラグ必須・deploy はしない）
 bash scripts/go-live-enable-send.sh --confirm-i-really-want-to-send-real-line
 
-# OFF（即座に dry-run 復帰・実送信を再封鎖）
-pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED
+# OFF（即座に dry-run 復帰・実送信を再封鎖）— 次の 2 通りはどちらも等価に OFF
+pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED                 # (a) secret ごと削除（未設定=OFF）
+printf 'false' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED   # (b) 値を "false" にする（GA 前の既定状態）
 ```
+
+**OFF の判定は「secret の有無」ではなく「値が `"true"` でないこと」**（`=== "true"` の完全一致）。
+(a) と (b) は機能的に同じ OFF であり、**GA 前の本番の既定状態は (b)**（値 `"false"` で存在）。
+実際に OFF へ戻ったことは `pnpm exec wrangler tail` の
+`[delivery] env=prod(@307tzhkw) sendEnabled=false` で確認する
+（`secret list` では判定できない — 前掲「本番の ON/OFF は `wrangler secret list` の有無では判定できない」節）。
 
 ON 後は **最初の1本を実機受信で確認**してから後続を承認する。
 
@@ -348,6 +390,11 @@ ON 後は **最初の1本を実機受信で確認**してから後続を承認�
    pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging
    pnpm exec wrangler secret list --env staging | grep DELIVERY_SEND_ENABLED   # 出ないのが正
    ```
+
+   > ⚠ **この「出ないのが正」は staging 限定**（staging は「未設定＝OFF」で運用しているため）。
+   > **本番に同じ確認法を当てない** — 本番は値 `"false"` で secret が存在するのが正常状態であり、
+   > `secret list` にヒットしても ON ではない。本番の判定は cron ログの
+   > `[delivery] env=prod(@307tzhkw) sendEnabled=false`（前掲節）で行う。
 
 ### staging に必要な設定（テスト配信の前提）
 
@@ -382,7 +429,7 @@ pnpm exec wrangler secret list --env staging
 | 目的 | 操作 | 効果 |
 |---|---|---|
 | 特定1件を止める | Notion で Status を **Approved → Draft** | 予定時刻前なら送信対象から外れる。時刻到来後・cron 実行中は間に合わない可能性あり |
-| 本番の配信を全部止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED` | 以降の全経路が dry-run（非破壊プレビュー）へ復帰。Approved 行は滞留する（再 ON 時はステップ0 を再実施） |
+| 本番の配信を全部止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put DELIVERY_SEND_ENABLED`） | 以降の全経路が dry-run（非破壊プレビュー）へ復帰。**削除と `"false"` 投入は等価**（OFF 判定は「値が `"true"` でない」）。Approved 行は滞留する（再 ON 時はステップ0 を再実施）。復帰確認は `wrangler tail` の `sendEnabled=false` |
 | staging の配信を止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging` | 検証環境のみ停止 |
 | 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
