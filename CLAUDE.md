@@ -51,26 +51,11 @@ Cron (*/15) → delivery-orchestrator → Notion「配信コンテンツ」DB �
 実装は `src/lib/delivery-*.ts`（orchestrator / repository / approval / audience / channel / runtime / time）、
 Cron トリガー `*/15 * * * *` が承認済み行を拾って送信する。
 
-**ドキュメントの正本（この節には詳細を書かない・二重管理を避ける）**:
+**正本 2 点（この節には詳細も現在値も書かない・二重管理を避ける。エージェント側の入口は `line-delivery-ops` skill = `~/github/elxea/agents/_shared/skills/line-delivery-ops/SKILL.md`）**:
+- 運用者向け手順: `docs/line-delivery-guide.md`（運用者が読む正本は Notion 版 <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>。**配信コードを変えたら両方を同時に直す**）
+- エンジニア向けコマンドの正本: `docs/deploy-runbook.md`「**LINE 配信の運用ゲート**」節 — 送信スイッチ・自己承認フラグ・配信 DB の env 分離について、**現在の値と判定方法はこの節が唯一の正本**（他所に書き写さない）
 
-- 運用者向け手順: `docs/line-delivery-guide.md`（運用者が読む正本は Notion 版
-  <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>。**配信コードを変えたら両方を同時に直す**）
-- エンジニア向けコマンドの正本: `docs/deploy-runbook.md` の「**LINE 配信の運用ゲート**」節
-  （送信スイッチ操作 / env 分離 / テスト配信手順）
-
-**環境構成（取り違え = 実顧客への誤配信）**:
-
-| | Worker | LINE OA | 配信 DB |
-|---|---|---|---|
-| 本番 | `elxea-agent` | `@307tzhkw`（実顧客） | 既定の本番配信 DB |
-| 検証 | `elxea-agent-staging` | `@426vlcyb`（テスト専用） | テスト用 DB（`NOTION_DELIVERY_DB_ID` 設定必須） |
-
-**安全弁の現状（弱めない・勝手に変えない）**:
-
-- 本番の実送信スイッチ `DELIVERY_SEND_ENABLED` は **OFF**。承認しても step(g) 前に非破壊 early-return し実送信は起きない
-- prod 自己承認（単独運用モード）`DELIVERY_ALLOW_SELF_APPROVAL_PROD` は **有効**。ただし**承認者が空なら常に拒否**
-- 配信 DB の env 分離は **fail-closed**（`resolveDeliveryDbId()`）。**本番 Worker に `NOTION_DELIVERY_DB_ID` を設定してはならない**（テスト用 DB の行が実顧客へ飛ぶ経路が生まれる）
-- スイッチ ON/OFF・本番配信は **Tier 2（Setaka 承認）**。検証時のコマンドは **`--env staging` 必須**（付け忘れは本番操作）
+**env 取り違え = 実顧客への誤配信。** 本番と検証は Worker / LINE OA / 配信 DB がすべて別。検証時のコマンドは **`--env staging` 必須**（付け忘れは本番操作）。**本番 Worker に `NOTION_DELIVERY_DB_ID` を設定してはならない**（テスト用 DB の行が実顧客へ飛ぶ経路が生まれる。env 分離は `resolveDeliveryDbId()` で fail-closed）。安全弁は勝手に弱めない。送信スイッチの ON/OFF・本番配信は **Tier 2（Setaka 承認）**。
 
 ## 制約
 
