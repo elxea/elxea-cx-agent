@@ -10,3 +10,5 @@ dist/
 .DS_Store
 .playwright-mcp/
 tests/load/results.json
+# 調査用の使い捨てスクリプト（prod 接続を含むことがある。リポジトリに残さない）
+_*_tmp.ts

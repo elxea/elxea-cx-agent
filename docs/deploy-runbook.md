@@ -76,7 +76,11 @@ pnpm setup-rich-menu
 
 テスト OA（@426vlcyb）を友だち追加し、リッチメニュー表示・各ボタンの挙動・
 CX エージェントとの会話を実機確認する。この段階は `DELIVERY_SEND_ENABLED` 未設定のため
-配信（broadcast）は dry-run のまま。実送信検証は GA 判断後に別途行う。
+配信（broadcast）は dry-run のまま。
+
+> 更新（2026-07-27）: staging での**実送信検証は実施済み**（写真2枚つき 4/4 成功・証跡行
+> <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af>）。staging で実配信を再現する手順・
+> 必要 secret・OFF 復帰は「LINE 配信の運用ゲート」節を参照する（この節は初回ブリングアップの記録）。
 
 > ⚠ 取り違え注意（最重要）: 手順 1・3・4 は **すべてテストチャネル（@426vlcyb）**。
 > 本番 OA（@307tzhkw / 友だち 38）のトークン・Webhook・リッチメニューには一切触れない。
@@ -253,6 +257,146 @@ wrangler rollback
 # Verify rollback
 curl -s https://elxea-agent.elxea.workers.dev/ | jq .
 ```
+
+## LINE 配信の運用ゲート（送信スイッチ / env 分離 / テスト配信）
+
+> **この節はコマンドの正本**。運用者向けの平易な手順は `docs/line-delivery-guide.md`（および Notion 版
+> <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>）を SoT とし、本節は「エンジニア作業の実行手順」を持つ。
+> 片方だけを直さない（配信まわりのコード変更時は両方を更新する）。
+
+### 現状（2026-07-27 時点・事実）
+
+| 項目 | 状態 | 根拠 |
+|---|---|---|
+| 本番 `DELIVERY_SEND_ENABLED` | **OFF**（実送信なし・dry-run） | `delivery-orchestrator.ts` が `sendEnabled=false` で step(g) 前に非破壊 early-return |
+| prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
+| 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
+| 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
+| staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
+
+### ⚠ 禁止事項: 本番 Worker に `NOTION_DELIVERY_DB_ID` を設定しない
+
+`resolveDeliveryDbId(env)` は **prod のとき明示 `NOTION_DELIVERY_DB_ID` を最優先する**
+（未設定時のみ `PROD_DELIVERY_DB_ID` へ既定フォールバック）。したがって本番 Worker にこの変数を入れると、
+**本番 Worker が指定された任意の DB（＝テスト用 DB）を読みに行く**経路が生まれる。
+テスト用 DB の行が本番 OA（@307tzhkw・実顧客）へ配信されうるため、**設定してはならない**。
+
+- 本番（`elxea-agent`）: `NOTION_DELIVERY_DB_ID` は **未設定のまま**にする（既定 = 本番配信 DB）。
+- 検証（`elxea-agent-staging`）: **設定必須**。未設定は `DeliveryDbConfigError` で fail-closed（本番 DB へ落ちない）。
+  本番 DB ID を入れた場合も throw する（逆方向の cross-env も塞がれている）。
+- 誤設定の検知: `pnpm exec wrangler secret list`（本番）に `NOTION_DELIVERY_DB_ID` が出たら**即削除**する。
+
+  ```bash
+  pnpm exec wrangler secret list | grep NOTION_DELIVERY_DB_ID   # 本番: ヒットしないのが正
+  pnpm exec wrangler secret delete NOTION_DELIVERY_DB_ID        # 誤って入っていた場合のみ
+  ```
+
+### 実送信スイッチ ON の手順（Setaka の GO 後・Tier 2）
+
+#### ⚠ ステップ0（省略禁止）: Approved 行の全量監査
+
+**なぜ必須か**: `DELIVERY_SEND_ENABLED` が OFF の間、orchestrator は **Notion を一切書き換えない**
+（非破壊プレビューで early-return し、`setStatus(Sending)` も `writeDeliveryResult` も走らない）。
+このため承認済みの行は **Status=Approved・送信済み=false のまま無期限に滞留**する。
+一方 `queryDueDeliveries()` の filter は `Status=Approved AND 送信済み=false AND 配信予定日時 <= now` であり、
+**過去日時の Approved 行は「送信待ち」として常に該当する**。
+よってスイッチを ON にすると、**次の cron tick（最大15分後）に滞留分が一斉に実送信される**。
+
+手順（ON の直前に毎回実施）:
+
+1. 本番「配信コンテンツ」（`f95bb981-3c1a-4b6e-abd2-8b39551f6492`）を **Status=Approved で絞り込み、全件列挙**する。
+2. 各行について次を確認する。
+   - 配信予定日時が**過去でないか**（過去 = ON 直後に発火）。
+   - **いま送ってよい内容か**（検証目的・下書き・古い告知の混入がないか）。
+   - `送信済み` が false か（true なら再送されない）。
+3. 送らない行は **Status を Draft に戻す**（削除しない）。
+4. Approved に**意図した行だけ**が残った状態を確認してから ON に進む。
+
+#### ON / OFF
+
+```bash
+# ON（本番の実送信を有効化。確認フラグ必須・deploy はしない）
+bash scripts/go-live-enable-send.sh --confirm-i-really-want-to-send-real-line
+
+# OFF（即座に dry-run 復帰・実送信を再封鎖）
+pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED
+```
+
+ON 後は **最初の1本を実機受信で確認**してから後続を承認する。
+
+### テスト配信の手順（検証環境・お客さまに届かない）
+
+> **`--env staging` を必ず付ける。付け忘れたコマンドは本番 Worker（実顧客 OA）への操作になる。**
+
+1. **テスト用 DB に行を作る**: 「[TEST] 配信コンテンツ (staging/@426vlcyb)」
+   （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作成し Approved にする。
+   本番「配信コンテンツ」には**作らない**。
+2. **staging の送信スイッチを一時 ON**:
+
+   ```bash
+   printf 'true' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED --env staging
+   ```
+
+3. **配信を待って実機確認**（テスト OA @426vlcyb・最大15分 + 配信予定日時）。写真の順序・改行・文字化けを目視する。
+   Notion 側の書き戻し（Status=Sent / 送信結果 / 消費実績 / sent_at）も確認する。
+4. **必ず OFF に戻す**（戻し忘れると以降のテスト承認が送信され続ける）:
+
+   ```bash
+   pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging
+   pnpm exec wrangler secret list --env staging | grep DELIVERY_SEND_ENABLED   # 出ないのが正
+   ```
+
+### staging に必要な設定（テスト配信の前提）
+
+`[env.staging.vars]` にある `DELIVERY_TARGET_ENV = "test"` に加え、以下を投入する（値はコミットしない）。
+
+```bash
+# 1. 配信 DB（テスト用・必須。未設定は fail-closed で staging が配信を実行できない）
+#    値 = [TEST] 配信コンテンツ の database_id: 3a970c9d-064c-816a-af11-cf790334957a
+pnpm exec wrangler secret put NOTION_DELIVERY_DB_ID --env staging
+
+# 2. broadcast の想定受信者数（未設定/不正は target-resolver が fail-closed で停止）
+#    値 = テスト OA のスタッフ人数（実測 4）
+pnpm exec wrangler secret put LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST --env staging
+
+# 3. R2（画像つき配信で必須。画像 put は承認 pin 時に行われる）
+pnpm exec wrangler secret put R2_API_TOKEN  --env staging   # Workers R2 Storage: Edit 権限
+pnpm exec wrangler secret put R2_ACCOUNT_ID --env staging   # 未設定は resolveR2Config が throw
+# 任意（未設定時は既定にフォールバック）: R2_BUCKET_NAME（既定 elxea-images）/ R2_PUBLIC_BASE
+```
+
+投入後に名前だけ確認する（値は表示されない）:
+
+```bash
+pnpm exec wrangler secret list --env staging
+```
+
+- 本番 OA のトークンを staging に入れない（staging は `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択する）。
+- `NOTION_DELIVERY_DB_ID` に**本番 DB ID を入れない**（`DeliveryDbConfigError` で fail-closed になる）。
+
+### 緊急停止・ロールバック
+
+| 目的 | 操作 | 効果 |
+|---|---|---|
+| 特定1件を止める | Notion で Status を **Approved → Draft** | 予定時刻前なら送信対象から外れる。時刻到来後・cron 実行中は間に合わない可能性あり |
+| 本番の配信を全部止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED` | 以降の全経路が dry-run（非破壊プレビュー）へ復帰。Approved 行は滞留する（再 ON 時はステップ0 を再実施） |
+| staging の配信を止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging` | 検証環境のみ停止 |
+| 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
+| 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
+| コードごと戻す | `wrangler rollback` | 直前バージョンへ（secret は消えない・`keep_vars = true`） |
+
+**送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
+
+### 残存リスク（単独運用モードの明示）
+
+- **per-配信の人間ゲートが1点に縮退している**。従来の「著者 != 承認者」による二人目の確認は
+  `DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"` の間は働かず、配信ごとの人的チェックは
+  **「Notion に行を作り Status=Approved にする」その一操作**のみになる。
+  残る自動ゲートは形式検査（承認者の存在・日時到来・画像形式/サイズ・コンテンツハッシュ照合・無料枠台帳・
+  `DELIVERY_SEND_ENABLED`）であり、**内容の妥当性・宛先の妥当性は検査されない**。
+- したがって **Notion「配信コンテンツ」の書き込み権限が、実質的な配信統制そのもの**になる。
+  当該 DB の編集権限を持つ人を増やすことは「本番配信を単独で実行できる人を増やす」ことと等価として扱う。
+- 緩和は可逆。運用体制に二人目を置ける段階でフラグを削除し、独立承認者必須へ戻す。
 
 ## LINE×Shopify 連携（LIFF / 案A）Cutover ハードゲート（QA S-2・別プロバイダの罠）
 
