@@ -60,12 +60,26 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:hermetic
 
-  e2e-tests:
-    name: e2e-tests
+  # 会話シナリオ E2E（tests/e2e/run-e2e.ts）は push ゲートに置かない。手動 workflow_dispatch 専用。
+  #
+  # 理由（握りつぶしではなく配置換え）:
+  #   (1) 判定力が無い — run-e2e.ts は HTTP 200 しか見ない。スクリプト自身が
+  #       「実際の応答内容は staging の LINE アプリで目視確認してください」と出力する。
+  #       会話動線の自動判定は hermetic-e2e（tests/hermetic/**・応答本文まで検証）が担っている。
+  #   (2) 副作用が大きい — 署名が通ると staging Worker が会話イベント 15 本を実処理し、
+  #       Anthropic 呼び出し・Supabase 書き込み・api.line.me への reply/push 発行まで走る。
+  #       master マージのたびに自動で撃つ性質のものではない。
+  #   (3) 順序が逆だった — 旧構成では e2e-tests が deploy-staging の needs に入っており、
+  #       「1 つ前のデプロイの応答」で「今回のデプロイ可否」を決めていた。
+  #
+  # いま出したビルドの webhook 署名 fail-closed は staging-webhook-contract が
+  # deploy-staging の後に検証する（下記ジョブ）。
+  e2e-scenarios-manual:
+    name: e2e-scenarios-manual
     needs: static-checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     env:
       LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -109,10 +123,33 @@ jobs:
     # search-quality を push から外した（workflow_dispatch 専用）ため needs から除外する。
     # 残すと push 時に search-quality が skip され、その skip が deploy-staging に伝播して
     # staging デプロイが恒久 skip される（GitHub Actions の skipped-need 伝播）。
-    needs: [unit-tests, e2e-tests]
+    #
+    # 同じ理由で e2e-tests も needs から外した。旧構成は needs: [unit-tests, e2e-tests] で、
+    # e2e-tests が恒久 failure だったため deploy-staging が 40/40 run で skip され、
+    # staging 自動デプロイが一度も走っていなかった。会話シナリオ E2E は
+    # e2e-scenarios-manual（workflow_dispatch 専用）へ移設済み。
+    # デプロイ後の検証は hermetic-e2e（事前）+ smoke / webhook-contract（事後）で担保する。
+    needs: [unit-tests, hermetic-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    #
+    # ⚠ 既定 OFF（vars.STAGING_AUTO_DEPLOY が 'true' のときだけ走る）。
+    #
+    # このリポジトリには secrets.CLOUDFLARE_API_TOKEN が存在しない（repo・org いずれにも未登録。
+    # 2026-07-27 に CI 上で実測して確認済み）。トークン無しで `wrangler deploy` を走らせると
+    # 認証エラーで必ず失敗するため、無条件に有効化すると master が恒久 red になる。
+    # 従来は「e2e-tests の失敗に巻き込まれて暗黙に skip」されていた状態を、
+    # 「未設定だから明示的に OFF」へ置き換える（暗黙の死蔵をやめて理由を可視化する）。
+    #
+    # 有効化手順（Cloudflare ダッシュボード操作が要るため Setaka の判断・実施が必要）:
+    #   1. Cloudflare で Workers デプロイ用 API トークンを発行する
+    #      （Account: Workers Scripts:Edit / Account Settings:Read 相当の最小権限）
+    #   2. gh secret set CLOUDFLARE_API_TOKEN --repo elxea/elxea-cx-agent
+    #   3. gh variable set STAGING_AUTO_DEPLOY --body true --repo elxea/elxea-cx-agent
+    # ローカルからの手動デプロイは従来どおり `pnpm deploy:staging` で可能（OAuth 認証）。
+    if: >-
+      github.ref == 'refs/heads/master' && github.event_name == 'push'
+      && vars.STAGING_AUTO_DEPLOY == 'true'
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
@@ -128,3 +165,36 @@ jobs:
         run: pnpm test:staging-smoke
         env:
           STAGING_WORKER_URL: https://elxea-agent-staging.setaka-on.workers.dev
+
+  # デプロイ済み staging Worker の LINE Webhook 署名検証（fail-closed）を確認する。
+  # 送るのは events:[] のみ = イベント処理・LINE 送信・LLM 呼び出しは構造的にゼロ。
+  # 「正しい署名→200 / 誤署名→403 / 署名なし→403」を検証し、
+  # シークレットのローテーション漏れと署名検証の退行を機械検出する。
+  #
+  # deploy-staging が走った場合はその後に実行し、今出したビルドを検証する。
+  # deploy-staging が skip（自動デプロイ OFF）でも、現在 staging に載っている
+  # ビルドに対して実行する — 検証対象が常に存在するため空振りしない。
+  staging-webhook-contract:
+    name: staging-webhook-contract
+    needs: [unit-tests, hermetic-e2e, deploy-staging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      always() && github.ref == 'refs/heads/master' && github.event_name == 'push'
+      && needs['unit-tests'].result == 'success'
+      && needs['hermetic-e2e'].result == 'success'
+      && (needs['deploy-staging'].result == 'success' || needs['deploy-staging'].result == 'skipped')
+    env:
+      # staging Worker 側の LINE_CHANNEL_SECRET（テスト OA @426vlcyb のチャネルシークレット）と
+      # 同じ値をここに入れる。値がずれると本ジョブが即座に失敗して気付ける。
+      LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET_TEST }}
+      STAGING_WORKER_URL: https://elxea-agent-staging.setaka-on.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:staging-webhook-contract
