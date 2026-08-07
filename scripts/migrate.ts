@@ -249,6 +249,11 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "column", table: "unanswered_queries", column: "user_id" },
     ],
   },
+  // 031 は 010 が張った 3 本の cleanup cron ジョブを unschedule する（= 負の状態を作る）。
+  // 027 と同じく「実在で判定できる正の sentinel が無い」ため no-sentinel（specs 空）。
+  // baseline では leave-idempotent となり台帳登録されず、--apply が冪等に再適用する（＝安全）。
+  // 番号順適用により 010 → 031 の順になるので、010 を再適用しても最終状態は「削除ジョブ無し」。
+  "031_stop_conversation_retention": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------

@@ -4,12 +4,17 @@ elxea CX Agent のデータ保持・削除ポリシー。
 
 ## 概要
 
+> **2026-08-08方針転換**: お客さんとの会話の生の文章と、感想に添える自由記述の一言は
+> **永久保存**に変更した（Setaka決定）。90日自動削除は廃止する。理由は
+> `message_feedback.comment` がrojiの「KPIの主役＝定性データ」そのものであり、
+> 90日で消えることが事業判断の前提と矛盾するため。詳細は下記「自動削除スケジュール」節。
+
 | データ種別 | 保持期間 | 削除方法 |
 |---|---|---|
-| 会話データ (`conversations`) | 90日 | pg_cron 自動削除 |
-| フィードバック (`message_feedback`) | 90日 | pg_cron 自動削除 |
-| 未回答クエリ (`unanswered_queries`) | 90日 | pg_cron 自動削除 |
-| 処理済みイベント (`processed_events`) | 90日 | pg_cron 自動削除 |
+| 会話データ (`conversations`) | **無期限** | 自動削除しない（2026-08-08〜） |
+| フィードバック (`message_feedback`、自由記述 `comment` を含む) | **無期限** | 自動削除しない（2026-08-08〜） |
+| 未回答クエリ (`unanswered_queries`) | **無期限** | 自動削除しない（2026-08-08〜） |
+| 処理済みイベント (`processed_events`) | 90日（定義のみ・本番未登録） | pg_cron自動削除（本番に未登録＝実際には動いていない） |
 | 日次集計データ (`conversation_daily_stats`) | 無期限 | 削除しない |
 | サーベイ回答 (`tasting_note_survey`) | 無期限 | 削除しない |
 | フローイベント (`flow_events`) | 13ヶ月 | pg_cron 自動削除（P1 予定）。選択 slug のみ=低PII・前年同期比較のため |
@@ -21,18 +26,47 @@ elxea CX Agent のデータ保持・削除ポリシー。
 
 ## 自動削除スケジュール
 
-pg_cron ジョブにより毎日自動実行される。
+pg_cronジョブにより毎日自動実行される。
 
-| ジョブ名 | 実行時刻 (JST) | 内容 |
-|---|---|---|
-| `daily-conversation-stats` | 03:30 | 前日の会話統計を集計 |
-| `daily-feedback-stats` | 03:32 | 前日のフィードバック統計を集計 |
-| `cleanup-old-conversations` | 04:00 | 90日超過の会話を削除 |
-| `cleanup-old-feedback` | 04:05 | 90日超過のフィードバックを削除 |
-| `cleanup-old-unanswered` | 04:10 | 90日超過の未回答クエリを削除 |
-| `cleanup-old-processed-events` | 04:15 | 90日超過の処理済みイベントを削除 |
+| ジョブ名 | 実行時刻 (JST) | 内容 | 状態 |
+|---|---|---|---|
+| `daily-conversation-stats` | 03:30 | 前日の会話統計を集計 | 稼働中（維持する） |
+| `daily-feedback-stats` | 03:32 | 前日のフィードバック統計を集計 | **本番未登録**（010に定義はあるがcron.jobに無い） |
+| `cleanup-old-conversations` | 04:00 | 90日超過の会話を削除 | **廃止**（031でunschedule） |
+| `cleanup-old-feedback` | 04:05 | 90日超過のフィードバックを削除 | **廃止**（031でunschedule） |
+| `cleanup-old-unanswered` | 04:10 | 90日超過の未回答クエリを削除 | **廃止**（031でunschedule） |
+| `cleanup-old-processed-events` | 04:15 | 90日超過の処理済みイベントを削除 | **本番未登録**（010に定義はあるがcron.jobに無い） |
 
-集計ジョブは削除ジョブの前に実行される。これにより、削除対象のデータが集計に含まれることが保証される。
+集計ジョブ `daily-conversation-stats` は削除とは無関係に日次集計を作り続けるため、そのまま維持する。
+
+### 削除ジョブを止めた経緯（2026-08-08）
+
+- 2026-08-08、Setakaが「お客さんとの会話の生の文章は永久に残す」と決定。
+- 独立QAにより、同じ削除対象に `message_feedback` が含まれ、その `comment` 列
+  （お客さんが感想に添える自由記述の一言）も90日で消えることが判明した。
+  この一言はrojiが「KPIの主役＝定性データ」と位置づけているデータそのもの。
+- よって上記3本のcleanupジョブを `cron.unschedule` で解除し、
+  `031_stop_conversation_retention.sql` に冪等な形で記録した
+  （`010_data_retention.sql` の該当節は**無効**。再適用しないこと）。
+- 実測（2026-08-08時点・読み取りのみ）: `cleanup-*` の稼働により
+  2026-06-05〜2026-07-12に会話が実際に削除されている。**この分は復旧できない**。
+
+## 「消せます」とお客さんに約束してはいけない（未完の宿題）
+
+**無期限保持にした結果、記録が消える経路は「お客さんからの削除依頼」だけになった。**
+ところが現在その削除処理はSupabaseの会話を消していない。
+
+- 実装: `elxea-web-app/app/api/webhooks/gdpr/customers-redact/route.ts`（Shopify GDPR `customers/redact`）
+- 現状: **Firestoreの `users/{customerId}` とその配下サブコレクション
+  （`orders` / `behaviorLog` / `favorites` / `follows` / `eventRegistrations` / `conversations`）
+  のみを削除する**。Supabase側の `conversations` / `message_feedback` /
+  `unanswered_queries` には一切触れていない。
+- つまり削除依頼を受けても、**Supabaseに残った会話本文と感想の一言は消えない**。
+
+**この繋ぎ込みが済むまで、お客さんに「消せます」と約束してはならない。**
+プライバシーポリシー・LINEの案内文・問い合わせ対応のいずれでも、削除に応じられる旨を
+書いたり伝えたりしないこと。繋ぎ込み（Supabase側の削除をredact webhookに追加する）が
+完了し、実際に消えることを確認してから、はじめて約束してよい。
 
 ## 集計データ
 
@@ -64,10 +98,23 @@ Supabase 会話ログ（90日 purge）と非対称で、最大の整理事項だ
 
 ## マイグレーション
 
-`src/db/migrations/010_data_retention.sql`（Supabase）を SQL Editor で実行する。
-新規テーブルは `021_flow_events.sql` / `022_product_ratings.sql` / `023_line_message_ledger_aggregation_unit.sql`（staging ゲート → 承認後に本番）。
+適用は `scripts/migrate.ts`（番号順・台帳 `schema_migrations` でスキップ）で行う。
+
+- `src/db/migrations/010_data_retention.sql`: 集計テーブルとcron定義の初版。
+  **削除ジョブ3本の節は031で無効化済み。単独で再適用しないこと。**
+- `src/db/migrations/031_stop_conversation_retention.sql`: 削除ジョブ3本の解除（冪等）。
+  番号順適用により010 → 031の順で走るため、010を再適用しても最終状態は「削除ジョブ無し」になる。
+
+```bash
+npx tsx scripts/migrate.ts --only 031 --dry-run   # 適用予定の確認（非破壊）
+npx tsx scripts/migrate.ts --only 031 --apply     # 本適用
+```
 
 ## 変更履歴
 
 - 2026-03-24: 初版策定
-- 2026-07-13: P0-11 反映。flow_events(13ヶ月)/product_ratings(無期限)/broadcast_stats(無期限)/behaviorLog 発話全文停止＋バックフィル手順を追記
+- 2026-07-13: P0-11反映。flow_events(13ヶ月)/product_ratings(無期限)/broadcast_stats(無期限)/behaviorLog発話全文停止＋バックフィル手順を追記
+- **2026-08-08 (Setaka決定・Boss実行)**: 会話 (`conversations`) / 感想の自由記述
+  (`message_feedback.comment`) / 未回答クエリ (`unanswered_queries`) を**無期限保持**に変更。
+  90日自動削除ジョブ3本を廃止し `031_stop_conversation_retention.sql` に記録。
+  あわせて「消せます」と約束できない旨の注意書きを追加。

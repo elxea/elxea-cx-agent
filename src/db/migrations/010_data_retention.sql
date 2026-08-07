@@ -66,23 +66,32 @@ SELECT cron.schedule(
 
 -- ---------------------------------------------------------------------------
 -- 自動削除ジョブ（毎日 AM4:00 JST = PM7:00 UTC）
+--
+-- ⚠⚠ 以下 3 本（cleanup-old-conversations / cleanup-old-feedback /
+--     cleanup-old-unanswered）は 031_stop_conversation_retention.sql で
+--     無効化済み。再適用しないこと。
+--     2026-08-08 に「お客さんとの会話の生の文章と、感想に添える自由記述の一言は
+--     永久に残す」と決定したため（message_feedback.comment が roji の
+--     KPI の主役＝定性データそのもの）。SQL 本体は履歴として残すが、
+--     この節を単独で実行すると削除ジョブが復活する。
+--     万一 010 を再適用しても、番号順で後に走る 031 が再び解除する。
 -- ---------------------------------------------------------------------------
 
--- 90日以上前の会話データを削除
+-- 90日以上前の会話データを削除【031 で無効化済み・再適用しないこと】
 SELECT cron.schedule(
   'cleanup-old-conversations',
   '0 19 * * *',
   $$DELETE FROM conversations WHERE created_at < now() - interval '90 days'$$
 );
 
--- 90日以上前のフィードバックデータを削除
+-- 90日以上前のフィードバックデータを削除【031 で無効化済み・再適用しないこと】
 SELECT cron.schedule(
   'cleanup-old-feedback',
   '5 19 * * *',
   $$DELETE FROM message_feedback WHERE created_at < now() - interval '90 days'$$
 );
 
--- 90日以上前の未回答クエリを削除
+-- 90日以上前の未回答クエリを削除【031 で無効化済み・再適用しないこと】
 SELECT cron.schedule(
   'cleanup-old-unanswered',
   '10 19 * * *',
