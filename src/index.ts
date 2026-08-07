@@ -30,6 +30,7 @@ import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
 import { runDormantReengagement } from "./lib/dormant-reengagement";
 import { runMarcheActivation } from "./lib/marche-activation";
 import { getAlertStatus } from "./lib/alerts";
+import { erasePerson } from "./lib/roji-erasure";
 
 /**
  * 配信用 cron パターン（誤発火防止のため明示分岐で判定）。
@@ -173,6 +174,11 @@ export type Env = {
   NOTION_ALERTS_DB_ID?: string;
   // Sync
   SYNC_API_SECRET?: string;
+  /**
+   * 「記録を消す」の入口（POST /api/erase）専用の秘密。
+   * SYNC_API_SECRET とは別に持つ。同期の鍵が漏れても消去は撃てないようにするため。
+   */
+  ERASE_API_SECRET?: string;
   // Firebase / Firestore
   FIREBASE_PROJECT_ID?: string;
   FIREBASE_CLIENT_EMAIL?: string;
@@ -268,6 +274,63 @@ app.get("/api/alerts/status", async (c) => {
   }
 
   return c.json({ status: "ok", alerts: getAlertStatus() });
+});
+
+/**
+ * 記録を消す（お客さんからの削除依頼の唯一の入口）。
+ *
+ * 一次入力: rojiカルテの項目 — 最終形の定義 図2
+ *   https://www.notion.so/3b570c9d064c81669025cdbe1064b12c
+ *
+ * なぜ cx-agent に置くか: 消す範囲の**過半（Supabase 全表と未連携カルテ）が
+ * この worker からしか触れない**ため。web-app 側の customers/redact は
+ * ここを呼ぶだけにして、「何が消える範囲か」の定義を 1 か所に集約する。
+ *
+ * 返り値には必ず residue（消したあとに残っているものの列挙）を含める。
+ * clean=false のときは 500 を返す。「消しました」とだけ言う実装にしない。
+ *
+ * 痕跡を残さない: 本人の ID をログに出さない。成否と件数だけを出す。
+ */
+app.post("/api/erase", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (!c.env.ERASE_API_SECRET || authHeader !== `Bearer ${c.env.ERASE_API_SECRET}`) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const body = await c.req
+    .json<{ subject_kind?: string; subject_id?: string }>()
+    .catch(() => ({}) as { subject_kind?: string; subject_id?: string });
+
+  const kind = body.subject_kind;
+  const id = body.subject_id;
+  if ((kind !== "shopify" && kind !== "line") || !id) {
+    return c.json({ error: "subject_kind は shopify / line、subject_id は必須" }, 400);
+  }
+
+  try {
+    const result = await erasePerson(c.env, { kind, id });
+    if (!result.clean) {
+      // 消し残しがある = 「消せます」が守れていない。成功を返してはならない。
+      console.error("[erase] residue remains", JSON.stringify({
+        supabase: result.residue.remaining,
+        firestore: result.firestoreResidue.remaining,
+      }));
+      return c.json({ status: "incomplete", residue: result.residue, firestore_residue: result.firestoreResidue }, 500);
+    }
+    console.log("[erase] completed", JSON.stringify({
+      firestore_docs: result.firestore.deletedDocs,
+      supabase_rows: Object.values(result.supabase.deleted).reduce((a, b) => a + b, 0),
+    }));
+    return c.json({
+      status: "erased",
+      deleted: { supabase: result.supabase.deleted, firestore_docs: result.firestore.deletedDocs },
+      residue: result.residue,
+      firestore_residue: result.firestoreResidue,
+    });
+  } catch (err) {
+    console.error("[erase] failed:", err instanceof Error ? err.message : String(err));
+    return c.json({ error: "erase_failed" }, 500);
+  }
 });
 
 /**
