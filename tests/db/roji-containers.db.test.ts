@@ -383,6 +383,45 @@ async function main() {
         assertEqual(rows.length, 1, "月の締め記録が消えている");
       });
 
+      await it("LINE の ID から消しても、同じ人の台帳が消し残らない（migration 034 の回帰）", async () => {
+        // 合流済みの人 = LINE と EC の両方の ref を持つ人。
+        // 033 の実装では LINE 側から消すと台帳が残った（= 「消せる」の約束が破れる）。
+        const seq = (await client.query(`INSERT INTO roji_word_persons DEFAULT VALUES RETURNING person_seq`))
+          .rows[0].person_seq as string;
+        await client.query(
+          `INSERT INTO roji_word_person_refs (person_seq, subject_kind, subject_id)
+           VALUES ($1,'line','TEST-LINE-0002'), ($1,'shopify','TEST-CUST-0002')`,
+          [seq],
+        );
+        await client.query(
+          `INSERT INTO roji_words (body, occurred_at, person_seq, source)
+           VALUES ('合流済みの人の言葉', now(), $1, 'feedback_note')`,
+          [seq],
+        );
+        await client.query(
+          `INSERT INTO roji_delivery_ledger (shopify_customer_id, period) VALUES ('TEST-CUST-0002','2026-10')`,
+        );
+
+        const res = await client.query(`SELECT roji_erase_person('line','TEST-LINE-0002') AS r`);
+        const r = res.rows[0].r as { words_deleted: number; ledger_rows_deleted: number };
+        assertEqual(r.words_deleted, 1, "言葉が消えていない");
+        assertEqual(r.ledger_rows_deleted, 1, "LINE 経由で消したのに台帳が消えていない");
+
+        const left = await client.query(
+          `SELECT count(*)::int AS n FROM roji_delivery_ledger WHERE shopify_customer_id='TEST-CUST-0002'`,
+        );
+        assertEqual(left.rows[0].n, 0, "台帳の行が消し残っている");
+      });
+
+      await it("言葉を 1 件も置いていない人でも、EC の ID から台帳を消せる", async () => {
+        await client.query(
+          `INSERT INTO roji_delivery_ledger (shopify_customer_id, period) VALUES ('TEST-CUST-0003','2026-10')`,
+        );
+        const res = await client.query(`SELECT roji_erase_person('shopify','TEST-CUST-0003') AS r`);
+        const r = res.rows[0].r as { ledger_rows_deleted: number };
+        assertEqual(r.ledger_rows_deleted, 1, "ref が無い人の台帳が消えていない");
+      });
+
       await it("同じ人が再登録しても、消した記録は復活しない", async () => {
         // 同じ EC 顧客番号で新しい連番を作り直す = 空から始まる。
         const seqB = (await client.query(`INSERT INTO roji_word_persons DEFAULT VALUES RETURNING person_seq`))

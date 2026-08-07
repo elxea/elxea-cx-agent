@@ -271,6 +271,10 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "table", table: "roji_edit_records" },
     ],
   },
+  // 034 は roji_erase_person の CREATE OR REPLACE のみ（消し残しの修正）。
+  // 実在で判定できる正の sentinel が無い（関数は 033 で既に存在する）ため specs 空。
+  // 完全に冪等なので baseline では leave-idempotent、--apply が安全に再適用する。
+  "034_roji_erase_person_all_refs": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------
