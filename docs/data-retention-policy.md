@@ -118,3 +118,7 @@ npx tsx scripts/migrate.ts --only 031 --apply     # 本適用
   (`message_feedback.comment`) / 未回答クエリ (`unanswered_queries`) を**無期限保持**に変更。
   90日自動削除ジョブ3本を廃止し `031_stop_conversation_retention.sql` に記録。
   あわせて「消せます」と約束できない旨の注意書きを追加。
+- **2026-08-08本番適用完了（Setaka指示・Boss実行）**: 本番Supabaseに031を適用し、
+  `cleanup-old-conversations` / `cleanup-old-feedback` / `cleanup-old-unanswered` の3本を解除。
+  適用後の `cron.job` は `daily-conversation-stats`（日次集計）1本のみ。
+  `conversations` は適用前後とも347件・最古2026-06-06で不変（データ操作なし）。
