@@ -254,6 +254,23 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
   // baseline では leave-idempotent となり台帳登録されず、--apply が冪等に再適用する（＝安全）。
   // 番号順適用により 010 → 031 の順になるので、010 を再適用しても最終状態は「削除ジョブ無し」。
   "031_stop_conversation_retention": { idempotent: true, specs: [] },
+  // 032 / 033 は roji カルテの器（新設テーブルのみ・追加専用）。全て IF NOT EXISTS で冪等。
+  "032_roji_words": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "roji_words" },
+      { kind: "table", table: "roji_word_persons" },
+      { kind: "table", table: "roji_word_person_refs" },
+    ],
+  },
+  "033_roji_delivery_ledger": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "roji_delivery_ledger" },
+      { kind: "table", table: "roji_delivery_months" },
+      { kind: "table", table: "roji_edit_records" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

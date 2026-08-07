@@ -22,7 +22,11 @@ elxea CX Agent のデータ保持・削除ポリシー。
 | 配信計測 (`line_message_ledger.aggregation_unit` / broadcast_stats) | 無期限 | 集計値のみ・個人単位データなし |
 | 行動ログ (`behaviorLog`, Firestore) | 発話全文の書込停止（P0-11）＋シグナル行 90日 | 書込停止済＋バックフィル削除（下記） |
 | ユーザープロファイル (Firestore `users` / `lineUsers`) | 1年間非アクティブで削除検討 | 手動レビュー |
-| ナレッジベース (`knowledge_chunks`) | 無期限 | Notion 同期で管理 |
+| ナレッジベース (`knowledge_chunks`) | 無期限 | Notion同期で管理 |
+| **roji言葉の置き場 (`roji_words` / `roji_word_persons` / `roji_word_person_refs`)** | **永久**（期間で自動的に消さない） | **自動削除しない。** 消えるのは本人が記録を消したときだけ（`roji_erase_person()`） |
+| **roji送った記録の台帳 (`roji_delivery_ledger`)** | **無期限** | 同上（本人の削除でのみ消える） |
+| **roji月の締め記録 (`roji_delivery_months`)** | **無期限** | 削除しない（個人の記録ではない・月単位の集計） |
+| **roji編集の記録 (`roji_edit_records`)** | **無期限** | 削除しない（運営側の作業の記録。個人へ辿れる列を構造上持たない） |
 
 ## 自動削除スケジュール
 
@@ -104,11 +108,27 @@ Supabase 会話ログ（90日 purge）と非対称で、最大の整理事項だ
   **削除ジョブ3本の節は031で無効化済み。単独で再適用しないこと。**
 - `src/db/migrations/031_stop_conversation_retention.sql`: 削除ジョブ3本の解除（冪等）。
   番号順適用により010 → 031の順で走るため、010を再適用しても最終状態は「削除ジョブ無し」になる。
+- `src/db/migrations/032_roji_words.sql` / `033_roji_delivery_ledger.sql`:
+  rojiカルテの器（言葉の置き場 / 送った記録の台帳 / 編集の記録 / 月の締め記録）。
+  **追加のみ**（新設テーブルのみ・既存テーブルへの変更ゼロ）。**自動削除ジョブを1本も足していない。**
 
 ```bash
 npx tsx scripts/migrate.ts --only 031 --dry-run   # 適用予定の確認（非破壊）
 npx tsx scripts/migrate.ts --only 031 --apply     # 本適用
 ```
+
+### rojiの器に「90日削除」を入れ直してはならない
+
+`roji_words` は**お客さんの言葉の原文そのもの**を置く場所で、保存期間は**永久**と確定している
+（2026-08-08 Q6）。同じ理由で台帳・編集の記録・月の締め記録も期間で消さない。
+
+- 新設テーブルに対する `cron.schedule` を書いた時点で、この確定に反する。
+- 機械チェックあり: `tests/unit/roji-containers.test.ts` がmigration 032/033に
+  `cron.schedule` / `cleanup` が含まれないことを検証し、
+  `tests/db/roji-containers.db.test.ts` が**実DBの `cron.job` にroji系のジョブが
+  1本も無いこと**を検証する（本番でも `--env prod` で読み取り確認できる）。
+- 消えるのは「本人が記録を消したとき」だけ。その処理は `roji_erase_person(subject_kind, subject_id)`
+  （migration 033）。**匿名の言葉・編集の記録・月の締め記録は消えない**（設計どおり）。
 
 ## 変更履歴
 
@@ -122,3 +142,8 @@ npx tsx scripts/migrate.ts --only 031 --apply     # 本適用
   `cleanup-old-conversations` / `cleanup-old-feedback` / `cleanup-old-unanswered` の3本を解除。
   適用後の `cron.job` は `daily-conversation-stats`（日次集計）1本のみ。
   `conversations` は適用前後とも347件・最古2026-06-06で不変（データ操作なし）。
+- **2026-08-08 (rojiカルテの器・タスク07)**: `032_roji_words.sql` / `033_roji_delivery_ledger.sql`
+  をstaging → 本番の順に適用（`--only 032,033`）。新設6テーブルすべて**永久 / 無期限**で
+  上表に追記した。**自動削除ジョブは1本も追加していない**（適用前後とも `cron.job` は
+  `daily-conversation-stats` 1本のみ）。適用は追加のみで、既存20テーブルの行数は
+  `schema_migrations`（27→29・台帳登録2件）以外すべて不変。

@@ -49,7 +49,112 @@ export type OnboardingStatus = {
   twoWeekAnswer?: string | null;
 };
 
-export type CustomerProfile = {
+// ---------------------------------------------------------------------------
+// roji カルテの追加項目（項目 6 / 12 / 13 / 14 / 18 / 19 / 20）
+//
+// 一次入力（仕様の正本）: rojiカルテの項目 — 最終形の定義
+//   https://www.notion.so/3b570c9d064c81669025cdbe1064b12c  第3章 3-1〜3-3 / 第6章 第1段階 順4
+//
+// なぜ 1 つの型にまとめて両方へ付けるか:
+//   定義文書「受け皿は本カルテと未連携カルテの両方に、**同じ形で**足す。片方だけだと合流で落ちる」。
+//   CustomerProfile（本カルテ = users/{shopifyCustomerId}）と
+//   LineUserProfile（未連携カルテ = lineUsers/{lineUserId}）の**両方に同じ型を交差させる**ことで、
+//   片方にだけ項目が足される（＝合流で落ちる）ことを型で防ぐ。
+//   併せて「新しい項目は必ず lineUsers 側に置く。3か所目を作らない」（未確定B の確定事項）を守る。
+//
+// すべての項目に共通する決めごと（定義文書 第3章）:
+//   (1) 空を許す。どの項目も空のまま始められる（= すべて optional）
+//   (2) 1問ごとに独立して書き込む。まとめて最後に保存しない
+//   (3) 申込時に書き込む項目は 1 タップで答えられる形（= 選択肢）。自由記述は申込時に置かない
+//
+// 置かないもの: 星・点数・満足度・ランキング・連続記録（確定原則の禁じ手。行き着く先の姿でも作らない）。
+// 置かないもの: LINE 側の識別子（項目2）/ 合流の状態（項目3）。正本は別名表で、写す理由が書けない。
+// ---------------------------------------------------------------------------
+
+/** 項目6: 安全に関する申告（選択肢・複数可）。安全は好みより先に来る。 */
+export type SafetyDeclarationTag =
+  | "caffeine_sensitive"
+  | "pregnant_or_nursing"
+  | "allergy"
+  | "none";
+
+/**
+ * 項目6: 安全に関する申告。
+ * 申込時は選択肢のみ（1タップ）。`freeText` は**じぶんのページの常設設定からのみ**書く。
+ * 合流時は「両方入れる。片方にでも申告があれば必ず残す。消す方向の統合を絶対にしない」。
+ */
+export type SafetyDeclaration = {
+  tags?: SafetyDeclarationTag[];
+  /** 任意の自由記述。じぶんのページの常設設定の側だけ。申込フォームからは書かない。 */
+  freeText?: string | null;
+  updatedAt?: string; // ISO 8601
+};
+
+/** 項目12: 6つの窓それぞれへの傾き（数値）。合流時は「足す」。 */
+export type WindowAffinity = {
+  tea?: number;
+  literature?: number;
+  art?: number;
+  music?: number;
+  farm?: number;
+  science?: number;
+  lastUpdated?: string; // ISO 8601
+};
+
+/** 項目13: お茶ごとの明示指定（また入れてほしい / もういらない）。それぞれ解除できる。 */
+export type TeaRequestList = {
+  /** また入れてほしいお茶の参照。 */
+  moreOf?: string[];
+  /** もういらないお茶の参照。割当の必須条件（Q4）。 */
+  noneOf?: string[];
+  updatedAt?: string; // ISO 8601
+};
+
+/** 項目14: イベントへの関心。出た回の記録からも更新される。 */
+export type EventInterest = "onsite" | "online" | "not_now";
+
+/**
+ * 項目20: 1行の推定への訂正。
+ * 言い換えの候補から1タップ。「まだ、決めていない」「この一行は表示しない」を常設。
+ */
+export type EstimateCorrection = {
+  /** 本人が選んだ言い換えの候補（記号）。 */
+  choice?: string | null;
+  /** 「まだ、決めていない」を選んだ。 */
+  undecided?: boolean;
+  /** 「この一行は表示しない」を選んだ。 */
+  hidden?: boolean;
+  correctedAt?: string; // ISO 8601
+};
+
+/**
+ * roji カルテの追加項目一式。**本カルテと未連携カルテの両方に同じ形で交差させる。**
+ * ここに項目を足すと自動的に両方へ入る（片側だけの追加を型で不可能にしている）。
+ */
+export type RojiKarteFields = {
+  /** 項目6: 安全に関する申告。割当から外す条件・全 Q の前提。 */
+  safety?: SafetyDeclaration;
+  /** 項目12: 窓への傾き（お茶・文学・アート・音楽・農・科学）。 */
+  windowAffinity?: WindowAffinity;
+  /** 項目13: また入れてほしい / もういらない。 */
+  teaRequests?: TeaRequestList;
+  /** 項目14: イベントへの関心。 */
+  eventInterest?: EventInterest | null;
+  /**
+   * 項目18: 言葉の引用の許可。**既定は「引用しない」= false**。
+   * 項目17（気配に含めるか）とは別に持つ。合流時は「制限の強い方」を採る。
+   * 言葉 1 件ごとの許可は持たない（人に対する設定。取り消したときに過去の言葉が残るため）。
+   */
+  quoteConsent?: boolean;
+  quoteConsentAskedAt?: string | null; // 初めて言葉を書いたときに一度だけ聞く
+  /** 項目19: 1行の推定（いまの値）。**1行**。3行にしない。 */
+  estimateLine?: string | null;
+  estimateLineUpdatedAt?: string | null;
+  /** 項目20: 1行の推定への訂正。合流時は「新しい方」を採る。 */
+  estimateCorrection?: EstimateCorrection;
+};
+
+export type CustomerProfile = RojiKarteFields & {
   lineUserId?: string | null;
   email?: string;
   displayName?: string;
@@ -92,7 +197,7 @@ export type CustomerProfile = {
  * `mergePersonaScores` 系の「別軸への累積加算」流儀で統合し、`mergedToShopify=true` を立てる
  * （or レコード削除）。自動マージ処理は本タスクでは実装しない。構造だけ統合可能にしてある。
  */
-export type LineUserProfile = {
+export type LineUserProfile = RojiKarteFields & {
   /** LINE userId（= ドキュメントキーの写し。将来マージ処理の可読性のため保持）。 */
   lineUserId?: string;
   /** 好み（ペルソナ）— CustomerProfile.persona と同一構造。 */
