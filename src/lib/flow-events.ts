@@ -53,15 +53,32 @@ export type FlowEventName =
   //     product_no = 見せた銘柄（5桁）／ value = 版（"karte" = 個別化が baseline と別の銘柄を選んだ /
   //     "baseline" = カルテが結果を変えなかった or 空カルテ）。metadata に ratedNo / baselineNo / affinity。
   //   これを残さないと「どの版を見せたか」が後から遡れない消えるデータになり効果測定できない。
-  | "next_cup_shown";
+  | "next_cup_shown"
+  // 入口の答え（穴3 の回復経路・2026-08-08）:
+  //   onboarding.complete: ウェルカム3択のボタンを押したとき。**連携の有無に関係なく必ず残す**。
+  //     カルテ側の記録（本カルテ or 未連携カルテ）が何らかの理由で落ちても、生の出来事はここに在る。
+  | "onboarding.complete"
+  // roji カルテの項目26・27・28（Web の roji ページで起きる出来事・migration 035 で channel を拡張）:
+  //   read.completed:     項目26 読み終わりまで到達した（1つの号につき1回だけ）。滞在時間の代わりに置く唯一の指標。
+  //   feedback.shown:     項目27 感想の操作を画面に出した（表示のたび）。N5 の分母。
+  //   nextmonth.shown:    項目28 翌月反映の1行を画面に出した（表示のたび）。Q1 の分母。
+  | "read.completed"
+  | "feedback.shown"
+  | "nextmonth.shown";
 
 /** 記録する 1 イベントの入力。 */
 export interface FlowEventInput {
   eventName: FlowEventName;
   /** conversations.user_id と同一規約（LINE userId / web session）。 */
   userRef: string;
-  /** I-4: 現状 'line' のみ。省略時 'line'。 */
-  channel?: "line";
+  /**
+   * 記録の経路。省略時 'line'（既存の呼び出しは一切変わらない）。
+   *
+   * 2026-08-08: migration 035 で 'web' を追加した。021 の I-4 が求めた「再設計判断」を経ている
+   * （出来事の置き場を 2 つに割らない = 保持期間・PII ガード・読み手の二重管理を作らない）。
+   * 項目26・27・28（読み終わり / 感想の操作の表示 / 翌月反映の1行）は Web で起きる出来事のため。
+   */
+  channel?: "line" | "web";
   /** q1/q2/q3・page1〜3 等の段（slug）。 */
   step?: string;
   /** 選択値 slug（自由文禁止）。 */

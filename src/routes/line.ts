@@ -54,6 +54,8 @@ import {
 } from "../lib/welcome-onboarding";
 import {
   getFirestoreEnv,
+  getCustomerProfile,
+  getLineUserProfile,
   updateCustomerProfile,
   updateLineUserProfile,
   addBehaviorEvent,
@@ -61,6 +63,7 @@ import {
   type CustomerProfile,
   type LineUserProfile,
   type BehaviorEvent,
+  type OnboardingStatus,
 } from "../lib/firestore";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { runPreferencePipeline } from "../lib/preference-pipeline";
@@ -780,37 +783,106 @@ async function handleOnboardingMessage(
  * Firestore にオンボーディング完了を記録する。
  * - onboarding.completedAt に現在時刻を設定
  * - onboarding.initialAction にタップしたボタンを記録
- * - behaviorLog にイベントを追加
+ * - behaviorLog にイベントを追加（連携済みのときのみ。behaviorLog は本カルテ配下のため）
+ *
+ * ■ 2026-08-08 改修（穴3 の封鎖）— roji同じ人だと分かる仕組み 第3章
+ *   https://www.notion.so/3b570c9d064c81d68610f9360f50c965
+ *
+ *   従来は customer_linkages に行が無い（＝未連携）と **記録そのものをせずに return** していた。
+ *   友だち追加直後は未連携が多数派なので、押したボタンは事実上どこにも残らなかった。
+ *   → 連携の有無にかかわらず記録する。連携済みなら本カルテ、未連携なら未連携カルテ
+ *     （lineUsers/{lineUserId}）へ。**未連携カルテに書けば、連携成立時に合流処理が拾う**
+ *     （合流の規則の表は onboarding を carry-if-empty で持ち越す）。
+ *
+ * ■ 併せて塞いだ上書き（サイレントなデータ消失）
+ *   Firestore の PATCH は updateMask をトップレベルのキー単位で当てるため、
+ *   `onboarding` を丸ごと書くと **同じ map の中の `source`（入口の答え・項目15）が消える**。
+ *   従来の実装は completedAt / initialAction だけを持つ map を書いていたので、
+ *   入口の答えを先に答えた人がボタンを押した瞬間にそれを失っていた。
+ *   → 既存の onboarding を読んでからサブフィールドを重ねて書く（read-modify-write）。
  */
-async function recordOnboardingCompletion(
+export type OnboardingRecordDeps = {
+  /** 連携先の Shopify 顧客 ID を引く（未連携なら null）。 */
+  resolveShopifyId?: (lineUserId: string) => Promise<string | null>;
+  getLineUser?: typeof getLineUserProfile;
+  updateLineUser?: typeof updateLineUserProfile;
+  getCustomer?: typeof getCustomerProfile;
+  updateCustomer?: typeof updateCustomerProfile;
+  addBehavior?: typeof addBehaviorEvent;
+  now?: () => string;
+};
+
+export async function recordOnboardingCompletion(
   lineUserId: string,
   initialAction: string,
   env: Env,
+  deps?: OnboardingRecordDeps,
 ): Promise<void> {
   const fsEnv = getFirestoreEnv(env);
   const supabase = createSupabaseClient(env);
+  const now = (deps?.now ?? (() => new Date().toISOString()))();
 
-  const { data: linkage } = await supabase
-    .from("customer_linkages")
-    .select("shopify_customer_id")
-    .eq("line_user_id", lineUserId)
-    .single();
+  const getLineUser = deps?.getLineUser ?? getLineUserProfile;
+  const updateLineUser = deps?.updateLineUser ?? updateLineUserProfile;
+  const getCustomer = deps?.getCustomer ?? getCustomerProfile;
+  const updateCustomer = deps?.updateCustomer ?? updateCustomerProfile;
+  const addBehavior = deps?.addBehavior ?? addBehaviorEvent;
 
-  if (!linkage?.shopify_customer_id) {
-    console.log("[onboarding] No linkage found for user, skipping Firestore recording");
+  // 生の出来事は連携の有無に関係なく必ず残す（第3章「穴3 の回復経路 = 生の出来事からの再構築」）。
+  //   fire-and-forget。ここが失敗しても下の Firestore 記録は続ける。
+  void logFlowEvent(supabase, {
+    eventName: "onboarding.complete",
+    userRef: lineUserId,
+    value: initialAction,
+  });
+
+  const action = initialAction as OnboardingStatus["initialAction"];
+
+  const resolveShopifyId =
+    deps?.resolveShopifyId ??
+    (async (id: string) => {
+      const { data: linkage } = await supabase
+        .from("customer_linkages")
+        .select("shopify_customer_id")
+        .eq("line_user_id", id)
+        .single();
+      return linkage?.shopify_customer_id ? String(linkage.shopify_customer_id) : null;
+    });
+
+  const shopifyId = await resolveShopifyId(lineUserId);
+
+  if (!shopifyId) {
+    // ★ 穴3 の封鎖点: 未連携でも捨てない。未連携カルテへ書く（合流で本カルテへ載る）。
+    const existing = await getLineUser(lineUserId, fsEnv);
+    await updateLineUser(
+      lineUserId,
+      {
+        lineUserId,
+        onboarding: {
+          // 既存の入口の答え（source）等を消さない（read-modify-write）。
+          ...(existing?.onboarding ?? { completedAt: null, initialAction: null }),
+          completedAt: now,
+          initialAction: action,
+        },
+        lastActiveAt: now,
+        ...(existing ? {} : { createdAt: now }),
+      } as Partial<LineUserProfile>,
+      fsEnv,
+    );
+    // behaviorLog は本カルテ（users/{shopifyId}）配下のサブコレクションなので、未連携では書けない。
+    //   代わりに上の flow_events(onboarding.complete) が生の出来事として残る。
     return;
   }
 
-  const shopifyId = String(linkage.shopify_customer_id);
-  const now = new Date().toISOString();
-
-  // オンボーディングステータス更新
-  await updateCustomerProfile(
+  // 連携済み: 本カルテへ。ここも read-modify-write で source を消さない。
+  const existingCustomer = await getCustomer(shopifyId, fsEnv);
+  await updateCustomer(
     shopifyId,
     {
       onboarding: {
+        ...(existingCustomer?.onboarding ?? { completedAt: null, initialAction: null }),
         completedAt: now,
-        initialAction: initialAction as "view_tea" | "explore_tea" | "about" | "howto" | "none",
+        initialAction: action,
       },
     } as Partial<CustomerProfile>,
     fsEnv,
@@ -826,7 +898,7 @@ async function recordOnboardingCompletion(
     createdAt: now,
   };
 
-  await addBehaviorEvent(shopifyId, event, fsEnv);
+  await addBehavior(shopifyId, event, fsEnv);
 }
 
 /**
@@ -835,6 +907,11 @@ async function recordOnboardingCompletion(
  * 友だち追加直後の回答は Shopify 未連携が多いため、連携済みカルテ（users/{shopifyId}）ではなく
  * 未連携カルテ（lineUsers/{lineUserId}）に残す。将来連携成立時に users へマージ可能な同一構造。
  * completedAt / initialAction は入口質問の段階では未確定のため null（完了は別途 recordOnboardingCompletion）。
+ *
+ * ■ 2026-08-08: read-modify-write 化。
+ *   Firestore の PATCH は updateMask をトップレベルのキー単位で当てるため、`onboarding` を
+ *   丸ごと書くと同じ map の中の既存サブフィールドが消える。3択タップ（completedAt/initialAction）が
+ *   先に入っていた場合にそれを消さないよう、既存を読んでから source だけを重ねる。
  */
 async function recordWelcomeSource(
   lineUserId: string,
@@ -842,14 +919,16 @@ async function recordWelcomeSource(
   env: Env,
 ): Promise<void> {
   const fsEnv = getFirestoreEnv(env);
+  const existing = await getLineUserProfile(lineUserId, fsEnv);
   await updateLineUserProfile(
     lineUserId,
     {
+      lineUserId,
       onboarding: {
-        completedAt: null,
-        initialAction: null,
+        ...(existing?.onboarding ?? { completedAt: null, initialAction: null }),
         source,
       },
+      ...(existing ? {} : { createdAt: new Date().toISOString() }),
     } as Partial<LineUserProfile>,
     fsEnv,
   );

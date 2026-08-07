@@ -20,6 +20,7 @@ import { shopifyOrderWebhook } from "./routes/shopify-webhook";
 import { classifyCron } from "./lib/cron-routing";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
+import { runKarteReconcile } from "./lib/karte-reconcile";
 import {
   runDelivery,
   runScheduledDelivery,
@@ -705,6 +706,21 @@ export default {
         runKnowledgeSync(env, "incremental").then((result) => {
           console.log("Scheduled knowledge sync completed:", JSON.stringify(result));
         }),
+        // 毎日の照合（roji・取りこぼしゼロの最後の担保）: 連携済みなのに合流していない人を拾い直す。
+        //   合流処理は失敗しても黙って先へ進む作りなので、これが無いと失敗が永久に残る。
+        //   専用 cron を新設せず既存の日次同期に同居させる（wrangler.toml の crons を増やさない）。
+        //   data-only・追加のみ・外部送信ゼロ。1 件の失敗で全体を止めない。
+        runKarteReconcile(env)
+          .then((result) => {
+            console.log("Scheduled karte reconcile completed:", JSON.stringify(result));
+          })
+          .catch((err) => {
+            // 二重の安全網（runKarteReconcile は基本 throw しないが、未処理 reject を残さない）。
+            console.warn(
+              "[karte-reconcile] scheduled run failed:",
+              err instanceof Error ? err.message : err,
+            );
+          }),
         runBatchMetafieldSync(env).then((result) => {
           console.log(
             "Scheduled metafield sync completed:",

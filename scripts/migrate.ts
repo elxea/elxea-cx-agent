@@ -275,6 +275,10 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
   // 実在で判定できる正の sentinel が無い（関数は 033 で既に存在する）ため specs 空。
   // 完全に冪等なので baseline では leave-idempotent、--apply が安全に再適用する。
   "034_roji_erase_person_all_refs": { idempotent: true, specs: [] },
+  // 035 は flow_events.channel の CHECK を 'line' → 'line','web' に**緩める**だけ（列も行も触らない）。
+  // 027（UNIQUE 制約の DROP）と同じく、実在で判定できる正の sentinel（table/column）が無いため specs 空。
+  // 制約名を動的に特定して張り替える DO ブロックなので完全に冪等。
+  "035_flow_events_web_channel": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------

@@ -192,7 +192,12 @@ describe("hermetic L1 — 動線9: 連携時の好み引き継ぎ（carryover・
     expect(merged!.persona!.scores.serenity).toBe(3);
   });
 
-  it("graceful: 入口回答のみ（persona も taste も無い）カルテ → no-op（畳む好みが無い）", async () => {
+  // ── 穴2 の封鎖（2026-08-08・roji同じ人だと分かる仕組み 第3章）
+  //   このテストは**期待値を反転させた**。改修前は「persona も taste も無ければ no-op」を
+  //   正しい挙動として固定していたが、それこそが穴2 —— 「まだ買っていないがアンケートには
+  //   答えた人」が合流済みの印すら付かず永久に孤児化する —— だった。
+  //   いまの正しい挙動は「好みが空でも合流を成立させ、印を付ける」。
+  it("★ 穴2: 入口回答のみ（好みが空）でも合流が成立し、合流済みの印が必ず付く", async () => {
     const s = makeStore();
     s.lineUsers.set(LINE_ID, {
       lineUserId: LINE_ID,
@@ -207,11 +212,60 @@ describe("hermetic L1 — 動線9: 連携時の好み引き継ぎ（carryover・
     });
 
     await mergeLineUserIntoShopify(LINE_ID, SHOPIFY_ID, FS_ENV, s.deps);
+    const after = s.users.get(SHOPIFY_ID)!;
 
-    expect(s.writes.customer).toBe(0);
-    expect(s.users.get(SHOPIFY_ID)!.persona!.scores.serenity).toBe(3);
-    // 畳む好みが無いので mergedToShopify も立てない（次に好みが貯まってから連携すれば畳める）。
-    expect(s.lineUsers.get(LINE_ID)!.mergedToShopify).not.toBe(true);
+    // ★ ロードベアリング: 好みが空でも「合流済み」が立つ（＝孤児にならない）。
+    //   早期 return を戻すとここが赤くなる。
+    expect(s.lineUsers.get(LINE_ID)!.mergedToShopify).toBe(true);
+    // 合流の記録（項目33）も残る。
+    expect(s.lineUsers.get(LINE_ID)!.mergeRecord?.fromLineUserId).toBe(LINE_ID);
+
+    // ★ 穴1: 入口の答えは落ちずに本カルテへ載る。
+    expect(after.onboarding?.source).toBe("marche");
+
+    // 会員側の既存の好みは一切消えない（合流は追加のみ）。
+    expect(after.persona!.scores.serenity).toBe(3);
+  });
+
+  it("★ 穴1: 好みと一緒に、カルテの追加項目（安全・窓・イベント関心）もまとめて持ち越される", async () => {
+    const s = makeStore();
+    s.lineUsers.set(LINE_ID, {
+      ...lineKarteWithPrefs(),
+      onboarding: { completedAt: null, initialAction: null, source: "online" },
+      safety: { tags: ["caffeine_sensitive"] },
+      windowAffinity: { tea: 3, music: 2 },
+      eventInterest: "onsite",
+    });
+    // 会員側は安全の申告を別に持つ（消えてはならない）。
+    s.users.set(SHOPIFY_ID, { safety: { tags: ["allergy"] } });
+
+    await mergeLineUserIntoShopify(LINE_ID, SHOPIFY_ID, FS_ENV, s.deps);
+    const after = s.users.get(SHOPIFY_ID)!;
+
+    // 改修前は persona / tasteProfile 以外が 1 つも載らなかった＝この 4 行が穴1 の検知点。
+    expect(after.onboarding?.source).toBe("online");
+    expect(after.windowAffinity).toEqual({ tea: 3, music: 2 });
+    expect(after.eventInterest).toBe("onsite");
+    // 安全は消す方向の統合を絶対にしない（両方残る）。
+    expect(after.safety!.tags!.sort()).toEqual(["allergy", "caffeine_sensitive"]);
+
+    // 好みの畳み込み（既存の流儀）は不変。
+    expect(after.persona!.scores.sensory).toBe(6);
+  });
+
+  it("★ 穴1: 規則の表に無い新項目でも合流で持ち越される（項目を足しても落ちない）", async () => {
+    const s = makeStore();
+    // 「あとから誰かがカルテに足した項目」を模す（型に無いキー）。
+    s.lineUsers.set(LINE_ID, {
+      lineUserId: LINE_ID,
+      surveyAnswers: { q1: "a", q2: "c" },
+    } as unknown as LineUserProfile);
+
+    await mergeLineUserIntoShopify(LINE_ID, SHOPIFY_ID, FS_ENV, s.deps);
+    const after = s.users.get(SHOPIFY_ID)! as unknown as Record<string, unknown>;
+
+    expect(after.surveyAnswers).toEqual({ q1: "a", q2: "c" });
+    expect(s.lineUsers.get(LINE_ID)!.mergedToShopify).toBe(true);
   });
 
   it("純粋: personaScoresToSignals は各軸スコアをその軸トークン n 個へ展開（0/負/非有限は無視）", () => {

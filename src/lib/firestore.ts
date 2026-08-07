@@ -13,6 +13,13 @@
 import { SignJWT, importPKCS8 } from "jose";
 import type { Env } from "../index";
 import type { PreferenceSignals } from "./preference-extractor";
+import {
+  computeKarteCarryover,
+  type KarteMergeRecord,
+  type SpecialFolders,
+} from "./karte-merge-rules";
+
+export type { KarteMergeRecord } from "./karte-merge-rules";
 
 // ---------------------------------------------------------------------------
 // 型定義（elxea-web-app の types.ts に準拠）
@@ -217,6 +224,11 @@ export type LineUserProfile = RojiKarteFields & {
    * 未マージ = false / 未設定。
    */
   mergedToShopify?: boolean;
+  /**
+   * 項目33: 合流の記録（いつ / どちらの記録から / 何を持ち越したか）。
+   * 取り消し機能を作らない代わりの足あと。採らなかった未連携側の値（superseded）もここに残す。
+   */
+  mergeRecord?: KarteMergeRecord;
 };
 
 export type BehaviorAction =
@@ -1181,15 +1193,32 @@ export type CarryoverDeps = {
  * 連携成立時に未連携カルテ（lineUsers/{lineUserId}）の好みを、連携済みカルテ
  * （users/{shopifyCustomerId}）へ統合する（設計 §3 引き継ぎ・S5「引き継がれた」の成立）。
  *
- * 統合方針:
+ * ■ 2026-08-08 改修（穴1・穴2 の封鎖）— roji同じ人だと分かる仕組み 第3章
+ *   https://www.notion.so/3b570c9d064c81d68610f9360f50c965
+ *
+ *   穴1（持ち越しが 2 項目に固定）: 従来この関数は persona と tasteProfile だけを処理の中に
+ *     直接書いて持ち越していたため、**カルテに項目を足すたびにここも直さないと、足した項目は
+ *     合流の瞬間に黙って落ちた**（入口の答え onboarding.source がまさにそれ）。
+ *     → 持ち越し規則を宣言的な表（karte-merge-rules.ts の `KARTE_MERGE_RULES`）へ外出しし、
+ *       **走査対象を「未連携カルテに実在する全キー」**（`Object.keys`）にした。表に無いキーは
+ *       既定で持ち越す。表は型で網羅を強制する（項目を足すと型検査が落ちる）。
+ *
+ *   穴2（好みが空だと何もせず終わる）: 従来は persona も taste も空なら早期 return し、
+ *     **合流済みの印すら書かなかった**。「まだ買っていないがアンケートには答えた人」が
+ *     永久に孤児化する。→ 早期 return を撤去し、**好みが空でも合流を成立させて印を付ける**。
+ *
+ * 統合方針（詳細な種類別ルールは karte-merge-rules.ts の表が正本）:
  *   - persona: 既存 `mergePersonaScores` の「別軸への累積加算」流儀で、lineUsers の各軸スコアを
  *     users の各軸へ足し込む（上書きしない＝会員側の既存スコアを消さない）。primary は最大軸を再計算。
  *   - tasteProfile: `computeTasteProfileUpdates` を共有し union（重複排除・上限50）。scenePref は
  *     lineUsers 側があれば最新として採用。他の出し分けと同一ロジックを保証する（SoT 分裂しない）。
- *   - lineUsers.mergedToShopify=true を立てる（＝二重加算防止フラグ・冪等性の機械的担保）。
+ *   - それ以外の全項目: 表の規則（足す / 両方入れる / 安全は消さない / 制限の強い方 / 新しい方 /
+ *     本カルテ優先）。**既存の値を削除する経路は 1 つも無い**（追加と、衝突時の足あと記録のみ）。
+ *   - lineUsers.mergedToShopify=true と mergeRecord（項目33）を立てる。
  *
  * 冪等性: mergedToShopify===true のとき no-op（再連携・再送で二重加算しない）。
- * graceful: lineUsers 不在／persona も taste も無いカルテ（例: 入口回答のみ）は no-op（何も書かない）。
+ * graceful: lineUsers ドキュメント不在のときだけ no-op（印を立てる先が無いため）。
+ *   **好みが空のカルテは no-op にしない**（穴2 の封鎖点）。
  * 順序: users を先に統合してから mergedToShopify を立てる（途中失敗時に「フラグだけ立って
  *   引き継ぎ未了」を避ける。最悪でも mergedToShopify 未設定なら再連携時に再試行できる）。
  *
@@ -1233,56 +1262,67 @@ export async function mergeLineUserIntoShopify(
     return resolveCustomer();
   }
 
-  const foldPersona = personaHasScore(lineProfile.persona);
-  const foldTaste = tasteHasSignal(lineProfile.tasteProfile);
-
-  // graceful: persona も taste も無い（例: 入口回答のみ）→ 引き継ぐ好みが無い（no-op）。
-  if (!foldPersona && !foldTaste) return resolveCustomer();
-
   const customerProfile = await resolveCustomer();
   const now = new Date().toISOString();
-  const updates: Partial<CustomerProfile> = { lastActiveAt: now };
 
-  // persona: 別軸への累積加算（上書きしない）。lineUsers のスコアを signal 列へ展開して足し込む。
-  if (foldPersona) {
-    const baseScores = customerProfile?.persona?.scores ?? {
-      serenity: 0,
-      explorer: 0,
-      sensory: 0,
-    };
-    const { scores, primary } = mergePersonaScores(
-      baseScores,
-      personaScoresToSignals(lineProfile.persona!.scores),
-      1,
-    );
-    updates.persona = { primary, scores, lastUpdated: now };
-  }
+  // persona / taste の畳み込みは既存ロジックをそのまま使う（SoT を分裂させない）。
+  //   規則の表は「どの項目にどの戦略を当てるか」だけを持ち、畳み方の実体はここに残す。
+  const folders: SpecialFolders = {
+    foldPersona: (linePersona, customerPersona) => {
+      // 意味のあるスコアが 1 つも無ければ持ち越さない（0 加算の空更新を避ける）。
+      if (!personaHasScore(linePersona)) return undefined;
+      const baseScores = customerPersona?.scores ?? {
+        serenity: 0,
+        explorer: 0,
+        sensory: 0,
+      };
+      const { scores, primary } = mergePersonaScores(
+        baseScores,
+        personaScoresToSignals(linePersona!.scores),
+        1,
+      );
+      return { primary, scores, lastUpdated: now };
+    },
+    foldTaste: (lineTaste, customer) => {
+      if (!tasteHasSignal(lineTaste)) return undefined;
+      const t = lineTaste!;
+      // persona は foldPersona 側で処理済みなので persona_signals は空にして二重加算を避ける。
+      const tasteSignals: PreferenceSignals = {
+        preferred_categories: t.preferredCategories ?? [],
+        flavor_preferences: t.flavorPreferences ?? [],
+        scene_preferences: t.scenePref ? [t.scenePref] : [],
+        persona_signals: [],
+        explicit_statements: [],
+      };
+      const mergedTaste = computeTasteProfileUpdates(
+        tasteSignals,
+        customer?.tasteProfile,
+        customer?.persona,
+        1,
+      );
+      return mergedTaste.tasteProfile;
+    },
+  };
 
-  // tasteProfile: 既存の union ロジック（computeTasteProfileUpdates）を共有。persona は上で
-  //   処理済みなので persona_signals は空にして二重加算を避ける（taste のみを畳む）。
-  if (foldTaste) {
-    const t = lineProfile.tasteProfile!;
-    const tasteSignals: PreferenceSignals = {
-      preferred_categories: t.preferredCategories ?? [],
-      flavor_preferences: t.flavorPreferences ?? [],
-      scene_preferences: t.scenePref ? [t.scenePref] : [],
-      persona_signals: [],
-      explicit_statements: [],
-    };
-    const mergedTaste = computeTasteProfileUpdates(
-      tasteSignals,
-      customerProfile?.tasteProfile,
-      customerProfile?.persona,
-      1,
-    );
-    updates.tasteProfile = mergedTaste.tasteProfile;
-  }
+  // 未連携カルテに実在する**全キー**を規則の表に照らして畳む（穴1 の封鎖点）。
+  const { updates: carried, record } = computeKarteCarryover(
+    lineProfile,
+    customerProfile,
+    { lineUserId, shopifyCustomerId, now },
+    folders,
+  );
+
+  const updates: Partial<CustomerProfile> = { ...carried, lastActiveAt: now };
 
   // 連携済みカルテへ統合を書く（PATCH・部分更新）。
+  //   ★ 穴2 の封鎖点: 持ち越すものがゼロ（好みも入口の答えも空）でもここを通る。
+  //     早期 return しないので、下の「合流済みの印」が必ず立つ。
   await updateCustomer(shopifyCustomerId, updates, env);
 
-  // 未連携カルテに「統合済み」を立てる（二重加算防止フラグ＝冪等性の機械的担保）。
-  await updateLineUser(lineUserId, { mergedToShopify: true }, env);
+  // 未連携カルテに「統合済み」と合流の記録（項目33）を立てる。
+  //   mergedToShopify は二重加算防止フラグ＝冪等性の機械的担保。
+  //   mergeRecord は「いつ / どちらから / 何を持ち越したか / 採らなかった値」の足あと。
+  await updateLineUser(lineUserId, { mergedToShopify: true, mergeRecord: record }, env);
 
   // 統合後の連携済みカルテを返す（既存に updates を重ねた状態）。
   return { ...(customerProfile ?? {}), ...updates };

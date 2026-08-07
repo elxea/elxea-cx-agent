@@ -27,6 +27,38 @@ import {
 } from "../lib/firestore";
 
 // ---------------------------------------------------------------------------
+// 無効化フラグ（2026-08-08・判断4）
+// ---------------------------------------------------------------------------
+
+/**
+ * Shopify 顧客メタフィールドへの**書き出しを無効化する**（削除ではなく無効化）。
+ *
+ * 一次入力: roji同じ人だと分かる仕組み 判断4
+ *   https://www.notion.so/3b570c9d064c81d68610f9360f50c965
+ *
+ * なぜ止めるか（「読み手がいないから」ではない）:
+ *   実測（Shopify 管理 API で顧客 51 件を全件スキャン・読み取りのみ・2026-08-08）で、
+ *   **書き出し先のメタフィールド定義そのものが未作成 / 顧客 51 件すべてで実データ 0 件 /
+ *   参照する絞り込み条件も 0 件**であることが分かった。書き出し対象が「LINE と EC が紐付いた顧客」に
+ *   限られており、その紐付きが実質ゼロだったため 1 滴も流れていない。
+ *   **このまま放置すると、本タスクで紐付けを直した瞬間に動き出し、定義も読み手も無いまま
+ *   書き込みを始める。** 意味のない通信が走り、後から「これは何だ」という混乱の種になる。
+ *
+ * 戻し方: 使い道が決まり、**読む相手を 1 つ実装してから** この定数を false にする（コードは残してある）。
+ * 併せて Shopify 側のメタフィールド定義（elxea.taste_profile / elxea.line_linked）の作成が要る。
+ */
+export const SHOPIFY_METAFIELD_SYNC_DISABLED = true;
+
+/** 無効化時に返す「何もしなかった」結果（呼び出し側の型・ログを変えないため成功扱いにはしない）。 */
+function disabledSyncResult(customerId: string): MetafieldSyncResult {
+  return {
+    customerId,
+    success: false,
+    error: "shopify metafield sync is disabled (roji 判断4)",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -128,6 +160,12 @@ export async function syncCustomerMetafields(
   profile: CustomerProfile,
   env: Env,
 ): Promise<MetafieldSyncResult> {
+  // 判断4: EC 側の「名刺」欄への書き出しは無効化中。**Shopify へ 1 度も通信しない**。
+  //   紐付けが直った瞬間に勝手に動き出すのを防ぐため、資格情報チェックより前で止める。
+  if (SHOPIFY_METAFIELD_SYNC_DISABLED) {
+    return disabledSyncResult(shopifyCustomerId);
+  }
+
   if (!env.SHOPIFY_ADMIN_ACCESS_TOKEN || !env.SHOPIFY_STORE_DOMAIN) {
     return {
       customerId: shopifyCustomerId,
@@ -281,6 +319,9 @@ export async function syncAfterProfileUpdate(
   profile: CustomerProfile,
   env: Env,
 ): Promise<void> {
+  // 判断4: 無効化中は Firestore 読み取りも Shopify 通信も一切しない（静かに戻る）。
+  if (SHOPIFY_METAFIELD_SYNC_DISABLED) return;
+
   try {
     const result = await syncCustomerMetafields(shopifyCustomerId, profile, env);
 
@@ -321,6 +362,22 @@ export async function runBatchMetafieldSync(
   since?: string,
 ): Promise<BatchSyncResult> {
   const startTime = Date.now();
+
+  // 判断4: 無効化中は Firestore の全顧客走査ごと止める（日次 cron から呼ばれるため、
+  //   ここで止めないと読み取りだけが毎日走り続ける）。
+  if (SHOPIFY_METAFIELD_SYNC_DISABLED) {
+    console.log(
+      "[shopify-metafield] batch sync skipped: disabled (roji 判断4 — 読む相手を実装してから戻す)",
+    );
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      results: [],
+      durationMs: Date.now() - startTime,
+    };
+  }
 
   let fsEnv: FirestoreEnv;
   try {
