@@ -323,7 +323,31 @@ export async function erasePerson(env: Env, subject: EraseSubject): Promise<Eras
   const fsEnv = getFirestoreEnv(env);
   const sbEnv = env as unknown as SupabaseEnv;
 
-  // 1. Supabase。identity の解決も SQL 側で行う（別名表を消す前に集める必要があるため）。
+  // ── 順番が仕様の一部である（変えてはならない）────────────────────
+  //
+  //   特定 → Firestore → Supabase の順で行う。理由は「**本人を特定する手がかりを
+  //   最後に消す**」ため。別名表（customer_linkages / user_identity_map）は
+  //   「LINE の ID ↔ EC 上の顧客番号」の対応そのもので、これが消えると
+  //   **もう誰なのか分からなくなる**。
+  //
+  //   逆順（Supabase を先に消す）にすると、途中で Firestore の消去が失敗したとき、
+  //   再送しても LINE の ID を辿れず、未連携カルテが**永久に消えないまま**
+  //   「消えました」と報告される。約束が嘘になる、まさにその経路。
+  //
+  //   この順なら、どの段階で落ちても別名表が生きているので、
+  //   **何度でも安全に再送できる**（各段階は冪等）。
+
+  // 1. 特定（読み取りのみ）。別名表が生きているうちに、本人の全 ID を集める。
+  const identity = await rpc<ResolvedIdentity>(sbEnv, "roji_resolve_identity", {
+    p_subject_kind: subject.kind,
+    p_subject_id: subject.id,
+  });
+
+  // 2. Firestore。失敗したら例外を投げてここで止まる（Supabase には進まない）。
+  //    別名表はまだ生きているので、再送で同じ人を必ず特定できる。
+  const firestore = await eraseFirestore(fsEnv, identity);
+
+  // 3. Supabase。特定に使う別名表を含め、ここで初めて消す。
   const sb = await rpc<{
     words_deleted: number;
     ledger_rows_deleted: number;
@@ -332,21 +356,27 @@ export async function erasePerson(env: Env, subject: EraseSubject): Promise<Eras
     deleted: Record<string, number>;
   }>(sbEnv, "roji_erase_person", { p_subject_kind: subject.kind, p_subject_id: subject.id });
 
-  const identity = sb.identity;
+  // 消す直前に SQL 側が解決した ID と突き合わせ、**広いほう**で検算する。
+  // 1 と 3 の間に増えた ID があっても取りこぼさないため。
+  const merged: ResolvedIdentity = {
+    shopify_ids: [...new Set([...identity.shopify_ids, ...(sb.identity?.shopify_ids ?? [])])],
+    line_ids: [...new Set([...identity.line_ids, ...(sb.identity?.line_ids ?? [])])],
+    web_refs: [...new Set([...identity.web_refs, ...(sb.identity?.web_refs ?? [])])],
+    person_seqs: [...new Set([...identity.person_seqs, ...(sb.identity?.person_seqs ?? [])])],
+  };
 
-  // 2. Firestore。Supabase が解決した全 ID を使う（起点が LINE でも本カルテに届く）。
-  const firestore = await eraseFirestore(fsEnv, identity);
-
-  // 3. 検算。消したあとに何が残っているかを両側で数える。
+  // 4. 検算。消したあとに何が残っているかを両側で数える。
+  //    別名表を消したあとでは同じ ID 群を二度と復元できないため、
+  //    ここで必ず控えておいた merged を使う。
   const residue = await rpc<{ remaining: Record<string, number>; preserved: Record<string, number>; clean: boolean }>(
     sbEnv,
     "roji_erasure_residue",
-    { p_shopify_ids: identity.shopify_ids, p_line_ids: identity.line_ids, p_web_refs: identity.web_refs },
+    { p_shopify_ids: merged.shopify_ids, p_line_ids: merged.line_ids, p_web_refs: merged.web_refs },
   );
-  const fsResidue = await firestoreResidue(fsEnv, identity);
+  const fsResidue = await firestoreResidue(fsEnv, merged);
 
   return {
-    identity,
+    identity: merged,
     supabase: { deleted: sb.deleted, words_deleted: sb.words_deleted, ledger_rows_deleted: sb.ledger_rows_deleted },
     firestore,
     residue,

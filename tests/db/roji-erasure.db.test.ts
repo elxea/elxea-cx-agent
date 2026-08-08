@@ -442,6 +442,115 @@ async function main() {
       assertTrue(rows[0].r.clean === false, "残っているのに clean = true を返した");
     });
 
+    // ---------------------------------------------------------------
+    console.log("\n=== 新しい置き場が自動で対象になるか（ベタ書きしていないこと）===");
+
+    await it("人を指す列を持つ表は、列挙で対象になっている（ベタ書きの一覧を持たない）", async () => {
+      const { rows } = await client.query(`SELECT count(*)::int AS n FROM roji_person_key_map()`);
+      assertTrue(rows[0].n >= 14, `列挙が効いていない（対象列 ${rows[0].n} 件）`);
+    });
+
+    await it("新しい表を足すと、登録作業なしで自動的に消える対象になる", async () => {
+      // 「あとから増えた置き場」を模して、人を指す列を持つ表をこの tx 内だけで作る。
+      await client.query(`CREATE TABLE roji_test_newly_added_store (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        line_user_id text NOT NULL,
+        body text
+      )`);
+      await client.query(`INSERT INTO roji_test_newly_added_store (line_user_id, body) VALUES ($1,'TEST-ERASE 新しい置き場の記録')`, [
+        "UTEST-ERASE-NEW-line",
+      ]);
+      await client.query(`INSERT INTO customer_linkages (line_user_id, shopify_customer_id, source) VALUES ($1,NULL,'test')`, [
+        "UTEST-ERASE-NEW-line",
+      ]);
+
+      // 列挙に載っていること。
+      const inMap = await client.query(
+        `SELECT count(*)::int AS n FROM roji_person_key_map() WHERE tbl = 'roji_test_newly_added_store'`,
+      );
+      assertEqual(inMap.rows[0].n, 1, "新しい表が列挙に載っていない（＝ベタ書きのまま）");
+
+      // 何も登録せずに消えること。
+      await client.query(`SELECT roji_erase_person('line',$1)`, ["UTEST-ERASE-NEW-line"]);
+      const left = await client.query(`SELECT count(*)::int AS n FROM roji_test_newly_added_store`);
+      assertEqual(left.rows[0].n, 0, "新しい表の記録が消えていない");
+
+      // 検算にも自動で載ること。
+      const res = await client.query(`SELECT roji_erasure_residue($1,$2,$3) AS r`, [[], ["UTEST-ERASE-NEW-line"], []]);
+      assertTrue(
+        Object.prototype.hasOwnProperty.call(res.rows[0].r.remaining, "roji_test_newly_added_store"),
+        "新しい表が検算に載っていない",
+      );
+
+      await client.query(`DROP TABLE roji_test_newly_added_store`);
+    });
+
+    await it("図2 で「残る」と決めた表は、列挙の対象から外れている", async () => {
+      const { rows } = await client.query(
+        `SELECT coalesce(string_agg(DISTINCT tbl, ','), '') AS t FROM roji_person_key_map()
+          WHERE tbl IN ('roji_edit_records','roji_words','roji_delivery_months',
+                        'conversation_daily_stats','broadcast_stats','line_message_ledger')`,
+      );
+      assertEqual(rows[0].t, "", `残すはずの表が消去対象に入っている: ${rows[0].t}`);
+    });
+
+    await it("人を指しそうな列名で、語彙にも対象表にも入っていないものが無い", async () => {
+      // 語彙は列名の完全一致なので、新しい**列名**が発明されると漏れる。
+      // 「人っぽい列名なのに、語彙にも無く、対象表にも属さない」ものを検出して落とす。
+      const { rows } = await client.query(`
+        SELECT c.table_name || '.' || c.column_name AS ref
+        FROM information_schema.columns c
+        JOIN information_schema.tables t
+          ON t.table_schema=c.table_schema AND t.table_name=c.table_name AND t.table_type='BASE TABLE'
+        WHERE c.table_schema='public' AND c.data_type IN ('text','character varying')
+          AND c.column_name ~ '(customer|line_user|user_id|user_ref|session|author)'
+          AND c.column_name NOT IN ('shopify_customer_id','line_user_id','line_login_user_id',
+                                    'web_session_id','user_id','user_ref','session_id')
+          -- 既に行ごと消える表に属する列は、その行が消えるので漏れではない。
+          AND c.table_name NOT IN (SELECT tbl FROM roji_person_key_map())
+          -- 図2 で残すと決めた表は対象外。
+          AND c.table_name NOT IN ('roji_edit_records','roji_words','roji_word_person_refs',
+                                   'roji_delivery_months','conversation_daily_stats',
+                                   'broadcast_stats','line_message_ledger')
+        ORDER BY 1`);
+      const leaks = rows.map((r) => r.ref as string);
+      assertEqual(leaks.join(","), "", `語彙から漏れた人を指す列がある: ${leaks.join(", ")}`);
+    });
+
+    // ---------------------------------------------------------------
+    console.log("\n=== 消し残しがあるのに成功と報告しないこと ===");
+
+    await it("消し残しがあれば clean = false になる（成功と報告されない）", async () => {
+      // 「Firestore の消去が失敗した後、Supabase だけ消えている」状態を模す。
+      // 本人の記録を 1 件だけ残し、検算が false を返すことを見る。
+      await seedPerson(client, { line: "UTEST-ERASE-RESID-line" });
+      await client.query(`SELECT roji_erase_person('line',$1)`, ["UTEST-ERASE-RESID-line"]);
+      // 消したあとに 1 件だけ戻す = 消し残しと同じ状態。
+      await client.query(
+        `INSERT INTO conversations (user_id, channel, role, content) VALUES ($1,'line','user','TEST-ERASE 消し残し')`,
+        ["UTEST-ERASE-RESID-line"],
+      );
+      const { rows } = await client.query(`SELECT roji_erasure_residue($1,$2,$3) AS r`, [
+        [],
+        ["UTEST-ERASE-RESID-line"],
+        [],
+      ]);
+      assertTrue(rows[0].r.clean === false, "消し残しがあるのに clean = true を返した");
+      assertTrue(Number(rows[0].r.remaining.conversations) > 0, "消し残しが検算に出ていない");
+    });
+
+    await it("同じ人を二度消しても壊れない（部分的に失敗した後の再送が安全）", async () => {
+      await seedPerson(client, { line: "UTEST-ERASE-RETRY-line", shopify: "TEST-ERASE-RETRY-shop", withLedger: true });
+      const first = (await client.query(`SELECT roji_erase_person('line',$1) AS r`, ["UTEST-ERASE-RETRY-line"])).rows[0].r;
+      // 2 回目。例外を投げず、件数 0 で完了すること。
+      const second = (await client.query(`SELECT roji_erase_person('line',$1) AS r`, ["UTEST-ERASE-RETRY-line"])).rows[0].r;
+      assertEqual(second.words_deleted, 0, "2 回目で言葉が消えている（1 回目が消し残していた）");
+      assertEqual(second.ledger_rows_deleted, 0, "2 回目で台帳が消えている");
+      assertTrue(first.words_deleted > 0, "1 回目で言葉が消えていない");
+      const r = await residue(client, ["TEST-ERASE-RETRY-shop"], ["UTEST-ERASE-RETRY-line"]);
+      assertEqual(nonZero(r).join(","), "", `再送後に消し残しがある: ${nonZero(r).join(", ")}`);
+    });
+
     // 再登録は「消えたことの確認」がすべて終わってから行う。
     // 先に行うと、新しく作った空の器が残留と見分けられなくなる。
     await it("戻ってきても、以前の記録は戻らない", async () => {
