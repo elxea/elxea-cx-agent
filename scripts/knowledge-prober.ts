@@ -73,7 +73,7 @@ const limitArg = args.find((a) => a.startsWith("--limit="))?.split("=")[1];
 const CX_AGENT_BASE_URL =
   targetArg ??
   process.env.CX_AGENT_BASE_URL ??
-  "https://elxea-agent.elxea.workers.dev";
+  "https://elxea-agent.setaka-on.workers.dev";
 
 /** Probe session prefix (to separate from real users) */
 const PROBE_SESSION_PREFIX = "probe_";

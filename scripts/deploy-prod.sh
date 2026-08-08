@@ -10,7 +10,10 @@
 #        - (#2) 必須 secret「名」の存在確認（wrangler secret list・名前のみ／値は見ない・欠落で中断）
 #        - staging smoke が緑（pnpm test:staging-smoke が exit 0）
 #        - 初回デプロイ時は追加ゲート（下記「初回 cron 活性化」）
-#   2. migration 本適用       : npx tsx scripts/migrate.ts --apply（schema_migrations 台帳ベース）
+#   2. migration 適用（明示指定制）: 未適用一覧を --dry-run で提示 → MIGRATE_ONLY で名指しされた version だけを
+#                               `migrate.ts --only <versions> --apply` で適用する（schema_migrations 台帳ベース）。
+#                               ⚠ bare `migrate.ts --apply`（未適用を全件適用）は本スクリプトからは実行しない。
+#                                 手順書が本番非適用と定める 024 / 025 / 027 を巻き込むため（deny-list で二重にガード）。
 #                               ※ 既存 DB の初回は先に `migrate.ts --baseline`（introspection・要 Setaka 承認）。
 #   3. wrangler deploy（prod） : pnpm exec wrangler deploy（default env = 本番）
 #   4. prod health check       : curl "$PROD_HEALTH_URL" が {"status":"ok"}（Claude API は呼ばない）
@@ -26,9 +29,12 @@
 #   本番反映は必ず「明示実行 + CONFIRM=DEPLOY-PROD」が揃ったときだけ進む。
 #
 # 使い方（ローカル）:
-#   CONFIRM=DEPLOY-PROD SUPABASE_DB_PASSWORD=xxx ./scripts/deploy-prod.sh
+#   # migration を当てない反映（既定形）:
+#   CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE SUPABASE_DB_PASSWORD=xxx ./scripts/deploy-prod.sh
+#   # 特定の migration を当てる反映（当てるものを名指しする）:
+#   CONFIRM=DEPLOY-PROD MIGRATE_ONLY=036,037 SUPABASE_DB_PASSWORD=xxx ./scripts/deploy-prod.sh
 #   # 初回デプロイ（日次同期 cron の初活性化を伴う）は追加 ack が必要:
-#   CONFIRM=DEPLOY-PROD FIRST_DEPLOY=true FIRST_DEPLOY_ACK=SYNC-CRON-ACK \
+#   CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE FIRST_DEPLOY=true FIRST_DEPLOY_ACK=SYNC-CRON-ACK \
 #     SUPABASE_DB_PASSWORD=xxx ./scripts/deploy-prod.sh
 #
 # 環境変数:
@@ -36,8 +42,12 @@
 #   SUPABASE_URL         本番 Supabase URL（未設定なら .dev.vars からの読み取りは migrate.ts 側に委ねる）。
 #                        ここでは ref assert のため参照する（未設定時は migrate.ts の assert に委譲）。
 #   SUPABASE_DB_PASSWORD 本番 Postgres 直接接続パスワード（migrate.ts --apply が使用）。
+#   MIGRATE_ONLY         (必須) 今回当てる migration の version をカンマ区切りで名指しする（例: 036,037）。
+#                        当てない場合は "NONE" を明示する。未指定は中断（fail-closed）。
+#   MIGRATE_DENYLIST_ACK (任意) 本番非適用リスト（024 / 025 / 027）を今回だけ当てるときの明示 ack。
+#                        例: MIGRATE_DENYLIST_ACK=027（LIFF 連携 G1-G3 通過後に 027 を当てるとき）。
 #   STAGING_WORKER_URL   staging smoke の対象（既定: https://elxea-agent-staging.setaka-on.workers.dev）。
-#   PROD_HEALTH_URL      本番ヘルスチェック URL（既定: https://elxea-agent.elxea.workers.dev/）。
+#   PROD_HEALTH_URL      本番ヘルスチェック URL（既定: https://elxea-agent.setaka-on.workers.dev/）。
 #   FIRST_DEPLOY         "true" のとき初回デプロイ扱い（追加ゲート）。既定 false。
 #   FIRST_DEPLOY_ACK     FIRST_DEPLOY=true のとき "SYNC-CRON-ACK" 必須。
 #   SKIP_STAGING_SMOKE   "true" のとき staging smoke をスキップ（非推奨・緊急時のみ）。
@@ -55,7 +65,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 readonly EXPECTED_PROD_REF="bquqzrbzdzjegdovxalu"
-readonly PROD_HEALTH_URL="${PROD_HEALTH_URL:-https://elxea-agent.elxea.workers.dev/}"
+readonly PROD_HEALTH_URL="${PROD_HEALTH_URL:-https://elxea-agent.setaka-on.workers.dev/}"
 readonly STAGING_WORKER_URL="${STAGING_WORKER_URL:-https://elxea-agent-staging.setaka-on.workers.dev}"
 readonly LINE_API_BASE="https://api.line.me/v2/bot"
 # 本番 Worker が起動に必要とする secret 名（launch-checklist.md / setup-production.sh の REQUIRED_VARS が SoT）。
@@ -175,10 +185,100 @@ preflight() {
   log "preflight PASSED"
 }
 
+# 本番へ当てる migration は **明示指定制**（bare `--apply` は使わない）。
+#
+# なぜ: bare `npx tsx scripts/migrate.ts --apply` は「未適用のものを全件」当てる。
+#   一方 docs/deploy-runbook.md は 024 / 025 を「本番へ当てないことが設計」、027 を
+#   「LIFF 連携有効化（G1-G3）とセット」と定めている。bare `--apply` はこの手順書自身が
+#   禁じている変更を本番へ入れてしまう（手順書とスクリプトの自己矛盾）。
+#   よって「当てるものを名指しする」= 意図しない migration が混入しえない形にする。
+#
+# 使い方:
+#   MIGRATE_ONLY=NONE       ... この反映では migration を当てない（migration 無しデプロイの既定形）
+#   MIGRATE_ONLY=036,037    ... 名指しした version だけを番号順に当てる（migrate.ts --only に渡す）
+#   MIGRATE_ONLY 未指定     ... 中断（fail-closed。「うっかり全件」を構造的に起こせなくする）
+#
+# deny-list は二重ゲート: 名指ししても、手順書が本番非適用と定めた version は追加 ack 無しでは通さない。
+readonly PROD_MIGRATION_DENYLIST=(024 025 027)
+
+# token（"024" / "024_broadcast_stats" 等）の先頭数字部分を返す。数字で始まらないときは空。
+migration_number_of() {
+  local token="$1"
+  printf '%s' "${token}" | sed -n 's/^\([0-9][0-9]*\).*$/\1/p'
+}
+
+# deny-list に当たる token か（先頭番号で照合）。
+migration_is_denied() {
+  local num
+  num="$(migration_number_of "$1")"
+  [[ -z "${num}" ]] && return 1
+  local d
+  for d in "${PROD_MIGRATION_DENYLIST[@]}"; do
+    # 先頭 0 の有無で取り違えないよう 10 進数として比較する。
+    if [[ "$((10#${num}))" -eq "$((10#${d}))" ]]; then return 0; fi
+  done
+  return 1
+}
+
+# MIGRATE_DENYLIST_ACK に当該 version が明示されているか（例: MIGRATE_DENYLIST_ACK=027）。
+migration_denylist_acked() {
+  local num ack ack_num acks=()
+  num="$(migration_number_of "$1")"
+  [[ -z "${num}" ]] && return 1
+  IFS=',' read -ra acks <<< "${MIGRATE_DENYLIST_ACK:-}"
+  # ⚠ 空配列の展開は set -u で落ちる（bash 3.2）。":-" を付けて空要素 1 個として回す（下で捨てる）。
+  for ack in "${acks[@]:-}"; do
+    ack_num="$(migration_number_of "${ack// /}")"
+    if [[ -n "${ack_num}" && "$((10#${num}))" -eq "$((10#${ack_num}))" ]]; then return 0; fi
+  done
+  return 1
+}
+
 run_migrations() {
-  log "STEP 2/4: migration 本適用（scripts/migrate.ts --apply）"
-  npx tsx scripts/migrate.ts --apply
-  log "migration 適用 完了"
+  log "STEP 2/4: migration 適用（明示指定制・bare --apply は使わない）"
+
+  # (a) まず未適用一覧を read-only で提示する（--dry-run は一切書き込まない）。
+  #     「今なにが pending か」を見ないまま当てる事故を防ぐ。
+  log "  未適用 migration を確認中（scripts/migrate.ts --dry-run・読み取りのみ）..."
+  npx tsx scripts/migrate.ts --dry-run \
+    || die "未適用 migration の確認（--dry-run）に失敗。接続情報を確認して再実行する。"
+
+  # (b) 適用対象の明示を必須にする（未指定は中断＝ fail-closed）。
+  if [[ -z "${MIGRATE_ONLY:-}" ]]; then
+    die "MIGRATE_ONLY が未指定。上の未適用一覧を見て、当てるものを名指しすること。
+       migration を当てない場合: MIGRATE_ONLY=NONE
+       当てる場合（例）:         MIGRATE_ONLY=036,037
+       ⚠ bare 'migrate.ts --apply'（未適用を全件適用）は本スクリプトからは実行しない。
+         024 / 025 は本番非適用が設計、027 は LIFF 連携有効化（G1-G3）とセット。
+         根拠: docs/deploy-runbook.md「Supabase Migrations」節。"
+  fi
+
+  if [[ "${MIGRATE_ONLY}" == "NONE" ]]; then
+    log "  MIGRATE_ONLY=NONE。migration は適用せずに次のステップへ進む。"
+    return 0
+  fi
+
+  # (c) deny-list 二重ゲート（名指ししても、手順書が本番非適用と定めたものは ack 無しでは通さない）。
+  local token tokens=()
+  IFS=',' read -ra tokens <<< "${MIGRATE_ONLY}"
+  for token in "${tokens[@]:-}"; do
+    token="${token// /}"
+    [[ -z "${token}" ]] && continue
+    if migration_is_denied "${token}"; then
+      if migration_denylist_acked "${token}"; then
+        warn "MIGRATE_ONLY に本番非適用リストの ${token} が含まれるが MIGRATE_DENYLIST_ACK で明示 ack 済み。適用を続行する。"
+      else
+        die "MIGRATE_ONLY に本番非適用の migration '${token}' が含まれる。
+       024 / 025 = 機能（配信計測 / 休眠再訪）を本番で有効化する判断とセットでのみ適用する。
+       027       = LIFF 連携の有効化とセット（G1-G3 ゲート通過が前提）。
+       根拠: docs/deploy-runbook.md。どうしても今回当てるなら MIGRATE_DENYLIST_ACK=${token} を明示する。"
+      fi
+    fi
+  done
+
+  log "  適用対象を MIGRATE_ONLY=[${MIGRATE_ONLY}] に限定して適用する..."
+  npx tsx scripts/migrate.ts --only "${MIGRATE_ONLY}" --apply
+  log "migration 適用 完了（対象: ${MIGRATE_ONLY}）"
 }
 
 deploy_worker() {

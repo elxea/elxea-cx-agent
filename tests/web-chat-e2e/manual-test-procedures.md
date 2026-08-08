@@ -15,7 +15,7 @@ Spec v2 WC4-1 に定義された4つのテストシナリオをカバーする�
 
 | 項目 | URL |
 |------|-----|
-| Worker (prod) | `https://elxea-agent.elxea.workers.dev` |
+| Worker (prod) | `https://elxea-agent.setaka-on.workers.dev` |
 | Web App (prod) | `https://www.elxea.com` |
 
 ---
@@ -33,7 +33,7 @@ SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 echo "Session ID: $SESSION_ID"
 
 # 1. 商品問い合わせ
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"おすすめのお茶を教えてください\", \"session_id\": \"$SESSION_ID\"}"
 
@@ -46,7 +46,7 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 
 # 2. フォローアップ質問（会話コンテキスト維持確認）
 sleep 3
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"その中で一番人気はどれですか？\", \"session_id\": \"$SESSION_ID\"}"
 
@@ -55,7 +55,7 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 #   - 「それ」「その中で」の指示対象を理解していること
 
 # 3. 会話履歴の確認
-curl -s "https://elxea-agent.elxea.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
+curl -s "https://elxea-agent.setaka-on.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
 
 # 期待結果:
 #   - messages 配列に 4 件以上（user2 + assistant2）
@@ -97,7 +97,7 @@ SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 SHOPIFY_CUSTOMER_ID="gid://shopify/Customer/REPLACE_WITH_REAL_ID"
 
 # 1. ログイン済みユーザーとしてメッセージ送信
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"おすすめのお茶を教えてください\", \"session_id\": \"$SESSION_ID\", \"shopify_customer_id\": \"$SHOPIFY_CUSTOMER_ID\"}"
 
@@ -110,7 +110,7 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 #   - user_identity_map に Shopify Customer ID が登録される
 
 # 2. Identity 解決の確認
-curl -s "https://elxea-agent.elxea.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
+curl -s "https://elxea-agent.setaka-on.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
 
 # 期待結果:
 #   - messages 配列にメッセージが含まれる
@@ -167,7 +167,7 @@ SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 SHOPIFY_CUSTOMER_ID="gid://shopify/Customer/TEST_ID"
 
 # 3. Web チャットで会話開始
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"さっき LINE で聞いた商品のことなんですが\", \"session_id\": \"$SESSION_ID\", \"shopify_customer_id\": \"$SHOPIFY_CUSTOMER_ID\"}"
 
@@ -176,15 +176,15 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 #   - （Identity 解決済みなら）LINE の会話履歴も参照して回答
 
 # 4. 会話履歴の確認（全チャネル）
-curl -s "https://elxea-agent.elxea.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
+curl -s "https://elxea-agent.setaka-on.workers.dev/api/chat/history?session_id=$SESSION_ID" | python3 -m json.tool
 
 # 期待結果:
 #   - is_linked: true
 #   - messages に LINE (channel: "line") と Web (channel: "web") の両方が含まれる
 
 # 5. チャネルフィルター付きで確認
-curl -s "https://elxea-agent.elxea.workers.dev/api/chat/history?session_id=$SESSION_ID&channel=line" | python3 -m json.tool
-curl -s "https://elxea-agent.elxea.workers.dev/api/chat/history?session_id=$SESSION_ID&channel=web" | python3 -m json.tool
+curl -s "https://elxea-agent.setaka-on.workers.dev/api/chat/history?session_id=$SESSION_ID&channel=line" | python3 -m json.tool
+curl -s "https://elxea-agent.setaka-on.workers.dev/api/chat/history?session_id=$SESSION_ID&channel=web" | python3 -m json.tool
 ```
 
 ### Supabase での確認項目
@@ -223,7 +223,7 @@ Web チャットで人間対応を要求した場合に、エスカレーショ�
 SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
 # 1. 人間対応要求
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"スタッフに繋いでください\", \"session_id\": \"$SESSION_ID\"}"
 
@@ -233,7 +233,7 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 
 # 2. 健康被害報告（最優先エスカレーション）
 SESSION_ID2=$(uuidgen | tr '[:upper:]' '[:lower:]')
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"お茶を飲んだらアレルギー反応が出ました。体調が悪いです。\", \"session_id\": \"$SESSION_ID2\"}"
 
@@ -243,7 +243,7 @@ curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
 
 # 3. クレーム対応
 SESSION_ID3=$(uuidgen | tr '[:upper:]' '[:lower:]')
-curl -s -X POST https://elxea-agent.elxea.workers.dev/api/chat \
+curl -s -X POST https://elxea-agent.setaka-on.workers.dev/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"message\": \"商品が届かないのですが。注文してから2週間経ちます。\", \"session_id\": \"$SESSION_ID3\"}"
 

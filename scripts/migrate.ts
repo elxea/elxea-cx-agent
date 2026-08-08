@@ -279,6 +279,14 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
   // 027（UNIQUE 制約の DROP）と同じく、実在で判定できる正の sentinel（table/column）が無いため specs 空。
   // 制約名を動的に特定して張り替える DO ブロックなので完全に冪等。
   "035_flow_events_web_channel": { idempotent: true, specs: [] },
+  // 036 / 037 は「消せます」を全経路に通すための **関数のみ**（CREATE OR REPLACE FUNCTION）。
+  // 034 と同じ理由で、実在で判定できる正の sentinel（新設 table/column）が無いため specs 空。
+  // 完全に冪等なので baseline では leave-idempotent、--apply が安全に再適用する。
+  // 036: roji_resolve_identity / roji_erase_person（034 を差し替え）/ roji_erasure_residue。
+  "036_roji_erase_all_stores": { idempotent: true, specs: [] },
+  // 037: 消す対象のベタ書きをやめ information_schema からの列挙に統一（roji_person_key_map 追加 +
+  //      roji_erase_person / roji_erasure_residue を差し替え）。036 と同じく関数のみ。
+  "037_roji_erase_enumerate_stores": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------
