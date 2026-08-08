@@ -66,7 +66,12 @@ cd "${REPO_ROOT}"
 
 readonly EXPECTED_PROD_REF="bquqzrbzdzjegdovxalu"
 readonly PROD_HEALTH_URL="${PROD_HEALTH_URL:-https://elxea-agent.setaka-on.workers.dev/}"
-readonly STAGING_WORKER_URL="${STAGING_WORKER_URL:-https://elxea-agent-staging.setaka-on.workers.dev}"
+# ⚠ readonly かつ「子プロセスへ渡す」変数なので export しておく（readonly な変数に対して
+#   `STAGING_WORKER_URL=... cmd` の代入プレフィックスを使うと bash が
+#   「readonly variable」で即死する＝set -e 下では staging smoke ゲートに到達できない）。
+STAGING_WORKER_URL="${STAGING_WORKER_URL:-https://elxea-agent-staging.setaka-on.workers.dev}"
+readonly STAGING_WORKER_URL
+export STAGING_WORKER_URL
 readonly LINE_API_BASE="https://api.line.me/v2/bot"
 # 本番 Worker が起動に必要とする secret 名（launch-checklist.md / setup-production.sh の REQUIRED_VARS が SoT）。
 # ⚠ 名前の存在だけを確認する（`wrangler secret list`）。値は取得不能なので検証しない。値の投入は人手のまま。
@@ -167,7 +172,8 @@ preflight() {
     warn "SKIP_STAGING_SMOKE=true。staging smoke をスキップ（非推奨）。"
   else
     log "  staging smoke 実行中（対象: ${STAGING_WORKER_URL}）..."
-    if ! STAGING_WORKER_URL="${STAGING_WORKER_URL}" pnpm test:staging-smoke; then
+    # STAGING_WORKER_URL は上部で export 済み（代入プレフィックスは readonly と衝突するため使わない）。
+    if ! pnpm test:staging-smoke; then
       die "staging smoke が緑でない。本番反映を中断（先に staging を直す）。"
     fi
     log "  [OK] staging smoke green"
