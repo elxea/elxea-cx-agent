@@ -14,6 +14,11 @@
  * ─ 公開していない ─
  *   入口はトリガー発話（SURVEY_TRIGGER）のみ。**リッチメニューの差し替えは行っていない**ので、
  *   この導線は「動く状態」だが、お客さんの画面には現れない。
+ *
+ * ─ 停止スイッチ（ROJI_SURVEY_ENABLED・既定 OFF）─
+ *   `handleRojiSurvey` の入口が唯一の関門。OFF（未設定含む）なら合言葉もトークンも横取りせず、
+ *   この機能を入れる前と同じ経路へ素通りする。判定の正本は roji-survey.ts の isRojiSurveyEnabled。
+ *   切り戻しに巻き戻し（rollback）もデプロイも要らない（secret の値を変えるだけで即時反映）。
  */
 
 import type { Env } from "../index";
@@ -25,6 +30,7 @@ import {
   planSurvey,
   planWords,
   buildSurveyState,
+  isRojiSurveyEnabled,
   type SurveyEventRow,
   type SurveyPlan,
   type SurveyState,
@@ -172,6 +178,15 @@ export async function handleRojiSurvey(
     allowWordsCapture?: boolean;
   } = {},
 ): Promise<boolean> {
+  // 停止スイッチ（ROJI_SURVEY_ENABLED・既定 OFF ＝ fail-closed）。
+  //   ここが**唯一の関門**。message 経路（routes/line.ts の handleTextMessage）も
+  //   postback 経路（同 handleEvent）も必ずこの関数を通るので、入口を 1 か所で塞げる。
+  //   OFF のとき false を返す＝完全な素通り: 合言葉も `roji｜*` トークンも横取りせず、
+  //   自由文も見ない（状態の読み出しすら行わない）。message は既存の AI 会話へ流れ、
+  //   postback は従来どおり黙って捨てられる（postback は roji 導入前もどこでも扱っていなかった）。
+  //   ＝ この機能を入れる前（master）と 1 ミリも変わらない挙動に戻る。
+  if (!isRojiSurveyEnabled(env)) return false;
+
   const action = parseSurveyAction(userMessage);
 
   if (action) {

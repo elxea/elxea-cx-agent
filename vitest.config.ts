@@ -52,6 +52,11 @@ export default defineConfig({
           NOTION_SET_MENU_DB_ID: "e2e-mock-set-menu-db",
           // AI（tea/welcome/linkage 動線では未使用だが型充足のためダミー）。
           ANTHROPIC_API_KEY: "e2e-mock-anthropic-key",
+          // roji 最初のアンケートの停止スイッチ。動線17 を検証するため **テストでは ON** にする。
+          //   これは送信フラグではない（アンケートは返信のみで LINE 送信系 API を呼ばない）ので
+          //   assert-not-prod の assertSendDisabled の対象外。実送信はゼロのまま。
+          //   OFF/未設定側の挙動は flow17 の「停止スイッチ」describe が env を一時上書きして検証する。
+          ROJI_SURVEY_ENABLED: "true",
         },
       },
     }),

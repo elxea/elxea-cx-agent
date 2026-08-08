@@ -30,6 +30,7 @@ import {
   buildQuoteScreen,
   composeUnderstanding,
   nextUnanswered,
+  isRojiSurveyEnabled,
   type SurveyAnswers,
   type SurveyEventRow,
   type SurveyState,
@@ -1011,6 +1012,46 @@ async function main() {
     assertEqual(parseSurveyAction("roji｜a｜q1｜late_night")?.kind, "answer", "回答トークン");
     assertEqual(parseSurveyAction("roji｜a｜q1｜nonexistent"), null, "未知の記号は素通り");
     assertEqual(parseSurveyAction("roji｜zzz"), null, "未知のトークンは素通り");
+  });
+
+  // -------------------------------------------------------------------------
+  console.log("\n[8b] 停止スイッチ（ROJI_SURVEY_ENABLED・既定 OFF）");
+  // -------------------------------------------------------------------------
+
+  await it('ON は "true" の完全一致だけ', () => {
+    assertEqual(isRojiSurveyEnabled({ ROJI_SURVEY_ENABLED: "true" }), true, '"true" は ON');
+  });
+
+  await it("未設定は OFF（fail-closed）", () => {
+    assertEqual(isRojiSurveyEnabled({}), false, "未設定が ON になっている");
+    assertEqual(
+      isRojiSurveyEnabled({ ROJI_SURVEY_ENABLED: undefined }),
+      false,
+      "undefined が ON になっている",
+    );
+  });
+
+  await it("紛らわしい値はすべて OFF（大文字・空白・1・yes・空文字・false）", () => {
+    for (const v of ["TRUE", "True", " true", "true ", "1", "yes", "on", "", "false", "0"]) {
+      assertEqual(
+        isRojiSurveyEnabled({ ROJI_SURVEY_ENABLED: v }),
+        false,
+        `OFF であるべき値が ON になっている: ${JSON.stringify(v)}`,
+      );
+    }
+  });
+
+  await it("既存の送信フラグと同じ判定規約（文字列完全一致 / 未設定=OFF）", () => {
+    // 送信ゲート（dormant-reengagement / marche-activation）と同じ式であることを、
+    // 同一入力に対する結果の一致で固定する（新しい流儀を発明していないことの担保）。
+    const sameShape = (v: string | undefined) => v === "true";
+    for (const v of [undefined, "", "true", "TRUE", "1", "false"]) {
+      assertEqual(
+        isRojiSurveyEnabled({ ROJI_SURVEY_ENABLED: v }),
+        sameShape(v),
+        `既存フラグと判定が食い違う: ${JSON.stringify(v)}`,
+      );
+    }
   });
 
   // -------------------------------------------------------------------------

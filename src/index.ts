@@ -121,6 +121,13 @@ export type Env = {
   DELIVERY_TEST_IMAGE_URLS?: string;
   /** 旧セグメント配信の再活性フラグ（既定 false = 退役）。 */
   LEGACY_SEGMENT_BROADCAST_ENABLED?: string;
+  /**
+   * roji 最初のアンケートの機能ゲート（停止スイッチ）。"true" のときだけアンケートが起動する。
+   * 既定 未設定=false（fail-closed: 合言葉もトークンも横取りせず、この機能を入れる前と同じ挙動）。
+   * 唯一の参照点は roji-survey.ts の isRojiSurveyEnabled（roji-survey-handler の入口で 1 回だけ見る）。
+   * DELIVERY/DORMANT/MARCHE_SEND_ENABLED とは独立（アンケートは返信のみで送信系 API を呼ばない）。
+   */
+  ROJI_SURVEY_ENABLED?: string;
   // ── R2（配信画像ホスティング）──
   // Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する。put は承認 pin 時のみ。
   /** Cloudflare アカウント ID（R2 put 用）。承認 pin 時のみ必須。 */

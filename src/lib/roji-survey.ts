@@ -61,6 +61,43 @@ import type { QuickReplyItem } from "./line";
 export { SURVEY_TRIGGER };
 
 // ---------------------------------------------------------------------------
+// 停止スイッチ（機能ゲート・既定 OFF）
+// ---------------------------------------------------------------------------
+
+/**
+ * アンケートを動かしてよいか（純粋・既定 OFF ＝ fail-closed）。
+ *
+ * `ROJI_SURVEY_ENABLED === "true"` のときだけ true。未設定・空文字・"1"・"TRUE"・"yes" は
+ * すべて false。判定は **文字列の完全一致** で、既存の機能ゲートと同じ規約に揃えている
+ * （LEGACY_SEGMENT_BROADCAST_ENABLED / DELIVERY_ALLOW_SELF_APPROVAL_PROD /
+ *   DELIVERY・DORMANT・MARCHE_SEND_ENABLED）。
+ * 引数を `Env` 全体でなく必要な 1 キーだけの構造型にするのも既存に倣う
+ * （delivery-approval.ts の selfApprovalRelaxed と同じ形。純粋・テスト容易）。
+ *
+ * ─ なぜ fail-closed か ─
+ *   「secret を消す・空にする＝止まる」が正しい挙動。設定漏れや値の取り違えで
+ *   意図せず公開されたままになる状態を作らない。
+ *
+ * ─ OFF のとき何が起きるか ─
+ *   handleRojiSurvey が入口で false を返し、**アンケートは一切起動しない**。
+ *   合言葉（SURVEY_TRIGGER）も `roji｜*` トークンも横取りせず、この機能を入れる前（master）と
+ *   完全に同じ経路へ素通りする。器（flow_events / カルテ / roji_words）にも一切書かない。
+ *
+ * ─ 途中まで答えた人が OFF になったら ─
+ *   同じく即時停止する（続きも通さない）。「OFF なら master と同じ挙動」を例外なく満たすため、
+ *   進行中だけ通す抜け道は作らない。答えは 1 問ごとに独立して器へ入っているので失われず、
+ *   再び ON にすると状態は出来事の置き場から読み直され「答えていない問いから」再開する
+ *   （この再開はもともとの設計であり、スイッチのための新しい器は 1 つも作っていない）。
+ *
+ * ─ 切り替えにデプロイは要らない ─
+ *   Cloudflare の secret（`wrangler secret put ROJI_SURVEY_ENABLED`）を書き換えるだけで
+ *   次のリクエストから効く。コードの再配布を伴わない。
+ */
+export function isRojiSurveyEnabled(env: { ROJI_SURVEY_ENABLED?: string }): boolean {
+  return env.ROJI_SURVEY_ENABLED === "true";
+}
+
+// ---------------------------------------------------------------------------
 // トークン（tea-menu / preference-diagnosis と同じ state レス方式）
 // ---------------------------------------------------------------------------
 

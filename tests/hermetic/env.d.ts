@@ -18,5 +18,7 @@ declare module "cloudflare:test" {
     NOTION_PRODUCT_LIST_DB_ID: string;
     NOTION_SET_MENU_DB_ID: string;
     ANTHROPIC_API_KEY: string;
+    /** roji 最初のアンケートの停止スイッチ。テストでは "true"（ON）。flow17 が一時的に上書きする。 */
+    ROJI_SURVEY_ENABLED?: string;
   }
 }

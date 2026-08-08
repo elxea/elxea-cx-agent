@@ -296,3 +296,143 @@ describe("hermetic L1 — 動線17: roji 最初のアンケート", () => {
     expect(surveyEvents(user).length, "アンケートの出来事を作ってしまっている").toBe(0);
   });
 });
+
+/**
+ * 停止スイッチ（ROJI_SURVEY_ENABLED）— 実 webhook 経路で「OFF なら一切起動しない」を固定する。
+ *
+ * テスト env は既定 ON（vitest.config.ts の bindings）。ここでは env を一時的に書き換えて
+ * OFF / 未設定を再現し、**終わったら必ず元へ戻す**（他のテストへ漏らさない）。
+ *
+ * 見るのは「送っていないこと」と「器に 1 行も入っていないこと」の 2 つ。
+ * 素通り先（既存の AI 会話）が何を返すかは本テストの関心ではない（ハーメティック環境では
+ * Anthropic が未モックでブロックされ、routes/line.ts の catch が定型文を返す）。
+ */
+describe("hermetic L1 — 動線17: 停止スイッチ（ROJI_SURVEY_ENABLED）", () => {
+  const mutableEnv = env as unknown as Record<string, unknown>;
+  let saved: unknown;
+
+  beforeEach(() => {
+    saved = mutableEnv.ROJI_SURVEY_ENABLED;
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete mutableEnv.ROJI_SURVEY_ENABLED;
+    else mutableEnv.ROJI_SURVEY_ENABLED = saved;
+  });
+
+  /** スイッチを一時的に切り替える（undefined = 未設定＝キーごと消す）。 */
+  function setFlag(value: string | undefined): void {
+    if (value === undefined) delete mutableEnv.ROJI_SURVEY_ENABLED;
+    else mutableEnv.ROJI_SURVEY_ENABLED = value;
+  }
+
+  it("ON（既定のテスト env）: 合言葉でアンケートが始まる", async () => {
+    const user = synthLineUserId("f17s1");
+    expect(mutableEnv.ROJI_SURVEY_ENABLED, "テスト env が ON になっていない").toBe("true");
+    await tap(user, SURVEY_TRIGGER);
+    expect(lastText()).toContain("roji（ろじ）をつくっています。");
+    expect(surveyEvents(user).map((r) => r.event_name)).toContain("survey.start");
+  });
+
+  it('OFF（"false"）: 合言葉を打っても始まらない・器に 1 行も入らない', async () => {
+    const user = synthLineUserId("f17s2");
+    setFlag("false");
+    await tap(user, SURVEY_TRIGGER);
+    expect(lastText(), "OFF なのにアンケートの案内が出た").not.toContain(
+      "roji（ろじ）をつくっています。",
+    );
+    expect(surveyEvents(user).length, "OFF なのに出来事の置き場に書いた").toBe(0);
+    expect(h.supabase.all("roji_words").length, "OFF なのに言葉の置き場に書いた").toBe(0);
+  });
+
+  it("OFF: 内部トークン（postback）を送っても反応しない（1通も返さない・master と同じ）", async () => {
+    const user = synthLineUserId("f17s3");
+    setFlag("false");
+    const before = h.line.allMessages().length;
+    for (const token of ["roji｜go", "roji｜a｜q1｜late_night", "roji｜end", "roji｜ok"]) {
+      await tap(user, token);
+    }
+    expect(h.line.allMessages().length, "OFF なのに何か送ってしまっている").toBe(before);
+    expect(surveyEvents(user).length, "OFF なのに出来事の置き場に書いた").toBe(0);
+  });
+
+  it("未設定（secret を消した状態）も OFF に倒れる（fail-closed）", async () => {
+    const user = synthLineUserId("f17s4");
+    setFlag(undefined);
+    await tap(user, SURVEY_TRIGGER);
+    expect(lastText(), "未設定なのにアンケートが始まった").not.toContain(
+      "roji（ろじ）をつくっています。",
+    );
+    await tap(user, "roji｜go");
+    expect(surveyEvents(user).length, "未設定なのに器に書いた").toBe(0);
+  });
+
+  it('紛らわしい値（"TRUE" / "1"）でも ON にならない', async () => {
+    const user = synthLineUserId("f17s5");
+    for (const v of ["TRUE", "1"]) {
+      setFlag(v);
+      await tap(user, SURVEY_TRIGGER);
+      expect(lastText(), `${v} で ON になってしまっている`).not.toContain(
+        "roji（ろじ）をつくっています。",
+      );
+    }
+    expect(surveyEvents(user).length, "器に書いた").toBe(0);
+  });
+
+  it("途中まで答えた人が OFF になったら止まる。答えは消えず、ON に戻すと続きから再開する", async () => {
+    const user = synthLineUserId("f17s6");
+
+    // ON のうちに 1 問だけ答える。
+    await tap(user, SURVEY_TRIGGER);
+    await tap(user, "roji｜go");
+    await tap(user, "roji｜a｜q1｜late_night");
+    expect(lastText()).toBe("夜おそくの時間、と覚えました。");
+    const answered = surveyEvents(user).filter((r) => r.event_name === "survey.answer");
+    expect(answered.length, "1 問目が入っていない").toBe(1);
+
+    // ここでスイッチを切る（進行中の人も例外なく止まる）。
+    setFlag("false");
+    const msgsAtOff = h.line.allMessages().length;
+    const eventsAtOff = surveyEvents(user).length;
+    await tap(user, "roji｜next");
+    await tap(user, "roji｜a｜q2｜music");
+    expect(h.line.allMessages().length, "OFF なのに続きを返してしまっている").toBe(msgsAtOff);
+    expect(surveyEvents(user).length, "OFF なのに続きを器へ書いてしまっている").toBe(eventsAtOff);
+
+    // すでに答えた 1 問目は消えていない（1問ごとに独立して書いてあるため）。
+    expect(
+      surveyEvents(user).filter((r) => r.event_name === "survey.answer").length,
+      "OFF で過去の答えが消えた",
+    ).toBe(1);
+
+    // ON に戻すと、やり直しではなく「答えていない問い」から再開する。
+    setFlag("true");
+    await tap(user, SURVEY_TRIGGER);
+    expect(lastText(), "案内からやり直させている（続きから再開していない）").toBe(
+      "お茶のほかに、どんな話なら読みたいですか。",
+    );
+  });
+
+  it("OFF のときは自由文も横取りしない（ひとこと待ちの人でも既存の会話へ素通りする）", async () => {
+    const user = synthLineUserId("f17s7");
+    h.supabase.seed("roji_word_person_refs", [
+      { person_seq: 1, subject_kind: "line", subject_id: user },
+    ]);
+    // ON のうちに「ひとこと待ち」まで進める。
+    await tap(user, SURVEY_TRIGGER);
+    await tap(user, "roji｜go");
+    await tap(user, "roji｜a｜q1｜morning");
+    for (let i = 0; i < 6; i++) await tap(user, "roji｜next");
+    await tap(user, "roji｜ok");
+    expect(lastText(), "ひとこと待ちになっていない").toBe("もし、付け足したいことがあれば。");
+
+    // スイッチを切ってから自由文を打つ → 言葉の置き場に入らない。
+    setFlag("false");
+    await tap(user, "夜より朝のほうが、しっくりきます。");
+    expect(h.supabase.all("roji_words").length, "OFF なのに言葉を取り込んだ").toBe(0);
+    expect(
+      surveyEvents(user).filter((r) => r.event_name === "survey.words_saved").length,
+      "OFF なのに『書いた』を記録した",
+    ).toBe(0);
+  });
+});

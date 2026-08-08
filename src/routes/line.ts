@@ -285,6 +285,8 @@ async function processEvents(
       try {
         // allowWordsCapture: false — postback の data は本人が書いた言葉ではないので、
         //   ひとことの捕捉には**構造的に**入らない（roji 以外が postback を使い始めても事故らない）。
+        // ⚠ 停止スイッチ（ROJI_SURVEY_ENABLED・既定 OFF）は handleRojiSurvey の入口が持つ。
+        //   OFF なら即 false で戻る＝postback は従来どおり黙って捨てられる（roji 導入前と同じ）。
         await handleRojiSurvey(lineUserId, event.postback.data, env, responder, {
           allowWordsCapture: false,
         });
@@ -1046,6 +1048,8 @@ async function handleTextMessage(
   //     完全一致トリガーを持つ tea-menu / menu-actions / 診断 / マイカルテ / 読みもの より **後**に置く。
   //     これらの方が優先され、アンケートが横取りするのは「他のどれでもない自由文」だけになる。
   //   ⚠ 公開していない: リッチメニューは差し替えていないため、この導線はお客さんの画面に現れない。
+  //   ⚠ 停止スイッチ: ROJI_SURVEY_ENABLED != "true"（既定・未設定）なら handleRojiSurvey は
+  //     入口で false を返す。この行は素通りになり、以降の既存 AI 会話フローへそのまま流れる。
   const wasRojiSurvey = await handleRojiSurvey(lineUserId, userMessage, env, responder);
   if (wasRojiSurvey) return;
 

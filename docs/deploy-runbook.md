@@ -478,6 +478,7 @@ pnpm exec wrangler secret list --env staging
 | staging の配信を止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging` | 検証環境のみ停止 |
 | 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
+| roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
 | コードごと戻す | `wrangler rollback` | 直前バージョンへ（secret は消えない・`keep_vars = true`） |
 
 **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
@@ -492,6 +493,44 @@ pnpm exec wrangler secret list --env staging
 - したがって **Notion「配信コンテンツ」の書き込み権限が、実質的な配信統制そのもの**になる。
   当該 DB の編集権限を持つ人を増やすことは「本番配信を単独で実行できる人を増やす」ことと等価として扱う。
 - 緩和は可逆。運用体制に二人目を置ける段階でフラグを削除し、独立承認者必須へ戻す。
+
+## roji最初のアンケートの停止スイッチ（`ROJI_SURVEY_ENABLED`）
+
+roji最初のアンケート（6問・全部1タップ）を、**巻き戻し（rollback）なしで止められる**ようにするスイッチ。
+配信の送信スイッチ（`DELIVERY_SEND_ENABLED` 等）とは**完全に独立**（アンケートは返信のみで、
+push / broadcast / multicastを一切呼ばない）。
+
+| 項目 | 内容 |
+|---|---|
+| 名前 | `ROJI_SURVEY_ENABLED`（Cloudflare Workers Secret） |
+| ONの条件 | 値が **`"true"` の完全一致**のときだけ。`"TRUE"` / `"1"` / `"yes"` / 前後に空白 は**すべてOFF** |
+| 未設定のとき | **OFF**（fail-closed）。secretを消す・空にする＝止まる |
+| 判定の正本 | `src/lib/roji-survey.ts` の `isRojiSurveyEnabled()`。参照点は `roji-survey-handler.ts` の `handleRojiSurvey` 入口 **1か所のみ** |
+| 切り替えにデプロイ | **不要**。secretを書き換えれば次のリクエストから効く |
+
+### OFFのとき何が起きるか
+
+- 合言葉（`rojiをつくっています`）を打っても始まらない
+- 内部トークン（`roji｜…`・ボタンのpostback）を送っても反応しない（1通も返さない）
+- 自由文も横取りしない（「ひとこと待ち」の人でも既存の会話へ素通りする）
+- 器（`flow_events` / カルテ / `roji_words`）に**1行も書かない**
+- **この機能を入れる前（master）と同じ挙動に戻る**（postbackはroji導入前もどこでも扱っていなかった）
+
+### 途中まで答えた人がOFFになったら
+
+**その人も即時停止する**（「進行中だけ続きを通す」抜け道は作っていない）。理由は
+「OFFならmasterと同じ挙動」を例外なく満たすため。
+**答えは失われない** — アンケートは1問ごとに独立して器へ書くため、OFFの時点までの答えは残る。
+再びONにすると状態は出来事の置き場から読み直され、**やり直しではなく「答えていない問い」から再開**する。
+
+### 値の確認について
+
+`DELIVERY_SEND_ENABLED` と同じ制約があり、**本番の値は読み出せない**（`wrangler secret list` は名前のみ）。
+「今ONかOFFか」を文書側で断定しない。挙動で確かめる（OFFなら合言葉に無反応）。
+
+> このスイッチを追加した工程（2026-08-08）では、**本番にもstagingにもsecretを登録していない**
+> （コードとテストのみ・デプロイもしていない）。登録は公開工程で別途行う。
+> したがって「今どちらに何が入っているか」は、この節からは断定できない（上の「値の確認について」に従う）。
 
 ## LINE×Shopify 連携（LIFF / 案A）Cutover ハードゲート（QA S-2・別プロバイダの罠）
 
