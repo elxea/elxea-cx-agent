@@ -276,6 +276,20 @@ async function processEvents(
           .catch(console.error);
       }
     }
+    // postback イベント（1タップのボタンのうち、内部の記号を運ぶもの）。
+    //   従来 postback は**どこでも扱っていなかった**（黙って捨てていた）ため、この分岐の追加で
+    //   既存の動線は 1 つも変わらない。roji のアンケートだけが使う。
+    //   message ではなく postback を使う理由は roji-survey.ts の `qr()` を参照
+    //   （内部の記号を本人の吹き出しに出さないため）。
+    if (event.type === "postback" && event.postback) {
+      try {
+        await handleRojiSurvey(lineUserId, event.postback.data, env, responder);
+      } catch (error) {
+        console.error("Error processing postback event:", error);
+        recordApiError(env, error instanceof Error ? error.message : String(error));
+      }
+    }
+
     // フォローイベント（友だち追加時のウェルカムメッセージ）
     if (event.type === "follow") {
       try {

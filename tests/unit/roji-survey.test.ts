@@ -21,7 +21,13 @@ import {
   buildSurveyState,
   buildProgressLine,
   buildFinalScreen,
+  buildEstimateLine,
   buildQuestionScreen,
+  buildIntroScreen,
+  buildFinalScreenMessage,
+  buildFixScreen,
+  buildWordsScreen,
+  buildQuoteScreen,
   composeUnderstanding,
   nextUnanswered,
   type SurveyAnswers,
@@ -256,6 +262,31 @@ async function main() {
   console.log("\n[2] 条件① 全部1タップ");
   // -------------------------------------------------------------------------
 
+  await it("内部の記号が本人の吹き出しに出ない（全ボタンが postback・表示は選んだ言葉だけ）", () => {
+    const screens = [
+      buildIntroScreen(),
+      ...QUESTIONS.map((q) => buildQuestionScreen(q)),
+      buildFinalScreenMessage({ q1: ["morning"] }),
+      buildFixScreen({ q3: ["serenity"] }),
+      buildWordsScreen("ok"),
+      buildQuoteScreen(),
+    ];
+    for (const s of screens) {
+      for (const item of s.quickReplies) {
+        assertEqual(item.action.type, "postback", `message ボタンが残っている: ${item.action.label}`);
+        assertEqual(item.action.text, undefined, "本人の発話として記号が送られてしまう");
+        assertTrue(!!item.action.data, `内部データが無い: ${item.action.label}`);
+        // 本人の画面に出るのは、押した言葉そのものだけ。
+        assertEqual(item.action.displayText, item.action.label, "吹き出しに出す文字がラベルと違う");
+        assertTrue(
+          !String(item.action.displayText).includes("｜") &&
+            !String(item.action.displayText).includes("roji｜"),
+          `吹き出しに内部の記号が出る: ${item.action.displayText}`,
+        );
+      }
+    }
+  });
+
   await it("どの問いの画面にも〔ここで終える〕が常設されている", () => {
     for (const q of QUESTIONS) {
       const screen = buildQuestionScreen(q);
@@ -477,10 +508,76 @@ async function main() {
     assertEqual(k.tasteProfile?.preferredCategories, ["green"], "項目9");
     assertEqual(k.safety?.tags, ["caffeine_sensitive"], "項目6");
     assertEqual(k.eventInterest, "online", "項目14");
-    assertTrue(
-      (k.estimateLine ?? "").includes("カフェインのことは、選ぶ前に必ず見ます。"),
-      "項目19（1行の推定）が入っていない",
+    // 項目19 は「1行の推定」だけ。安全の行（項目6）・集まりの行（項目14）は含めない。
+    assertEqual(
+      k.estimateLine,
+      "夜おそくの時間に、音楽と、畑の話。ほどけるための一杯。",
+      "項目19（1行の推定）",
     );
+  });
+
+  await it("項目19 には『1行の推定』だけが入る（画面の全文を入れない）", async () => {
+    const { karte } = await runFlow([
+      tap("q1", "late_night"),
+      "roji｜next",
+      tap("q2", "music"),
+      tap("q2", "farm"),
+      "roji｜next",
+      tap("q3", "serenity"),
+      "roji｜next",
+      tap("q4", "green"),
+      "roji｜next",
+      tap("q5", "caffeine_sensitive"),
+      "roji｜next",
+      tap("q6", "online"),
+      "roji｜next",
+      "roji｜ok",
+    ]);
+    const line = karte.read("Utest0001").estimateLine as string;
+    // 1行であること（改行を含まない）。
+    assertEqual(line.includes("\n"), false, `項目19 が複数行になっている: ${JSON.stringify(line)}`);
+    // 画面の飾り（見出し・問いかけ・接続）が混ざっていないこと。
+    for (const junk of ["いま、rojiが分かっていること。", "合っていますか。", "そのうえで、"]) {
+      assertTrue(!line.includes(junk), `項目19 に画面の文が混ざっている: ${junk}`);
+    }
+    // 安全の行・集まりの行は別の項目が正本なので、この行に持たせない。
+    assertTrue(!line.includes("選ぶ前に必ず見ます"), "項目19 に安全の行（項目6）が混ざっている");
+    assertTrue(!line.includes("集まりは"), "項目19 に集まりの行（項目14）が混ざっている");
+    // ただし「安全の申告があるならお茶の名前を出さない」規則はこの行にも効く。
+    assertTrue(!line.includes("緑茶"), "項目19 に安全の申告があるのにお茶の名前が出ている");
+    assertEqual(line, "夜おそくの時間に、音楽と、畑の話。ほどけるための一杯。", "項目19 の1行");
+  });
+
+  await it("項目19: 安全の申告が無い人は、お茶の名前まで入った1行になる", () => {
+    assertEqual(
+      buildEstimateLine({
+        q1: ["late_night"],
+        q2: ["music", "farm"],
+        q3: ["serenity"],
+        q4: ["green"],
+        q5: ["none"],
+        q6: ["online"],
+      }),
+      "夜おそくの時間に、音楽と、畑の話。ほどけるための、やわらかい緑茶。",
+      "項目19 の1行",
+    );
+  });
+
+  await it("項目19: 推定と呼べるものが無いときは書かない（空で上書きしない）", async () => {
+    assertEqual(buildEstimateLine({ q5: ["caffeine_sensitive"] }), "", "安全だけなら推定は空");
+    const { karte } = await runFlow([tap("q5", "caffeine_sensitive"), "roji｜next", "roji｜ok"]);
+    assertEqual(karte.read("Utest0001").estimateLine, undefined, "空の推定を書き込んでいる");
+  });
+
+  await it("項目20: 〔まだ、決めていない〕は常設の選択肢として意思が残る", async () => {
+    const { karte } = await runFlow([tap("q1", "morning"), "roji｜next", "roji｜undec"]);
+    assertEqual(karte.read("Utest0001").estimateCorrection?.undecided, true, "項目20 の意思");
+  });
+
+  await it("項目31: 1行の推定への返事（合っている / 少し違う / まだ決めていない）が記号で残る", async () => {
+    const { events } = await runFlow([tap("q1", "morning"), "roji｜next", "roji｜diff"]);
+    const confirms = events.rows.filter((r) => r.event_name === "survey.confirm");
+    assertEqual(confirms.map((r) => r.value), ["diff"], "〔少し違う〕が項目31 に残る");
   });
 
   await it("シナリオ: 安全の申告だけをした人 → 項目6 に入り、1行は安全だけになる", async () => {
@@ -574,6 +671,106 @@ async function main() {
     assertEqual([w.music, w.farm], [1, 1], "項目12 の押し足し");
   });
 
+  // -------------------------------------------------------------------------
+  console.log("\n[5b] 連打・再タップに強いこと（何度押しても結果が同じ）");
+  // -------------------------------------------------------------------------
+
+  await it("同じ選択肢を5回押しても、窓の傾き（項目12）は1のまま", async () => {
+    const { karte, events } = await runFlow([
+      tap("q2", "music"),
+      tap("q2", "music"),
+      tap("q2", "music"),
+      tap("q2", "music"),
+      tap("q2", "music"),
+    ]);
+    assertEqual(karte.read("Utest0001").windowAffinity?.music, 1, "押した回数が傾きになっている");
+    // 押した事実そのものは、生の出来事として毎回残る（消さない）。
+    assertEqual(
+      events.rows.filter((r) => r.event_name === "survey.answer").length,
+      5,
+      "項目31 に押した回数が残っていない",
+    );
+  });
+
+  await it("同じ気持ちを5回押しても、傾き（項目7）は重み1回分のまま", async () => {
+    const { karte } = await runFlow([
+      tap("q3", "serenity"),
+      tap("q3", "serenity"),
+      tap("q3", "serenity"),
+      tap("q3", "serenity"),
+      tap("q3", "serenity"),
+    ]);
+    assertEqual(
+      karte.read("Utest0001").persona?.scores.serenity,
+      SURVEY_PERSONA_WEIGHT,
+      "連打で傾きが積み上がっている",
+    );
+  });
+
+  await it("気持ちを押し替えたら、前の分は戻る（両方が積み上がらない）", async () => {
+    const { karte } = await runFlow([tap("q3", "serenity"), tap("q3", "explorer")]);
+    const s = karte.read("Utest0001").persona!.scores;
+    assertEqual(
+      [s.serenity, s.explorer],
+      [0, SURVEY_PERSONA_WEIGHT],
+      "押し替えたのに前の傾きが残っている",
+    );
+    assertEqual(karte.read("Utest0001").persona?.primary, "explorer", "primary が押し替え後になる");
+  });
+
+  await it("同じ安全の申告・同じカテゴリを何度押しても増えない", async () => {
+    const { karte } = await runFlow([
+      tap("q5", "allergy"),
+      tap("q5", "allergy"),
+      tap("q4", "green"),
+      tap("q4", "green"),
+    ]);
+    const k = karte.read("Utest0001");
+    assertEqual(k.safety?.tags, ["allergy"], "項目6 が重複している");
+    assertEqual(k.tasteProfile?.preferredCategories, ["green"], "項目9 の照合語彙が重複している");
+    assertEqual(k.teaCategoryPreference?.values, ["green"], "項目9 の本人の答えが重複している");
+  });
+
+  await it("集まり・場面を押し替えても、値は1つに保たれる", async () => {
+    const { karte } = await runFlow([
+      tap("q6", "onsite"),
+      tap("q6", "online"),
+      tap("q1", "morning"),
+      tap("q1", "morning"),
+    ]);
+    const k = karte.read("Utest0001");
+    assertEqual(k.eventInterest, "online", "項目14 は押し替え後の1つ");
+    assertEqual(k.drinkingScenes?.values, ["morning"], "項目11 が重複している");
+  });
+
+  // -------------------------------------------------------------------------
+  console.log("\n[5c] 広げた器（項目11 の複数値 / 項目9 の「決まっていない」）");
+  // -------------------------------------------------------------------------
+
+  await it("項目11: 複数の場面を、押した順に全部持てる", async () => {
+    const { karte } = await runFlow([
+      tap("q1", "late_night"),
+      tap("q1", "morning"),
+      tap("q1", "evening"),
+    ]);
+    const k = karte.read("Utest0001");
+    assertEqual(k.drinkingScenes?.values, ["late_night", "morning", "evening"], "項目11 の複数値");
+    // 代表値（既存の読み手が使う単一値）は、1つ目に確定した答えのまま。
+    assertEqual(k.tasteProfile?.scenePref, "夜おそく、ひとりで", "代表値が動いている");
+  });
+
+  await it("項目11・項目9: 「決まっていない」と「まだ聞いていない」が別の値になる", async () => {
+    const { karte } = await runFlow([tap("q1", "undecided"), tap("q4", "undecided")]);
+    const k = karte.read("Utest0001");
+    assertEqual(k.drinkingScenes?.undecided, true, "項目11 の「決まっていない」が値として残らない");
+    assertEqual(k.teaCategoryPreference?.undecided, true, "項目9 の「決まっていない」が値として残らない");
+    // 照合語彙は汚さない（どのお茶にも当たらない値を 1 つも入れない）。
+    assertEqual(k.tasteProfile?.preferredCategories ?? [], [], "照合語彙に「決まっていない」が混ざった");
+    // まだ聞いていない人は、そもそも項目が無い（＝空欄）。
+    const { karte: untouched } = await runFlow([tap("q5", "none")]);
+    assertEqual(untouched.read("Utest0001").drinkingScenes, undefined, "聞いていないのに値がある");
+  });
+
   await it("〔いまはやめておく〕は追いかけない（何も送らない）", () => {
     const plan = planSurvey({ kind: "decline" }, buildSurveyState([]));
     assertEqual(plan.message, null, "何か送ってしまっている");
@@ -631,6 +828,28 @@ async function main() {
       [() => planSurvey({ kind: "confirm", choice: "undecided" }, buildSurveyState([])).message!.text, "もし、書いておきたいことがあれば。"],
     ];
     for (const [fn, expected] of cases) assertEqual(fn(), expected, "呼びかけの文");
+  });
+
+  await it("〔書く〕で呼びかけを出し直したときも「出した」が記録される（分母を落とさない）", async () => {
+    const { events } = await runFlow([
+      tap("q1", "morning"),
+      "roji｜next",
+      "roji｜ok",
+      "roji｜write",
+    ]);
+    const prompts = events.rows.filter((r) => r.event_name === "survey.words_prompt");
+    assertEqual(prompts.length, 2, "出し直したのに『出した』が残っていない");
+    assertEqual(prompts.map((r) => r.value), ["ok", "ok"], "呼びかけの文脈（項目39）が残る");
+  });
+
+  await it("1つも答えずに終えた人の最後の画面に、空行が2つ続かない", () => {
+    const s = buildFinalScreen({});
+    assertTrue(!s.includes("\n\n\n"), `空行が2つ続いている: ${JSON.stringify(s)}`);
+    assertEqual(
+      s,
+      ["いま、rojiが分かっていること。", "", "ここから、少しずつです。"].join("\n"),
+      "1つも答えていない人の画面",
+    );
   });
 
   await it("言葉を書いた人にだけ、引用の許可を一度だけ聞く", () => {

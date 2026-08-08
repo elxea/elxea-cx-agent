@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { installHermeticFetch, type Hermetic } from "../lib/hermetic";
 import { dispatchLineWebhook, settle } from "../lib/webhook";
-import { messageEvent, synthLineUserId } from "../lib/synthetic";
+import { messageEvent, postbackEvent, synthLineUserId } from "../lib/synthetic";
 import { SURVEY_TRIGGER } from "../../src/lib/roji-survey-copy";
 
 let h: Hermetic;
@@ -30,12 +30,18 @@ afterEach(() => {
   h.restore();
 });
 
-/** 1 タップを webhook として流す。 */
+/**
+ * 1 タップ / 1 発話を webhook として流す。
+ *
+ * 内部の記号（`roji｜...`）は **postback** で流す（本番のボタンと同じ経路）。
+ * トリガー発話・ひとことの自由文は message で流す。
+ */
 async function tap(user: string, text: string): Promise<void> {
+  const isToken = text.startsWith("roji｜");
   const { status } = await dispatchLineWebhook({
     env,
     channelSecret: String(env.LINE_CHANNEL_SECRET),
-    events: [messageEvent(user, text)],
+    events: [isToken ? postbackEvent(user, text) : messageEvent(user, text)],
   });
   expect(status).toBe(200);
   await settle();
@@ -74,6 +80,30 @@ describe("hermetic L1 — 動線17: roji 最初のアンケート", () => {
     expect(lastLabels()).toEqual(["はじめる", "いまはやめておく"]);
     // 出来事: 案内を出した（＝アンケートを出したことの分母）。
     expect(surveyEvents(user).map((r) => r.event_name)).toContain("survey.start");
+  });
+
+  it("本人の画面に内部の記号が1文字も出ない（実 webhook 経路で確認）", async () => {
+    const user = synthLineUserId("f17i");
+    await tap(user, SURVEY_TRIGGER);
+    await tap(user, "roji｜go");
+    await tap(user, "roji｜a｜q1｜late_night");
+
+    // LINE へ実際に送った全メッセージのボタンを調べる。
+    const msgs = h.line.allMessages() as Array<{
+      quickReply?: { items?: Array<{ action?: Record<string, unknown> }> };
+    }>;
+    let checked = 0;
+    for (const m of msgs) {
+      for (const item of m.quickReply?.items ?? []) {
+        const a = item.action ?? {};
+        expect(a.type, "内部の記号を message で運んでいる（吹き出しに出る）").toBe("postback");
+        expect(a.text, "本人の発話として記号が送られてしまう").toBeUndefined();
+        expect(String(a.displayText), "吹き出しに内部の記号が出る").not.toContain("roji｜");
+        expect(String(a.displayText)).toBe(String(a.label));
+        checked++;
+      }
+    }
+    expect(checked, "ボタンが 1 つも検査されていない").toBeGreaterThan(0);
   });
 
   it("〔いまはやめておく〕は追いかけない（1通も返さない）", async () => {

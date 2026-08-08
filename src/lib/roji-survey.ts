@@ -301,6 +301,16 @@ export function composeUnderstanding(answers: SurveyAnswers): {
   lines: string[];
   /** 気持ち or お茶が入っているか（＝結びを「合っていますか。」にするか）。 */
   hasSubstance: boolean;
+  /**
+   * **項目19 に入れる「1行の推定」だけ**（画面の見出し・安全の行・集まりの行・問いかけを含まない）。
+   *
+   * 項目定義の項目19 は「1行の推定（いまの値）／自由記述（定型の言い回しに限る）／**1行**」。
+   * 画面に出す文の全体はここに入れない（推定と画面の飾りが混ざり、項目29 と対応が取れなくなる）。
+   * 安全の申告は項目6、集まりは項目14 が正本なので、この行には持たせない。
+   * ただし **安全の申告があるときにお茶の名前を出さない**規則は、この行にもそのまま効く。
+   * 空文字 = まだ推定と呼べるものが無い（＝項目19 に書かない）。
+   */
+  estimate: string;
 } {
   const lines: string[] = [];
 
@@ -321,11 +331,16 @@ export function composeUnderstanding(answers: SurveyAnswers): {
   const q1Undecided = chosen(answers, "q1").some((c) => c.undecided);
   const q2Undecided = chosen(answers, "q2").some((c) => c.undecided);
 
-  let main = "";
-  if (times.length === 0 && windows.length === 0 && q1Undecided && q2Undecided) {
-    // Spec 2-7 例4: 全部「決まっていない」系の人。欠落の報告にしない。
-    main = ALL_UNDECIDED_LINE;
-  } else {
+  // 1行の本体を組み立てる。
+  //   joined = true  : 上の「安全の行」に続けて読む形（画面用。「…一杯を。」と receive する）
+  //   joined = false : 単独で読む形（項目19 に入れる 1行。前後に何も無い前提）
+  // 2 つを 1 か所から作ることで、画面と項目19 の中身がずれないようにする。
+  const buildMain = (joined: boolean): string => {
+    if (times.length === 0 && windows.length === 0 && q1Undecided && q2Undecided) {
+      // Spec 2-7 例4: 全部「決まっていない」系の人。欠落の報告にしない。
+      return ALL_UNDECIDED_LINE;
+    }
+    let main = "";
     const segs: string[] = [];
     if (times.length > 0) {
       const t = times[0];
@@ -340,21 +355,31 @@ export function composeUnderstanding(answers: SurveyAnswers): {
     }
     if (segs.length > 0) main = `${segs.join("、")}。`;
 
-    // 気持ちとお茶。規則1: 安全の申告があるときはお茶の名前を出さない。
+    // 気持ちとお茶。規則1: 安全の申告があるときはお茶の名前を出さない（joined に関わらず不変）。
     let cup = "";
     if (mood && tea && !hasSafety) cup = `${mood.fragment}、${tea.fragment}。`;
-    else if (mood) cup = `${mood.fragment}${CUP_WITHOUT_TEA}${hasSafety ? "を" : ""}。`;
+    else if (mood) cup = `${mood.fragment}${CUP_WITHOUT_TEA}${joined && hasSafety ? "を" : ""}。`;
     else if (tea && !hasSafety) cup = `${tea.fragment}。`;
     if (cup) main = main ? `${main}${cup}` : cup;
-  }
+    return main;
+  };
 
+  const main = buildMain(true);
   if (main) lines.push(hasSafety ? `${AFTER_SAFETY_PREFIX}${main}` : main);
 
   // 規則3: 集まり。
   const gathering = substantive(answers, "q6")[0] ?? null;
   if (gathering) lines.push(gatheringLine(gathering.fragment as string));
 
-  return { lines, hasSubstance: Boolean(mood || tea) };
+  return { lines, hasSubstance: Boolean(mood || tea), estimate: buildMain(false) };
+}
+
+/**
+ * 項目19 に入れる「1行の推定」を作る（純粋）。
+ * 画面に出す文の全体ではない（画面は `buildFinalScreen`）。
+ */
+export function buildEstimateLine(answers: SurveyAnswers): string {
+  return composeUnderstanding(answers).estimate;
 }
 
 /**
@@ -389,9 +414,11 @@ export function buildProgressLine(answers: SurveyAnswers, justAnswered: StepId):
 /** 最後の画面の全文（Spec 2-7）。 */
 export function buildFinalScreen(answers: SurveyAnswers): string {
   const { lines, hasSubstance } = composeUnderstanding(answers);
-  const body = lines.length > 0 ? lines.join("\n") : "";
   const tail = hasSubstance ? FINAL_ASK : FINAL_JUST_BEGUN;
-  return [FINAL_HEADER, "", body, "", tail].filter((s) => s !== undefined).join("\n");
+  // 本体が空のとき（1 つも答えずに終えた人）に空行が 2 つ続かないようにする。
+  return lines.length > 0
+    ? [FINAL_HEADER, "", lines.join("\n"), "", tail].join("\n")
+    : [FINAL_HEADER, "", tail].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -403,8 +430,16 @@ export interface OutMessage {
   quickReplies: QuickReplyItem[];
 }
 
-function qr(label: string, text: string): QuickReplyItem {
-  return { type: "action", action: { type: "message", label, text } };
+/**
+ * 1タップのボタン（**postback で作る**）。
+ *
+ * なぜ postback か: message で作ると、押した瞬間に `roji｜a｜q1｜late_night` という
+ * **内部の記号が本人の吹き出しにそのまま出る**。roji で最初に触れてもらうものなので、
+ * 画面に内部の記号を 1 文字も出さない。`displayText` に選んだ言葉だけを出し、
+ * 記号は `data`（画面に出ない）で運ぶ。
+ */
+function qr(label: string, data: string): QuickReplyItem {
+  return { type: "action", action: { type: "postback", label, data, displayText: label } };
 }
 
 const endButton = () => qr(LABEL_END, tok("end"));
@@ -503,6 +538,11 @@ export function buildClosingScreen(): OutMessage {
 export interface KarteWrite {
   step?: StepId;
   slug?: string;
+  /**
+   * 単一選択で押し替えたときの、**前に効いていた記号**。
+   * 傾き（項目7）のように加算で持つ項目を「上書き」にするために要る（積み上がりを防ぐ）。
+   */
+  replaces?: string | null;
   /** 訂正で選び直した気持ち（項目7 の上書き ＋ 項目20）。 */
   fixChoice?: string | null;
   /**
@@ -512,8 +552,13 @@ export interface KarteWrite {
   fixUndo?: string | null;
   /** 引用の許可（項目18）。 */
   quoteConsent?: boolean;
-  /** 1行の推定（項目19）。 */
+  /**
+   * 項目19: **1行の推定だけ**。画面に出す文の全体を入れてはならない
+   * （項目定義の持ち方は「1行」。画面の見出し・安全の行・問いかけは別の項目が正本）。
+   */
   estimateLine?: string;
+  /** 項目20 の常設選択肢「まだ、決めていない」を押した。 */
+  correctionUndecided?: boolean;
 }
 
 /** 出来事の置き場に残すもの（項目31 / 29）。 */
@@ -581,12 +626,18 @@ export function planSurvey(action: SurveyAction, state: SurveyState): SurveyPlan
             : [...cur, action.slug]
           : [action.slug],
       };
+      // 連打・再タップへの備え（1タップのボタンでは普通に起きる）。
+      //   すでに記録済みの記号をもう一度押しても、**カルテの値は動かさない**（何度押しても同じ）。
+      //   押した事実そのものは項目31 に毎回残す（生の出来事は消さない）。
+      const repeat = cur.includes(action.slug);
+      //   単一選択で別の記号に押し替えたときは、前の分を戻してから足す（積み上がりを防ぐ）。
+      const replaces = !q.multi && cur.length > 0 && cur[0] !== action.slug ? cur[0] : null;
       return {
         message: buildAfterAnswerScreen(q, nextAnswers),
         // 項目31: 押した記号そのもの ＋ 聞いた契機（＝アンケート）。
         events: [{ eventName: "survey.answer", step: action.step, value: action.slug }],
         // 1問ごとに独立して書き込む（まとめて保存しない）。
-        karte: { step: action.step, slug: action.slug },
+        karte: repeat ? null : { step: action.step, slug: action.slug, replaces },
         words: null,
       };
     }
@@ -607,16 +658,27 @@ export function planSurvey(action: SurveyAction, state: SurveyState): SurveyPlan
 
     case "confirm": {
       if (action.choice === "diff") {
-        return { ...NO_PLAN, message: buildFixScreen(answers) };
+        return {
+          ...NO_PLAN,
+          message: buildFixScreen(answers),
+          // 項目31: 押した記号（〔少し違う〕）を残す。訂正の言い換えを選ぶ前に離れた人も、
+          // 「合っていなかった」ことだけは残る。
+          events: [{ eventName: "survey.confirm", value: "diff" }],
+        };
       }
       const context: WordsContext = action.choice === "ok" ? "ok" : "undecided";
       return {
         message: buildWordsScreen(context),
         events: [
+          { eventName: "survey.confirm", value: action.choice },
           { eventName: "survey.words_prompt", value: context },
-          // 項目19: 1行の推定を、いまの値として残す。
         ],
-        karte: { estimateLine: buildFinalScreen(answers) },
+        karte: {
+          // 項目19: **1行の推定だけ**（画面の全文ではない）。
+          estimateLine: buildEstimateLine(answers),
+          // 項目20: 「まだ、決めていない」は常設の選択肢（項目定義）。押されたら意思として残す。
+          ...(action.choice === "undecided" ? { correctionUndecided: true } : {}),
+        },
         words: { context },
       };
     }
@@ -637,19 +699,25 @@ export function planSurvey(action: SurveyAction, state: SurveyState): SurveyPlan
         karte: {
           fixChoice: action.slug,
           fixUndo: (answers.q3 ?? [])[0] ?? null,
-          estimateLine: buildFinalScreen(nextAnswers),
+          // 項目19: 訂正後の **1行の推定だけ**（画面の全文ではない）。
+          estimateLine: buildEstimateLine(nextAnswers),
         },
         words: { context },
       };
     }
 
-    case "write":
+    case "write": {
       // 入力欄の代わりに、同じ呼びかけの文をもう一度出して待つ（新しい文言を作らない）。
+      const context = state.awaitingContext ?? "ok";
       return {
         ...NO_PLAN,
-        message: buildWordsScreen(state.awaitingContext ?? "ok"),
-        words: { context: state.awaitingContext ?? "ok" },
+        message: buildWordsScreen(context),
+        // 再表示も「出した」として残す。**出したのに書かれなかった**が分母として要るため
+        // （出したかどうかを数えられないと、書かれなかったことの意味が読めなくなる）。
+        events: [{ eventName: "survey.words_prompt", value: context }],
+        words: { context },
       };
+    }
 
     case "skipWords":
       return { ...NO_PLAN, message: buildClosingScreen(), events: [{ eventName: "survey.finished" }] };

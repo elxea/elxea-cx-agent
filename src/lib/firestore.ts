@@ -117,6 +117,41 @@ export type TeaRequestList = {
   updatedAt?: string; // ISO 8601
 };
 
+/**
+ * 項目11: 飲む場面・時間帯（選択肢・**複数可**）。
+ *
+ * なぜ tasteProfile.scenePref と別に持つか（写しではない・母集団が違う）:
+ *   `tasteProfile.scenePref` は **単一の文字列**で、会話由来の推定も入る「いまの代表値」。
+ *   項目定義の項目11 は「選択肢（複数可）」で、**本人が自分で選んだ答え**そのもの。
+ *   単一値に押し込むと (a) 2つ目以降の答えが落ちる (b)「決まっていないと答えた」と
+ *   「まだ聞いていない」が同じ空欄になる —— 起きなかったことが記録されない状態になる。
+ *   よって本人の答えはここに持ち、`scenePref` は従来どおり代表値として残す（既存の読み手を壊さない）。
+ */
+export type DrinkingScenes = {
+  /** 選んだ記号（複数可・押した順）。 */
+  values?: string[];
+  /** 〔決まっていない〕を押した（**空欄＝未回答とは別の値**）。 */
+  undecided?: boolean;
+  updatedAt?: string; // ISO 8601
+};
+
+/**
+ * 項目9: 好きなカテゴリ（選択肢・複数可: 緑茶 / 烏龍茶 / 紅茶）。
+ *
+ * なぜ tasteProfile.preferredCategories と別に持つか（写しではない・母集団が違う）:
+ *   `preferredCategories` は **お茶の族の照合に使う語彙リスト**で、購入・会話由来の値も混ざる。
+ *   ここに「決まっていない」を混ぜると照合語彙が汚れる（どのお茶にも当たらない値が紛れる）。
+ *   一方、項目定義は「聞いたが決まっていなかった」を値として持つことを求める。
+ *   よって本人の答えはここに持ち、照合に使える値だけを `preferredCategories` にも入れる。
+ */
+export type TeaCategoryPreference = {
+  /** 選んだ記号（green / oolong / black・複数可・押した順）。 */
+  values?: string[];
+  /** 〔決まっていない〕を押した（**空欄＝未回答とは別の値**）。 */
+  undecided?: boolean;
+  updatedAt?: string; // ISO 8601
+};
+
 /** 項目14: イベントへの関心。出た回の記録からも更新される。 */
 export type EventInterest = "onsite" | "online" | "not_now";
 
@@ -141,6 +176,10 @@ export type EstimateCorrection = {
 export type RojiKarteFields = {
   /** 項目6: 安全に関する申告。割当から外す条件・全 Q の前提。 */
   safety?: SafetyDeclaration;
+  /** 項目9: 好きなカテゴリ（本人の答え。複数可・「決まっていない」を値として持つ）。 */
+  teaCategoryPreference?: TeaCategoryPreference;
+  /** 項目11: 飲む場面・時間帯（本人の答え。複数可・「決まっていない」を値として持つ）。 */
+  drinkingScenes?: DrinkingScenes;
   /** 項目12: 窓への傾き（お茶・文学・アート・音楽・農・科学）。 */
   windowAffinity?: WindowAffinity;
   /** 項目13: また入れてほしい / もういらない。 */

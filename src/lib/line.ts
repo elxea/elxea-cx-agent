@@ -34,9 +34,21 @@ export async function verifyLineSignature(
 export type QuickReplyItem = {
   type: "action";
   action: {
-    type: "message";
+    /**
+     * "message"  = タップすると本人の発話としてそのまま送られる（**本人の吹き出しに text が出る**）。
+     * "postback" = タップしても本人の吹き出しには `displayText` しか出ない（`data` は画面に出ない）。
+     *
+     * 内部の記号（`roji｜a｜q1｜late_night` 等）を運ぶボタンは **必ず postback を使う**。
+     * message で運ぶと記号がそのまま本人の画面に残り、体験を壊す。
+     */
+    type: "message" | "postback";
     label: string;
-    text: string;
+    /** type="message" のとき必須。送られる発話そのもの。 */
+    text?: string;
+    /** type="postback" のとき必須。**画面に出ない**内部データ。 */
+    data?: string;
+    /** type="postback" のとき、本人の吹き出しに出す文字（人が読む言葉だけを入れる）。 */
+    displayText?: string;
   };
 };
 

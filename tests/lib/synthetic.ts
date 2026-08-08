@@ -53,6 +53,30 @@ export function messageEvent(
 }
 
 /**
+ * LINE postback イベントを 1 件組む。
+ *
+ * 1タップのボタンのうち、**内部の記号を運ぶもの**（roji のアンケート）は postback で作る
+ * （message で作ると記号が本人の吹き出しに出てしまうため）。`data` は画面に出ない。
+ */
+export function postbackEvent(
+  userId: string,
+  data: string,
+  idx = 0,
+): Record<string, unknown> {
+  const now = Date.now();
+  return {
+    type: "postback",
+    mode: "active",
+    timestamp: now + idx,
+    source: { type: "user", userId },
+    replyToken: SYNTH_REPLY_TOKEN,
+    postback: { data },
+    webhookEventId: synthWebhookEventId(),
+    deliveryContext: { isRedelivery: false },
+  };
+}
+
+/**
  * LINE フォローイベント（友だち追加）を 1 件組む。
  * QR 同梱物経由のオンボーディング（handleFollowEvent）を webhook 経路で駆動するために使う。
  * ref（pkg_{slug}）自体は follow event に載らない（LINE 仕様）ため、QR は pending_follow_refs へ

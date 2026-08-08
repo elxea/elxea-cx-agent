@@ -82,6 +82,8 @@ export type FlowEventName =
   | "survey.decline"
   | "survey.answer"
   | "survey.end"
+  //   survey.confirm    : 項目31 1行の推定への返事（value = ok / diff / undecided）。
+  | "survey.confirm"
   | "survey.estimate_shown"
   | "survey.estimate_corrected"
   | "survey.words_prompt"

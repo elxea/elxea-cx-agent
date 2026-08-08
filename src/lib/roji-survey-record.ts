@@ -24,14 +24,22 @@
  *   ひとこと → 項目34〜41（roji_words・出所 = survey_free_text）
  *   引用の許可 → 項目18（quoteConsent。既定は「引用しない」）
  *
- * ─ 器の側の不足（作らずに報告した）─
- *   (a) 項目11 は「選択肢（複数可）」だが、器 `tasteProfile.scenePref` は **単一の文字列**。
- *       よって **1つ目のタップ（＝確定した答え）だけをカルテに入れ**、押し足した分は
- *       項目31（flow_events）にすべて残す。カルテ側で複数を持つには器の変更が要る。
- *   (b) 項目9 の「決まっていない」は、器 `preferredCategories`（お茶の族の照合に使う配列）に
- *       入れると照合語彙を汚すため **カルテには入れず**、項目31 にのみ残す。
- *       同じ理由で項目12 の「いまは特に」も傾きには足さず、`lastUpdated` だけを更新して
- *       「答えたが、いまは特に」と「まだ答えていない」を見分けられるようにしてある。
+ * ─ 器を広げた 2 件（2026-08-08 Boss 確定・**追加のみ**）─
+ *   当初は器が足りず「1つ目のタップだけ入れる」「決まっていないは入れない」で運用しようとしたが、
+ *   それでは **「聞いたが決まっていなかった」と「そもそも聞いていない」が同じ空欄になる**。
+ *   これは「起きなかったことを記録しないと後から区別できない」問題そのものなので、器を広げた。
+ *   (a) 項目11 → `drinkingScenes`（複数可・undecided を明示の値として持つ）を新設。
+ *       `tasteProfile.scenePref`（単一値・既存の読み手が使う代表値）は従来どおり残す。
+ *   (b) 項目9  → `teaCategoryPreference`（複数可・undecided を明示の値として持つ）を新設。
+ *       `preferredCategories`（お茶の族の照合語彙）には照合できる値だけを入れる。
+ *   いずれも既存の項目の意味・型を変えていない（列の削除・型変更ゼロ＝追加のみ）。
+ *   項目12 の「いまは特に」も傾きには足さず `lastUpdated` だけ更新し、
+ *   「答えたが、いまは特に」と「まだ答えていない」を見分けられるようにしてある。
+ *
+ * ─ 何度押しても結果が同じ（冪等）─
+ *   1タップのボタンは連打・再タップが普通に起きる。カルテの値は
+ *   「同じ記号を押し直しても動かない」「単一選択で押し替えたら前の分を戻してから足す」形にする。
+ *   押した事実そのものは項目31 に毎回残す（生の出来事は消さない）。
  *
  * ─ PII 最小化 ─
  *   言葉の置き場に入れるのは原文と内部の連番だけ。LINE の userId は
@@ -93,9 +101,19 @@ export function surveyKarteUpdates(
 
     switch (write.step) {
       case "q1": {
-        // 項目11。器が単一値のため、1つ目のタップ（確定した答え）だけを入れる（上の不足(a)）。
-        if (!opts.isFirstTap) break;
-        out.tasteProfile = { ...(existing.tasteProfile ?? emptyTaste()), scenePref: choice.label };
+        // 項目11（本人の答え・複数可）。何度押しても同じ結果になる形で足す。
+        const cur = existing.drinkingScenes ?? {};
+        const values = cur.values ?? [];
+        out.drinkingScenes = {
+          ...cur,
+          values: values.includes(choice.slug) ? values : [...values, choice.slug],
+          ...(choice.undecided ? { undecided: true } : {}),
+          updatedAt: now,
+        };
+        // 代表値（既存の読み手が使う単一値）。1つ目のタップ＝確定した答えだけを入れる。
+        if (opts.isFirstTap) {
+          out.tasteProfile = { ...(existing.tasteProfile ?? emptyTaste()), scenePref: choice.label };
+        }
         break;
       }
       case "q2": {
@@ -112,7 +130,12 @@ export function surveyKarteUpdates(
       case "q3": {
         // 項目7。「どれとも言えない」は傾きを動かさない。
         if (choice.undecided) break;
-        const base = existing.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 };
+        const base = { ...(existing.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 }) };
+        // 押し替えたときは、前に足した分を戻してから足す（連打・押し替えで積み上がらない）。
+        const undo = (write.replaces ?? null) as PersonaType | null;
+        if (undo && undo !== choice.slug && undo in base) {
+          base[undo] = Math.max(0, (base[undo] ?? 0) - SURVEY_PERSONA_WEIGHT);
+        }
         const { scores, primary } = mergePersonaScores(
           base,
           [choice.slug as PersonaType],
@@ -122,7 +145,16 @@ export function surveyKarteUpdates(
         break;
       }
       case "q4": {
-        // 項目9。「決まっていない」は照合語彙を汚すためカルテに入れない（上の不足(b)）。
+        // 項目9（本人の答え・複数可・「決まっていない」も値として持つ）。
+        const curPref = existing.teaCategoryPreference ?? {};
+        const prefValues = curPref.values ?? [];
+        out.teaCategoryPreference = {
+          ...curPref,
+          values: prefValues.includes(choice.slug) ? prefValues : [...prefValues, choice.slug],
+          ...(choice.undecided ? { undecided: true } : {}),
+          updatedAt: now,
+        };
+        // 照合に使える値だけを、お茶の族の語彙リストにも入れる（「決まっていない」は入れない）。
         if (choice.undecided) break;
         const taste = existing.tasteProfile ?? emptyTaste();
         if (taste.preferredCategories.includes(choice.slug)) break;
@@ -174,8 +206,18 @@ export function surveyKarteUpdates(
     }
   }
 
-  // 項目19（1行の推定・いまの値）。
-  if (write.estimateLine !== undefined) {
+  // 項目20 の常設選択肢「まだ、決めていない」。
+  if (write.correctionUndecided !== undefined) {
+    out.estimateCorrection = {
+      ...(out.estimateCorrection ?? existing.estimateCorrection ?? {}),
+      undecided: write.correctionUndecided,
+      correctedAt: now,
+    };
+  }
+
+  // 項目19（1行の推定・いまの値）。**1行だけ**を入れる。
+  //   空文字（まだ推定と呼べるものが無い）のときは書かない — 空の推定でカルテを上書きしない。
+  if (write.estimateLine !== undefined && write.estimateLine !== "") {
     out.estimateLine = write.estimateLine;
     out.estimateLineUpdatedAt = now;
   }

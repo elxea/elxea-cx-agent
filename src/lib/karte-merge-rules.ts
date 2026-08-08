@@ -120,6 +120,14 @@ export const KARTE_MERGE_RULES: {
   // --- タスク07 で足したカルテ 7 項目（定義文書 6 / 12 / 13 / 14 / 18 / 19 / 20） ---
   /** 項目6: 安全に関する申告。消す方向の統合を絶対にしない。 */
   safety: { strategy: "safety-union" },
+  /**
+   * 項目9: 好きなカテゴリ（本人の答え・複数可）。両方入れる（重複排除）。
+   * `undecided` は真偽なので list-union のサブキー扱い（carry-if-empty）で持ち越す
+   * —— 片方に「決まっていない」の申告があれば失わない。
+   */
+  teaCategoryPreference: { strategy: "list-union", lists: ["values"] },
+  /** 項目11: 飲む場面・時間帯（本人の答え・複数可）。両方入れる（重複排除）。 */
+  drinkingScenes: { strategy: "list-union", lists: ["values"] },
   /** 項目12: 窓への傾き（6つの窓の数値）。数えるものは足す。 */
   windowAffinity: { strategy: "numeric-sum", exclude: ["lastUpdated"] },
   /** 項目13: また入れてほしい / もういらない。両方入れる（重複排除）。 */
