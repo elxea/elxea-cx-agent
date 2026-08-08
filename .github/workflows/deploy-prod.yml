@@ -24,6 +24,16 @@ on:
         required: false
         default: ''
         type: string
+      migrate_only:
+        description: '今回当てる migration を名指し（例: 036,037）。当てないなら NONE。※未適用を全件当てる指定は無い'
+        required: true
+        default: 'NONE'
+        type: string
+      migrate_denylist_ack:
+        description: '本番非適用リスト（024/025/027）を今回だけ当てるときのみ version を入力（通常は空）'
+        required: false
+        default: ''
+        type: string
 
 # 本番反映の同時実行を禁止（途中の migration/deploy が競合しないように直列化する）。
 concurrency:
@@ -41,6 +51,9 @@ jobs:
       CONFIRM: ${{ github.event.inputs.confirm }}
       FIRST_DEPLOY: ${{ github.event.inputs.first_deploy }}
       FIRST_DEPLOY_ACK: ${{ github.event.inputs.first_deploy_ack }}
+      # migration は明示指定制（未指定は scripts/deploy-prod.sh 側で中断＝ fail-closed）。
+      MIGRATE_ONLY: ${{ github.event.inputs.migrate_only }}
+      MIGRATE_DENYLIST_ACK: ${{ github.event.inputs.migrate_denylist_ack }}
       # 本番 Cloudflare / Supabase の認証。値は GitHub Secrets に保持する（ここには書かない）。
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -62,6 +75,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # preflight → migration 本適用 → wrangler deploy → prod health check（順序は scripts/deploy-prod.sh が担保）。
+      # preflight → migration 適用（MIGRATE_ONLY で名指しした分のみ）→ wrangler deploy → prod health check
+      # （順序は scripts/deploy-prod.sh が担保）。
       - name: 本番フル反映（scripts/deploy-prod.sh）
         run: ./scripts/deploy-prod.sh

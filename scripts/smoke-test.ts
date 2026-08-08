@@ -26,7 +26,7 @@ const targetArg = args.find((a) => a.startsWith("--target="))?.split("=")[1];
 const BASE_URL =
   targetArg ??
   process.env.WEB_CHAT_BASE_URL ??
-  "https://elxea-agent.elxea.workers.dev";
+  "https://elxea-agent.setaka-on.workers.dev";
 
 // ---------------------------------------------------------------------------
 // Types

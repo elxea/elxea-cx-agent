@@ -24,12 +24,14 @@
 - スイッチを ON にする作業は Setaka が行います（手順は下の「実運用を開始するとき」）。
 
 > **エンジニア向けの補足（運用者は読み飛ばしてOK）**
-> 本番 Worker には `DELIVERY_SEND_ENABLED` という設定が **値 `"false"` で存在**します。
-> **「設定がある＝ON」ではありません。** ON になるのは値が文字列 `"true"` のときだけです（完全一致判定）。
-> そのため **本番の ON/OFF を `wrangler secret list` の有無で判断してはいけません**
-> （検証環境 staging は「未設定＝OFF」で運用しており、**確認方法が本番と違います**）。
-> 本番の判定はログの `[delivery] env=prod(@307tzhkw) sendEnabled=false` を見ます。
-> コマンドと詳細は `docs/deploy-runbook.md`「LINE 配信の運用ゲート」節が正本です。
+> 本番Workerの `DELIVERY_SEND_ENABLED` の **値は読み取れません**（Cloudflareのsecretは名前しか一覧できない）。
+> したがって **「今はOFFだ」と決めつけて作業を始めないでください**。
+> ONになるのは値が文字列 `"true"` のときだけ（完全一致判定）ですが、その値を外から確認する手段はありません。
+> **`wrangler secret list` の有無で本番のON/OFFは判断できません**
+> （検証環境stagingは「未設定＝OFF」で運用しており、**確認方法が本番と違います**）。
+> 本番の判定はログの `[delivery] env=prod(@307tzhkw) sendEnabled=...` を見ます。
+> なお **2026-08-05に本番から48人へ実配信が発生**しています（Setaka確認済み・意図した配信）。
+> 状態の推定方法・確認手順は `docs/deploy-runbook.md`「LINE配信の運用ゲート」節が正本です。
 
 ---
 

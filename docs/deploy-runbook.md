@@ -16,9 +16,10 @@ staging（`elxea-agent-staging`）を「テスト OA（@426vlcyb）」に載せ�
 > - `wrangler.toml [env.staging.vars]` に `DELIVERY_TARGET_ENV = "test"` を固定済み。
 >   staging は常にテスト OA を対象にする（`src/lib/delivery-channel.ts` が
 >   `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択）。
-> - staging の `DELIVERY_SEND_ENABLED` は **未設定のまま**（= dry-run）。実送信は GA 時にのみ ON にする。
->   （**本番は事情が違う**: 本番は値 `"false"` で secret が存在する。詳細は「LINE 配信の運用ゲート」節の
->   「本番の ON/OFF は `wrangler secret list` の有無では判定できない」を参照）
+> - stagingの `DELIVERY_SEND_ENABLED` は **未設定のまま**（= dry-run）。
+>   （**本番は事情が違う**: 本番はこの値を読み取る手段が無く、ON/OFFを断定できない。
+>   さらに2026-08-05に本番からの実配信の実績がある。詳細は「LINE配信の運用ゲート」節の
+>   「本番の送信スイッチの値を断定しない」を参照）
 
 ### 1. secret を staging に投入（値はコミットしない）
 
@@ -130,10 +131,15 @@ npx tsx scripts/migrate.ts --baseline --dry-run              # prod
 npx tsx scripts/migrate.ts --baseline --dry-run --env staging
 # 2. 承認後に台帳登録（単一 tx でアトミック）
 npx tsx scripts/migrate.ts --baseline
-# 3. 以降の未適用のみ適用
-npx tsx scripts/migrate.ts --dry-run   # 適用予定の確認
-npx tsx scripts/migrate.ts --apply     # 本適用（prod ref を HARD ASSERT）
+# 3. 以降は「当てるものを名指しして」適用する
+npx tsx scripts/migrate.ts --dry-run              # 未適用一覧の確認（読み取りのみ）
+npx tsx scripts/migrate.ts --only 036,037 --apply # 名指し適用（prod refをHARD ASSERT）
 ```
+
+> ⚠ **本番では bare `migrate.ts --apply` を使わない**（未適用を**全件**当てるため）。
+> 本番へ当ててはならない migration が存在する（`024` / `025` = 機能有効化時のみ・`027` = LIFF 連携とセット。
+> それぞれ後述）。必ず `--only <versions>` で対象を名指しする。
+> `scripts/deploy-prod.sh` も同じ規律で動く（`MIGRATE_ONLY` 必須・未指定は中断／deny-list で二重ガード）。
 
 > ⚠ 旧 ad-hoc runner（`scripts/run-migration-*.ts`）は台帳外適用の drift 源のため hard-stop スタブ化済み。
 > migration は必ず `scripts/migrate.ts`（台帳ベース）経由で行う。
@@ -215,12 +221,18 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
   ドキュメントの数値は参考値。）
 - したがって「pending 解消」を目的に 024/025 を無条件適用しない。有効化判断が出たときに、当該機能の cron/フラグ投入と
   同時に `--apply` する（両テーブルとも `IF NOT EXISTS` で冪等）。
+- **スクリプト側の担保**: `scripts/deploy-prod.sh` は `024 / 025 / 027` を**本番非適用リスト（deny-list）**として持つ。
+  `MIGRATE_ONLY` に含めても `MIGRATE_DENYLIST_ACK=<version>` を明示しない限り中断する。
+  「手順書では禁じているのにスクリプトが当ててしまう」状態を構造的に起こせなくするための二重ガード。
 
 ### Deploy Order
 
 1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
-2. **elxea-cx-agent**: `pnpm deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflow が
-   preflight → migration → deploy → health(+webhook 検証) → version_skew_report を一括実行）
+2. **elxea-cx-agent**: `pnpm deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflowが
+   preflight → migration → deploy → health(+webhook検証) → version_skew_reportを一括実行）
+   - migrationは**明示指定制**。`MIGRATE_ONLY` で当てるversionを名指しする（当てないなら `MIGRATE_ONLY=NONE`）。
+     未指定は中断する（fail-closed）。workflowから回す場合は `migrate_only` 入力に同じ値を入れる。
+     例: `CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE SUPABASE_DB_PASSWORD=xxx ./scripts/deploy-prod.sh`
 3. **elxea-web-app**: Vercel production deploy（merge to main の Git 連携自動デプロイ・**別レーン**）
 
 ### web-app は別レーン（版ずれは束ねず可視化する）
@@ -243,7 +255,7 @@ npx tsx scripts/verify-staging.ts
 pnpm deploy
 
 # 3. Verify production (health check only, no Claude API calls)
-curl -s https://elxea-agent.elxea.workers.dev/ | jq .
+curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 # Expected: {"status":"ok","service":"elxea-agent"}
 
 # 4. Smoke test (manual)
@@ -260,7 +272,7 @@ curl -s https://elxea-agent.elxea.workers.dev/ | jq .
 wrangler rollback
 
 # Verify rollback
-curl -s https://elxea-agent.elxea.workers.dev/ | jq .
+curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 ```
 
 ## LINE 配信の運用ゲート（送信スイッチ / env 分離 / テスト配信）
@@ -269,28 +281,58 @@ curl -s https://elxea-agent.elxea.workers.dev/ | jq .
 > <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>）を SoT とし、本節は「エンジニア作業の実行手順」を持つ。
 > 片方だけを直さない（配信まわりのコード変更時は両方を更新する）。
 
-### 現状（2026-07-27 時点・事実）
+### 現状（2026-08-08更新 / それ以外の行は2026-07-27時点）
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
-| 本番 `DELIVERY_SEND_ENABLED` | **OFF**（実送信なし・dry-run）。ただし **secret 自体は「値 `"false"` で存在」する** | `delivery-orchestrator.ts` が `sendEnabled=false` で step(g) 前に非破壊 early-return。値の固定根拠は `wrangler.toml` 冒頭コメント（GA まで `"false"` 固定） |
+| 本番 `DELIVERY_SEND_ENABLED` | **不明（値は読み取れない）。ON/OFFを断定しない**。実績としては **2026-08-05に本番から実配信が発生**している（Setaka確認済み・意図した配信） | Cloudflareのsecretは **名前しか一覧できず値を読み出せない**（`wrangler secret list`）。挙動の根拠は `delivery-orchestrator.ts`（`sendEnabled=false` ならstep(g) 前に非破壊early-return）。実配信の実測は下記「2026-08-05の実配信」参照 |
 | prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
 
-#### ⚠ 本番の ON/OFF は `wrangler secret list` の有無では判定できない（最重要・staging と手順が違う）
+#### ⚠ 最重要の運用ルール: 本番の送信スイッチの値を**断定しない**。確認してから動く
 
-**事実**: 本番 Worker（`elxea-agent`）の secret 一覧には `DELIVERY_SEND_ENABLED` が **存在する**。
-値は `"false"` に固定してある（`wrangler.toml` 冒頭コメントが SoT・GA まで変えない）ため、機能的には OFF である。
-**secret が存在すること＝ON ではない。** 送信ゲートは `sendEnabled = env.DELIVERY_SEND_ENABLED === "true"` の
-**文字列完全一致**であり（`src/lib/delivery-runtime.ts` / `tests/unit/golive-broadcast-dryrun.test.ts`）、
-ON になるのは値が文字列 `"true"` のときだけ。`"false"` / 空 / 未設定はすべて OFF。
+**Cloudflareの仕様上、本番 `DELIVERY_SEND_ENABLED` の値はどこからも読み取れない。**
+`wrangler secret list` は **名前の一覧だけ**を返し、値はAPI/CLIのいずれでも取得できない。
+したがって「本番は今OFF（値 `"false"`）である」と**文書側で断定することはできない**
+（かつて本runbookはそう書いていたが、根拠は `wrangler.toml` のコメント＝**意図の記録**であって、
+本番Workerに実際に入っている値の**観測ではなかった**。2026-08-08是正）。
 
-したがって、**本番で `pnpm exec wrangler secret list | grep DELIVERY_SEND_ENABLED` がヒットしても、それは ON の証拠にならない**
-（secret の値は API で読み出せないので、名前の有無からは何も判定できない）。
+- `secret list` に名前が**出る**  → ONの証拠にもOFFの証拠にも**ならない**（値が分からないため）
+- `secret list` に名前が**出ない** → 未設定 = OFF（**stagingはこの運用**。本番には当てはめない）
+- 送信ゲート自体は `sendEnabled = env.DELIVERY_SEND_ENABLED === "true"` の**文字列完全一致**
+  （`src/lib/delivery-runtime.ts` / `tests/unit/golive-broadcast-dryrun.test.ts`）。
+  ONになるのは値が文字列 `"true"` のときだけで、`"false"` / 空 / 未設定はすべてOFF。
 
-**本番 ON/OFF の正しい判定方法** = cron 実行ログの `sendEnabled=` を読む:
+> **運用ルール（守ること）**: 「スイッチはOFFだから何も送られない」という前提で作業を始めない。
+> 送信有無に影響する作業（Approved行の作成・日時変更・再承認など）の前に、下記のいずれかで**状態を確認してから動く**。
+> 確認できていないときは「ONかもしれない」側に倒して扱う（＝実際に届く前提で内容と宛先を見る）。
+
+##### 2026-08-05の実配信（記録・Setaka確認済み）
+
+**2026-08-05 12:00（JST）に本番から48人へ実配信が発生している。** これは**意図した配信であり問題ない**
+（Setaka確認済み・2026-08-08）。事実として次が観測されている。
+
+- 配信DB（本番）の当該行が **Status=Sent / 送信済み=true**
+- 通数台帳 `line_message_ledger` に **month=2026-08 / recipients=48 / created_at 2026-08-05T03:00:31Z（UTC）**
+
+この記録の意味は2つある。(1) **本番は実際に送れる状態になった実績がある**（＝「常にOFF」という前提は捨てる）。
+(2) 送信の有無はsecretの値を推測するのではなく、**下記の観測**で判断する。
+
+##### 危険ゼロで状態を推定する方法（すべて読み取りのみ・本番を一切変更しない）
+
+**⚠ どの手順でも `DELIVERY_SEND_ENABLED` に `secret put` / `secret delete` をしない**（状態を変えずに調べる）。
+
+1. **配信DBを見る（いちばん手軽・Notionだけで完結）**
+   - `Status=Approved` かつ `送信済み=false` の行が、**配信予定日時を過ぎても消化されず溜まっている** → **OFFの可能性が高い**。
+     OFFの間、orchestratorはNotionを一切書き換えず非破壊early-returnするため、承認済み行は滞留する（後述「ステップ0」）。
+   - 逆に、**予定日時を過ぎた行が `Sent` / `送信済み=true` に変わっている** → **その時点ではONだった**（実送信が起きている）。
+2. **通数台帳を見る**: `line_message_ledger` の当月行の `recipients` が増えていれば実送信が起きている（＝ONだった）。
+3. **確定させたいときだけログを読む**（読み取り専用・15分ごとのcron tickを待つ）: 下記 `wrangler tail` の `sendEnabled=` を読む。
+   これが**唯一の直接確認**だが、tickを待つ必要があるため、まず1. 2. で当たりを付けてから使う。
+
+**確定的な判定方法** = cron実行ログの `sendEnabled=` を読む:
 
 ```bash
 # 本番 Worker のログを追う（--env を付けない = 本番 elxea-agent）。読み取り専用。
@@ -303,14 +345,15 @@ pnpm exec wrangler tail --format pretty
 出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] env=... sendEnabled=...")`、
 ラベル `prod(@307tzhkw)` / `test(@426vlcyb)` は `src/lib/delivery-channel.ts` が組み立てる。
 
-> **staging とは確認方法が違う（混同禁止）**: staging（`elxea-agent-staging`）は「**未設定＝OFF**」で運用しており、
+> **stagingとは確認方法が違う（混同禁止）**: staging（`elxea-agent-staging`）は「**未設定＝OFF**」で運用しており、
 > 後述のテスト配信手順では `secret list --env staging | grep DELIVERY_SEND_ENABLED` が **出ないのが正**。
-> この「出ないのが正」は **staging 限定のローカル規約**であって、**本番には当てはまらない**
-> （本番は値 `"false"` で存在するのが正常状態）。本番に staging の確認法を当てると ON と誤読する。
+> この「出ないのが正」は **staging限定のローカル規約**であって、**本番には当てはまらない**
+> （本番は名前が存在していても値が読めないため、名前の有無からON/OFFを導けない）。
 
-> **なぜ secret を消して「未設定」に揃えないか**: 現状の値 `"false"` で機能的に OFF は成立しており、
-> 本番 secret を触ること自体が事故リスク（誤削除・誤投入）を生む。よって **実状態は変えず、表記側を実態に合わせる**方針を採る
-> （2026-07-27 判断）。`DELIVERY_SEND_ENABLED` の本番 secret を GA 前に put / delete しない。
+> **本番secretを調査目的で触らない**: 本番secretへの `put` / `delete` は事故（誤削除・誤投入・意図しないON/OFF切替）
+> そのものを生む。状態を知りたいだけのときは**必ず上記の読み取りのみの方法**を使う。
+> 値を変えるのは「実送信スイッチONの手順」または「緊急停止」として**意図して切り替えるときだけ**であり、
+> そのときはSetakaのGO（Tier 2）が要る。
 
 ### ⚠ 禁止事項: 本番 Worker に `NOTION_DELIVERY_DB_ID` を設定しない
 
@@ -361,11 +404,13 @@ pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED                 # (a) sec
 printf 'false' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED   # (b) 値を "false" にする（GA 前の既定状態）
 ```
 
-**OFF の判定は「secret の有無」ではなく「値が `"true"` でないこと」**（`=== "true"` の完全一致）。
-(a) と (b) は機能的に同じ OFF であり、**GA 前の本番の既定状態は (b)**（値 `"false"` で存在）。
-実際に OFF へ戻ったことは `pnpm exec wrangler tail` の
+**OFFの判定は「secretの有無」ではなく「値が `"true"` でないこと」**（`=== "true"` の完全一致）。
+(a) と (b) は機能的に同じOFFである（どちらを使ってもよい）。
+**どちらを実行したかは後から確認できない**（値は読み出せない）ので、
+OFFに戻したこと自体を作業記録に残し、次項のログで実際にOFFになったことを確認する。
+実際にOFFへ戻ったことは `pnpm exec wrangler tail` の
 `[delivery] env=prod(@307tzhkw) sendEnabled=false` で確認する
-（`secret list` では判定できない — 前掲「本番の ON/OFF は `wrangler secret list` の有無では判定できない」節）。
+（`secret list` では判定できない — 前掲「本番の送信スイッチの値を断定しない」節）。
 
 ON 後は **最初の1本を実機受信で確認**してから後続を承認する。
 

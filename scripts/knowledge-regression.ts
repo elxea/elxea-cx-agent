@@ -46,7 +46,7 @@ const forceRun = args.includes("--force");
 const CX_AGENT_BASE_URL =
   args.find((a) => a.startsWith("--target="))?.split("=")[1] ??
   process.env.CX_AGENT_BASE_URL ??
-  "https://elxea-agent.elxea.workers.dev";
+  "https://elxea-agent.setaka-on.workers.dev";
 
 /** Delay between API calls to avoid rate limiting (ms) */
 const INTER_CALL_DELAY_MS = 10_000;
