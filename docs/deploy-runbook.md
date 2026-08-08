@@ -529,8 +529,12 @@ push / broadcast / multicastを一切呼ばない）。
 「今ONかOFFか」を文書側で断定しない。挙動で確かめる（OFFなら合言葉に無反応）。
 
 > このスイッチを追加した工程（2026-08-08）では、**本番にもstagingにもsecretを登録していない**
-> （コードとテストのみ・デプロイもしていない）。登録は公開工程で別途行う。
+> （コードとテストのみ）。登録は公開工程で別途行う。
 > したがって「今どちらに何が入っているか」は、この節からは断定できない（上の「値の確認について」に従う）。
+>
+> **更新（2026-08-08第3工程・再実行）**: コードは本番へ配布済み（HEAD `abbe862`）だが、
+> `ROJI_SURVEY_ENABLED` は**引き続き未登録**（`wrangler secret list` の名前一覧に無いことを配布後に確認）。
+> よって**アンケートは本番でOFF**であり、メニュー未差し替えと合わせて二重に到達不可のまま。
 
 ## LINE×Shopify 連携（LIFF / 案A）Cutover ハードゲート（QA S-2・別プロバイダの罠）
 
@@ -580,7 +584,70 @@ git push origin main
 
 ## 本番反映の実施記録
 
-### 2026-08-08第3工程「配布 + 鍵の登録 + 実動作確認」— **配布は未実施（Cloudflare認証切れでブロック）**
+### 2026-08-08第3工程（再実行）「配布 + 鍵の登録 + 実動作確認」— **配布完了・消去は本番で実証済み**
+
+対象ブランチ `integration/roji-prod-rollout-20260808` / 反映HEAD **`abbe862`**。
+配布時刻2026-08-08T13:05Z（JST 22:05）。**Version ID `3bc02347-641c-4d68-a16b-0177ac60a47b`**。
+下の「配布は未実施」の記録は本節で解消済み（Cloudflare認証はBitwardenのAPIトークンで回復）。
+
+**外部送信は1件も発生していない。** LINEのpush / broadcast / multicast / replyを一度も呼んでいない
+（`LINE_CHANNEL_ACCESS_TOKEN` を実行shellに置かなかったためdeploy-prod.shのwebhook検証もskipされた）。
+リッチメニューは差し替えていない（`setup-rich-menu` 未実行）。
+
+**配布前に見つけて直した2件（どちらも本番反映を妨げていた）:**
+
+| 件 | 症状 | 対処 |
+|---|---|---|
+| `deploy-prod.sh` のreadonly衝突 | `STAGING_WORKER_URL` が `readonly` 宣言済みなのに代入プレフィックスで呼んでおり、`set -e` 下でpreflightが必ず落ちる（`line 170: readonly variable`）。**本番反映が構造的に不可能な状態だった** | 宣言を `readonly` + `export` に分離。ゲートは緩めない（`SKIP_STAGING_SMOKE` は使わない）。commit `f8fd192` |
+| staging smokeのwebhookパス誤り | `POST /webhook` を叩いていたが実在ルートは `POST /webhook/line` のみ。staging / prod双方で必ず404になりsmokeゲートが恒常的に赤 | 実在パスに修正。署名なしPOSTは入口の署名検証で403（イベント処理は走らず1通も送らない）。commit `abbe862` |
+
+**配布の内容:**
+
+- migration: **1件も適用していない**（`MIGRATE_ONLY=NONE`）。台帳は前後とも33件で不変。
+  未適用のまま残るのは設計どおりの5件（`000` / `012` / `024` / `025` / `027`。024/025/027 はdeny-list）
+- `ERASE_API_SECRET`: **新規発行して本番Workerに登録**（値はBitwardenのみ。ここにも報告にも書かない）
+- `ROJI_SURVEY_ENABLED`: **登録していない**（未設定＝OFF）。メニュー未差し替えとの二重の安全を維持
+- `DELIVERY_SEND_ENABLED` / `DORMANT_SEND_ENABLED` / `MARCHE_SEND_ENABLED`: **読みも書きもしていない**
+
+**配布前後の比較（本番・件数とメタのみ）:**
+
+| 項目 | 配布前 | 配布後 | 判定 |
+|---|---|---|---|
+| ヘルスチェック | 200 | 200 | [OK] |
+| `POST /api/erase`（無認証） | **404** | **401** | [OK] 反映済み・鍵が効いている |
+| 全26表の行数 | 合計1493 | 合計1493（各表も完全一致） | [OK] 減っていない |
+| `cron.job` | `daily-conversation-stats` 1本 | 同左（`30 18 * * *` / active） | [OK] 削除ジョブは復活していない |
+| `schema_migrations` | 33件 | 33件 | [OK] |
+
+**消去の実動作確認（本番・`/api/erase` 経由）— 全項目PASS**
+
+架空の人1件（接頭辞 `ZZTESTERASE-`）を本番に作り、`POST /api/erase` で消して検算した。
+
+- **送信の引き金にしない形で作った**（多層防御・すべてコードで裏取り）:
+  1. 本番 `[triggers]` は配信(15分毎)と同期(`0 18`)のみ。休眠ナッジ・マルシェ活性化のcronは
+     **staging限定**で本番には無い（`cron-routing.ts` / `wrangler.toml`）
+  2. `customer_linkages.unfollowed_at` を非NULLで作成 → `filterEligible` が除外し、
+     さらに `excludeLineUserIds` に入ってFirestore直読み経路（`unionEligible`）でも除外される
+  3. `shopify_customer_id` はNULL → 日次同期のShopify metafield書込に載らない
+  4. 識別子が実在のLINE ID形式（`U`+32hex）と衝突しない
+  5. 全員配信はLINEの友だち宛でDB由来ではない → 種まきで宛先が増えない
+- 結果: `HTTP 200` / `status: "erased"`
+  - Supabase 4表から削除（`conversations` 1 / `customer_linkages` 1 / `user_identity_map` 1 / `flow_events` 1）
+  - **Firestore 2パス**（`lineUsers/<架空ID>` と `users/line:<架空ID>`）。**stagingのDB層検証では覆えていなかった
+    Worker経由のFirestore経路を、本番で初めて実証した**
+  - 検算 `residue`: **`clean=true`**・`remaining` 全15項目0
+  - 図2の「残る」側（`roji_edit_records` / `roji_delivery_months` / 匿名の言葉）は `preserved` に分離されている
+  - `firestore_residue`: **`clean=true`**・全5項目0
+- **痕跡走査**: 公開スキーマの全テキスト/JSON列を総当たりし、架空の人の痕跡 **0件**
+- **実データ保全**: 全26表の行数が種まき前と**完全一致**（実在の行は1行も減っていない）
+- **冪等性**: 同じIDをもう一度消しても `HTTP 200` / 削除0件・例外なし
+- **後片付け**: 最終差分なし（本番は試験前の状態へ完全復帰）
+
+> **「消せます」は本番の全経路で言える状態になった**（Supabase + Firestore + 検算 + 痕跡走査）。
+
+### 2026-08-08第3工程（初回）「配布 + 鍵の登録 + 実動作確認」— **配布は未実施（Cloudflare認証切れでブロック）**
+
+> ⚠ この記録は上の「再実行」節で**解消済み**。以下は当時の事実の記録として残す。
 
 対象ブランチ `integration/roji-prod-rollout-20260808` / HEAD `5c19dd4`。
 **本番Workerへの配布・secret登録は1つも実行できていない。** 以下は事実の記録。
