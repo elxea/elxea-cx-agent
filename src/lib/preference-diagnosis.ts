@@ -49,12 +49,14 @@ import {
   getLineUserProfile,
   updateLineUserProfile,
   mergePersonaScores,
+  computeTasteProfileUpdates,
   type PersonaType,
   type PersonaScores,
   type TasteProfile,
   type CustomerProfile,
   type LineUserProfile,
 } from "./firestore";
+import type { PreferenceSignals } from "./preference-extractor";
 
 // ---------------------------------------------------------------------------
 // 定数（トークン方式・tea-menu.ts と同一の SEP）
@@ -279,6 +281,11 @@ const DIAGNOSIS_RECOMMEND_COUNT = 3;
  * これで診断結果（persona + 味の好み）が販売中カタログの銘柄選定に反映される（reuse・一貫性）。
  *   Q2-1 まろやかな甘み → rich 香り / Q2-3 コク・余韻 → full ボディ / Q2-4 すっきり軽やか → light ボディ。
  *   Q2-2「香り高く個性」は 2 軸へ一意に写せないため null（persona 傾きのみで並べる）。
+ *
+ * ⚠ これは **並べ替え専用**（その場のおすすめ順を決めるだけ）。**カルテへの保存には使わない**。
+ *   Q2-2 が null なのは「karteAffinity の 2 軸へ一意に写せない」という並べ替え側の都合であって、
+ *   「カルテに残さない」という意味ではない。保存は別経路 `diagnosisTasteSignals`（Spec §7 の語彙・
+ *   Q2-2 = floral）が担う。用途が違うので統合しない（ここを変えると銘柄の並びが回帰する）。
  */
 export function tasteFromDiagnosisQ2(q2: number): TasteProfile | null {
   switch (q2) {
@@ -428,6 +435,88 @@ function zeroScores(): PersonaScores {
   return { serenity: 0, explorer: 0, sensory: 0 };
 }
 
+// ---------------------------------------------------------------------------
+// 診断の回答 → カルテの好み（tasteProfile）— Spec §7 の enrichment（2026-08-09 実装）
+//
+// 設計仕様 §7（Notion 39c70c9d-064c-81bc-aa53-f95733ccee97）の原文:
+//   「あわせて任意で tasteProfile を強化してよい（enrichment・必須ではない）:
+//     Q1→scenePref（1=relaxation, 2=explore, 3=taste）、
+//     Q2→flavorPreferences（1=mellow/sweet, 2=floral, 3=rich, 4=refreshing）」
+//
+// この一行が §9（実装者への申し送り）へ転記されず、実装まで届かなかった（`git log -S` により
+// 保存コードは一度も書かれていない＝削除ではない）。方針転換の記録も無いため、保存を始めることは
+// 既存判断を踏み潰さない。読み手は導入時点から 3 系統そろっている（agent/core・sync/shopify-metafield・
+// firestore.updateTasteProfile）。
+//
+// 3 タイプ（persona.scores への weight=3 加算）は**別項目**なので一切変更しない。
+// ここは tasteProfile だけを、既存の union 流儀（computeTasteProfileUpdates）で足す。
+// ---------------------------------------------------------------------------
+
+/** Q1（お茶の時間に求めているもの）→ 場面（scenePref）。Spec §7 の語彙。 */
+const SCENE_BY_Q1: Record<number, string> = {
+  1: "relaxation", // ほっと落ち着く、やすらぎ
+  2: "explore", // 知らない味や香りとの出会い
+  3: "taste", // 「おいしい」と感じる味わい
+};
+
+/**
+ * Q2（味わい 4 択）→ 味の好み（flavorPreferences）。Spec §7 の語彙。
+ *
+ * Q2-2「香り高く、個性を感じる」は Spec どおり `floral` を入れる。
+ *   並べ替え用の `tasteFromDiagnosisQ2` が Q2-2 を null にしているのは karteAffinity の 2 軸へ
+ *   一意に写せないという**別用途の都合**であり、カルテに残さない理由ではない（混同しない）。
+ */
+const FLAVORS_BY_Q2: Record<number, string[]> = {
+  1: ["mellow", "sweet"], // やさしく、まろやかな甘み
+  2: ["floral"], // 香り高く、個性を感じる
+  3: ["rich"], // コクや余韻がしっかり
+  4: ["refreshing"], // すっきり軽やか、飲みやすい
+};
+
+/**
+ * 診断の Q1 / Q2 を、既存の嗜好シグナル型（PreferenceSignals）へ写す（純粋）。
+ *
+ * `persona_signals` は **必ず空**にする。3 タイプの記録は `recordDiagnosisPersonaWith` が
+ * `mergePersonaScores(weight=3)` で行う唯一の経路であり、ここから二重に足さない
+ * （computeTasteProfileUpdates は persona_signals が空なら persona を一切返さない）。
+ * 範囲外の番号は空配列に倒す（呼び出し側の検証を二重化しない・安全側）。
+ */
+export function diagnosisTasteSignals(q1: number, q2: number): PreferenceSignals {
+  const scene = SCENE_BY_Q1[q1];
+  return {
+    preferred_categories: [],
+    flavor_preferences: FLAVORS_BY_Q2[q2] ?? [],
+    scene_preferences: scene ? [scene] : [],
+    persona_signals: [],
+    explicit_statements: [],
+  };
+}
+
+/** 診断の回答のうち、カルテの好みへ写す 2 問（Q3 は 3 タイプ側だけで使う）。 */
+export interface DiagnosisAnswers {
+  q1: number;
+  q2: number;
+}
+
+/**
+ * 診断の回答から tasteProfile の更新後の値を作る（純粋・既存値を壊さない）。
+ *
+ * 既存の union 流儀（`computeTasteProfileUpdates`）をそのまま使う:
+ *   - flavorPreferences は重複除去して足す（上限 50）＝ 何度診断しても同じ値は増えない（冪等）。
+ *   - scenePref は今回の答えを代表値として置く（同じ答えなら同じ値＝冪等）。
+ *   - 購入履歴・会話由来で貯まった preferredCategories 等はそのまま残る（消す方向の統合をしない）。
+ */
+export function diagnosisTasteUpdate(
+  existingTaste: TasteProfile | undefined,
+  answers: DiagnosisAnswers,
+): TasteProfile {
+  return computeTasteProfileUpdates(
+    diagnosisTasteSignals(answers.q1, answers.q2),
+    existingTaste,
+    undefined,
+  ).tasteProfile;
+}
+
 /** どちらのカルテに記録したか（テスト・ログ用）。 */
 export type DiagnosisRecordPath = "shopify" | "line";
 
@@ -466,6 +555,7 @@ export async function recordDiagnosisPersonaWith(
   lineUserId: string,
   winner: PersonaType,
   deps: RecordDiagnosisDeps,
+  answers?: DiagnosisAnswers,
 ): Promise<DiagnosisRecordPath> {
   const now = new Date().toISOString();
   const shopifyId = await deps.resolveShopifyId(lineUserId);
@@ -476,6 +566,10 @@ export async function recordDiagnosisPersonaWith(
     const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
     await deps.updateShopifyProfile(shopifyId, {
       persona: { primary, scores, lastUpdated: now },
+      // Spec §7: 味わい（Q2）と場面（Q1）も同じ 1 回の読み書きで足す（往復を増やさない）。
+      ...(answers
+        ? { tasteProfile: diagnosisTasteUpdate(existing?.tasteProfile, answers) }
+        : {}),
       lastActiveAt: now,
     });
     return "shopify";
@@ -488,6 +582,9 @@ export async function recordDiagnosisPersonaWith(
   const updates: Partial<LineUserProfile> = {
     lineUserId,
     persona: { primary, scores, lastUpdated: now },
+    ...(answers
+      ? { tasteProfile: diagnosisTasteUpdate(existingLine?.tasteProfile, answers) }
+      : {}),
     lastActiveAt: now,
   };
   if (!existingLine) {
@@ -510,6 +607,7 @@ export async function recordDiagnosisPersona(
   lineUserId: string,
   winner: PersonaType,
   env: Env,
+  answers?: DiagnosisAnswers,
 ): Promise<void> {
   try {
     // Firebase 未設定ならスキップ
@@ -521,16 +619,25 @@ export async function recordDiagnosisPersona(
     }
 
     const supabase = createSupabaseClient(env);
-    const path = await recordDiagnosisPersonaWith(lineUserId, winner, {
-      resolveShopifyId: (id) => resolveCallerShopifyCustomerId(id, "line", supabase),
-      getShopifyProfile: (id) => getCustomerProfile(id, fsEnv!),
-      updateShopifyProfile: (id, updates) => updateCustomerProfile(id, updates, fsEnv!),
-      getLineProfile: (id) => getLineUserProfile(id, fsEnv!),
-      updateLineProfile: (id, updates) => updateLineUserProfile(id, updates, fsEnv!),
-    });
+    const path = await recordDiagnosisPersonaWith(
+      lineUserId,
+      winner,
+      {
+        resolveShopifyId: (id) => resolveCallerShopifyCustomerId(id, "line", supabase),
+        getShopifyProfile: (id) => getCustomerProfile(id, fsEnv!),
+        updateShopifyProfile: (id, updates) => updateCustomerProfile(id, updates, fsEnv!),
+        getLineProfile: (id) => getLineUserProfile(id, fsEnv!),
+        updateLineProfile: (id, updates) => updateLineUserProfile(id, updates, fsEnv!),
+      },
+      answers,
+    );
 
+    // Shopify metafield 同期はここから呼ばない（現在 OFF・SHOPIFY_METAFIELD_SYNC_DISABLED）。
+    //   カルテ更新は updateCustomerProfile（Firestore PATCH のみ）で完結し、同期は
+    //   preference-pipeline / バッチ経路だけが持つ。この修正で同期経路を増やさない。
     console.log(
-      `[preference-diagnosis] persona recorded (${path}): winner=${winner} weight=${DIAGNOSIS_WEIGHT}`,
+      `[preference-diagnosis] persona recorded (${path}): winner=${winner} weight=${DIAGNOSIS_WEIGHT}` +
+        (answers ? ` taste(q1=${answers.q1},q2=${answers.q2})` : ""),
     );
   } catch (err) {
     // fail-safe: フローを止めない
@@ -701,9 +808,17 @@ export async function handlePreferenceDiagnosis(
         void logFlowEvent(supabase, ev);
       }
     },
-    // 結果確定時のみ persona を記録（fail-safe: 例外を投げない）。
+    // 結果確定時のみカルテへ記録（fail-safe: 例外を投げない）。
+    //   3 タイプ（persona）は従来どおり weight=3 で加算し、あわせて Spec §7 の
+    //   味わい（Q2）と場面（Q1）を tasteProfile へ足す（同じ 1 回の読み書きで完結）。
     record: plan.winner
-      ? () => recordDiagnosisPersona(lineUserId, plan.winner as PersonaType, env)
+      ? () =>
+          recordDiagnosisPersona(
+            lineUserId,
+            plan.winner as PersonaType,
+            env,
+            preAction.kind === "result" ? { q1: preAction.q1, q2: preAction.q2 } : undefined,
+          )
       : null,
     onReplyError: (err) =>
       console.warn(

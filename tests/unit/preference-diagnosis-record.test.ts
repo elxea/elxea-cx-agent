@@ -13,9 +13,16 @@
 import {
   recordDiagnosisPersonaWith,
   runDiagnosisSideEffects,
+  diagnosisTasteSignals,
+  tasteFromDiagnosisQ2,
   type RecordDiagnosisDeps,
 } from "../../src/lib/preference-diagnosis";
-import type { CustomerProfile, LineUserProfile, PersonaScores } from "../../src/lib/firestore";
+import type {
+  CustomerProfile,
+  LineUserProfile,
+  PersonaScores,
+  TasteProfile,
+} from "../../src/lib/firestore";
 
 let total = 0,
   passed = 0,
@@ -65,6 +72,32 @@ function makeDeps(opts: {
     },
   };
   return { deps, captured };
+}
+
+/**
+ * 状態を持つ fake deps（書いた値をそのまま読み返す）。
+ * 「同じ人が診断を複数回やる」を実際に再現するために使う（差分計算だけでは冪等を確認できない）。
+ */
+function makeStatefulDeps(opts: { shopifyId?: string | null; initial?: LineUserProfile | null }) {
+  const state = {
+    shopify: null as CustomerProfile | null,
+    line: (opts.initial ?? null) as LineUserProfile | null,
+    writes: 0,
+  };
+  const deps: RecordDiagnosisDeps = {
+    resolveShopifyId: async () => opts.shopifyId ?? null,
+    getShopifyProfile: async () => state.shopify,
+    updateShopifyProfile: async (_id, updates) => {
+      state.writes++;
+      state.shopify = { ...(state.shopify ?? {}), ...updates } as CustomerProfile;
+    },
+    getLineProfile: async () => state.line,
+    updateLineProfile: async (_id, updates) => {
+      state.writes++;
+      state.line = { ...(state.line ?? {}), ...updates } as LineUserProfile;
+    },
+  };
+  return { deps, state };
 }
 
 it("(a) 連携済み → users に加算・lineUsers は触らない", async () => {
@@ -120,6 +153,79 @@ it("(d) 未連携でも既存スコアが上回れば primary は据え置き（
   assertEqual(scores.serenity, 9, "serenity 保持");
   assertEqual(scores.sensory, 3, "sensory +3 累積");
   assertEqual(captured.lineUpdate!.updates.persona!.primary, "serenity", "primary 据え置き");
+});
+
+// ---------------------------------------------------------------------------
+// Spec §7 の保存漏れ修正（2026-08-09）: 味わい（Q2）と場面（Q1）を tasteProfile に残す。
+//   §7 原文: Q1→scenePref（1=relaxation, 2=explore, 3=taste）、
+//            Q2→flavorPreferences（1=mellow/sweet, 2=floral, 3=rich, 4=refreshing）
+//   3 タイプ（persona.scores +3）は別項目なので一切変更していないことも併せて固定する。
+// ---------------------------------------------------------------------------
+
+it("(e) Q1 → scenePref / Q2 → flavorPreferences が Spec §7 の語彙で写る [pure]", async () => {
+  assertEqual(diagnosisTasteSignals(1, 1).scene_preferences.join(","), "relaxation", "Q1-1");
+  assertEqual(diagnosisTasteSignals(2, 1).scene_preferences.join(","), "explore", "Q1-2");
+  assertEqual(diagnosisTasteSignals(3, 1).scene_preferences.join(","), "taste", "Q1-3");
+  assertEqual(diagnosisTasteSignals(1, 1).flavor_preferences.join(","), "mellow,sweet", "Q2-1");
+  assertEqual(diagnosisTasteSignals(1, 2).flavor_preferences.join(","), "floral", "Q2-2");
+  assertEqual(diagnosisTasteSignals(1, 3).flavor_preferences.join(","), "rich", "Q2-3");
+  assertEqual(diagnosisTasteSignals(1, 4).flavor_preferences.join(","), "refreshing", "Q2-4");
+  // 保存経路は persona に一切触れない（3 タイプの記録は mergePersonaScores 側だけが持つ）。
+  assertEqual(diagnosisTasteSignals(2, 2).persona_signals.length, 0, "persona_signals は常に空");
+});
+
+it("(f) Q2-2「香り高く、個性を感じる」は floral として保存される（並べ替え用は null のまま）", async () => {
+  const { deps, state } = makeStatefulDeps({ shopifyId: null });
+  await recordDiagnosisPersonaWith(LINE_ID, "explorer", deps, { q1: 2, q2: 2 });
+  const t = state.line!.tasteProfile!;
+  assertEqual(t.flavorPreferences.join(","), "floral", "Q2-2 は floral で残る");
+  assertEqual(t.scenePref, "explore", "Q1-2 は explore");
+  // 並べ替え用（karteAffinity 用）は一切変更していない = 銘柄の並びは回帰しない。
+  assertEqual(tasteFromDiagnosisQ2(2), null, "並べ替え用 tasteFromDiagnosisQ2(2) は null のまま");
+});
+
+it("(g) 既存の好み（購入・会話由来）を壊さず union で足す", async () => {
+  const existingTaste: TasteProfile = {
+    preferredCategories: ["green", "hojicha"],
+    flavorPreferences: ["smoky"],
+    scenePref: "morning",
+  };
+  const { deps, state } = makeStatefulDeps({
+    shopifyId: null,
+    initial: { tasteProfile: existingTaste },
+  });
+  await recordDiagnosisPersonaWith(LINE_ID, "sensory", deps, { q1: 1, q2: 3 });
+  const t = state.line!.tasteProfile!;
+  assertEqual(t.preferredCategories.join(","), "green,hojicha", "カテゴリは触らない");
+  assertEqual(t.flavorPreferences.join(","), "smoky,rich", "既存 smoky を残して rich を足す");
+  assertEqual(t.scenePref, "relaxation", "場面は今回の答えを代表値に置く");
+});
+
+it("(h) 冪等: 同じ診断を 3 回やっても好みが重複蓄積しない（3 タイプは仕様どおり累積）", async () => {
+  const { deps, state } = makeStatefulDeps({ shopifyId: null });
+  for (let i = 0; i < 3; i++) {
+    await recordDiagnosisPersonaWith(LINE_ID, "serenity", deps, { q1: 1, q2: 1 });
+  }
+  assertEqual(state.writes, 3, "3 回書き込んだ（実際に 3 回叩いている）");
+  const t = state.line!.tasteProfile!;
+  assertEqual(t.flavorPreferences.join(","), "mellow,sweet", "味わいは重複しない（2 件のまま）");
+  assertEqual(t.flavorPreferences.length, 2, "3 回でも 2 件");
+  assertEqual(t.scenePref, "relaxation", "場面も同じ値のまま");
+  // 3 タイプは「別軸への累積加算」が既存仕様（今回変更していない）。ここで固定して混同を防ぐ。
+  assertEqual(
+    (state.line!.persona!.scores as PersonaScores).serenity,
+    9,
+    "persona は既存仕様どおり 3 回分累積（3×3=9・今回の修正対象外）",
+  );
+});
+
+it("(i) 回答を渡さないときは tasteProfile を書かない（既存呼び出しの後方互換）", async () => {
+  const { deps, captured } = makeDeps({ shopifyId: null, lineProfile: null });
+  await recordDiagnosisPersonaWith(LINE_ID, "serenity", deps);
+  assert(
+    captured.lineUpdate!.updates.tasteProfile === undefined,
+    "answers なし → tasteProfile を含めない",
+  );
 });
 
 // ---------------------------------------------------------------------------
