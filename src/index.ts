@@ -328,7 +328,13 @@ app.post("/api/erase", async (c) => {
       firestore_residue: result.firestoreResidue,
     });
   } catch (err) {
-    console.error("[erase] failed:", err instanceof Error ? err.message : String(err));
+    // 例外メッセージは roji-erasure.ts 側で本人の ID を落としてある（pathKind / 応答本文を載せない）。
+    // ただし想定外の値が投げられたときに素通しすると痕跡になりうるので、
+    // Error 以外は中身を出さず種別だけを出す。**エラー時こそログは残る**。
+    console.error(
+      "[erase] failed:",
+      err instanceof Error ? err.message : `non-Error thrown (${typeof err})`,
+    );
     return c.json({ error: "erase_failed" }, 500);
   }
 });

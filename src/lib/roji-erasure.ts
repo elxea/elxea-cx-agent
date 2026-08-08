@@ -76,6 +76,27 @@ export type ErasureResult = {
 // Firestore REST の薄いヘルパ（この用途に必要な分だけ）
 // ---------------------------------------------------------------------------
 
+/**
+ * 例外メッセージ・ログに出してよい形にパスを丸める。
+ *
+ * Firestore のパスは `users/{顧客番号}/orders` のように **本人の ID を含む**。
+ * これを例外メッセージに入れると、失敗したときログに残り、
+ * 「この人を消そうとした」という痕跡になる（確定原則違反）。
+ * **エラーのときこそログは残る**ので、投げる時点で ID を落とす。
+ *
+ * 置き場の種類（コレクション名）だけを返す:
+ *   users/123          -> users
+ *   users/123/orders   -> orders
+ *   users/123/orders/x -> orders
+ *   lineUsers/Uxxx     -> lineUsers
+ */
+export function pathKind(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length === 0) return "unknown";
+  // ドキュメントのパスは偶数個（collection/doc/...）、コレクションのパスは奇数個。
+  return (parts.length % 2 === 0 ? parts[parts.length - 2] : parts[parts.length - 1]) ?? "unknown";
+}
+
 async function fsFetch(
   env: FirestoreEnv,
   path: string,
@@ -105,7 +126,7 @@ async function listSubcollections(env: FirestoreEnv, docPath: string): Promise<s
     if (!res.ok) {
       // ドキュメントが無い場合もサブコレクションは在りうるため、404 は空扱いにしない。
       if (res.status === 404) return ids;
-      throw new Error(`listCollectionIds failed (${res.status}) for ${docPath}`);
+      throw new Error(`listCollectionIds failed (${res.status}) for ${pathKind(docPath)}`);
     }
     const json = (await res.json()) as { collectionIds?: string[]; nextPageToken?: string };
     ids.push(...(json.collectionIds ?? []));
@@ -121,14 +142,14 @@ async function deleteCollection(
   counter: { n: number },
   depth = 0,
 ): Promise<void> {
-  if (depth > 5) throw new Error(`deleteCollection: depth limit exceeded at ${collectionPath}`);
+  if (depth > 5) throw new Error(`deleteCollection: depth limit exceeded at ${pathKind(collectionPath)}`);
   let pageToken: string | undefined;
   do {
     const qs = new URLSearchParams({ pageSize: "300", "mask.fieldPaths": "__name__" });
     if (pageToken) qs.set("pageToken", pageToken);
     const res = await fsFetch(env, `/${collectionPath}?${qs}`, { method: "GET" });
     if (res.status === 404) return;
-    if (!res.ok) throw new Error(`list ${collectionPath} failed (${res.status})`);
+    if (!res.ok) throw new Error(`list ${pathKind(collectionPath)} failed (${res.status})`);
     const json = (await res.json()) as { documents?: Array<{ name: string }>; nextPageToken?: string };
     for (const doc of json.documents ?? []) {
       const rel = doc.name.split("/documents/")[1];
@@ -154,7 +175,7 @@ async function deleteDocumentDeep(
     if (res.ok) counter.n++;
     return;
   }
-  throw new Error(`delete ${docPath} failed (${res.status})`);
+  throw new Error(`delete ${pathKind(docPath)} failed (${res.status})`);
 }
 
 /** ある値のフィールドに一致するトップレベルのドキュメントを消す（comments.authorId 用）。 */
@@ -224,7 +245,7 @@ async function docExists(env: FirestoreEnv, docPath: string): Promise<boolean> {
     // ドキュメント本体が無くてもサブコレクションが残っていれば「残っている」と数える。
     return (await listSubcollections(env, docPath)).length > 0;
   }
-  throw new Error(`get ${docPath} failed (${res.status})`);
+  throw new Error(`get ${pathKind(docPath)} failed (${res.status})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +330,9 @@ async function rpc<T>(env: SupabaseEnv, fn: string, args: Record<string, unknown
     },
     body: JSON.stringify(args),
   });
-  if (!res.ok) throw new Error(`rpc ${fn} failed (${res.status}): ${await res.text()}`);
+  // 応答本文は載せない。Postgres のエラーは違反した値（＝本人の ID）を
+  // そのまま引用することがあり、それがログに残ると痕跡になる（確定原則）。
+  if (!res.ok) throw new Error(`rpc ${fn} failed (${res.status})`);
   return (await res.json()) as T;
 }
 

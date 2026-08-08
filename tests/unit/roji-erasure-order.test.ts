@@ -23,7 +23,7 @@
  */
 
 import { generateKeyPairSync } from "node:crypto";
-import { erasePerson } from "../../src/lib/roji-erasure";
+import { erasePerson, pathKind } from "../../src/lib/roji-erasure";
 
 /**
  * その場限りの鍵。Firestore の署名処理を通すためだけのもので、外部には一切出さない
@@ -186,6 +186,65 @@ async function main() {
     } finally {
       fake.restore();
     }
+  });
+
+  console.log("\n=== 例外・ログに本人の ID を出さない（確定原則: 痕跡を残さない）===");
+
+  await it("パスの丸め（pathKind）が置き場の種類名だけを返す", async () => {
+    assertEqual(pathKind("users/7654321"), "users", "本カルテ");
+    assertEqual(pathKind("users/7654321/orders"), "orders", "サブコレクション");
+    assertEqual(pathKind("users/7654321/orders/abc"), "orders", "サブコレクションの1件");
+    assertEqual(pathKind("lineUsers/Uabc123"), "lineUsers", "未連携カルテ");
+    assertEqual(pathKind("users/line:Uabc123"), "users", "未連携カルテ2");
+    assertEqual(pathKind("notificationState/7654321"), "notificationState", "通知状態");
+  });
+
+  await it("Firestore が失敗したとき、投げられる例外に本人の ID が入っていない", async () => {
+    // **エラーのときこそログは残る**。例外メッセージに ID が入っていると、
+    // それがそのまま「この人を消そうとした」という痕跡になる。
+    const fake = installFakeFetch({ firestoreFails: true });
+    let message = "";
+    try {
+      await erasePerson(ENV, { kind: "line", id: "Uline1" });
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    } finally {
+      fake.restore();
+    }
+    assertTrue(message.length > 0, "例外が投げられていない");
+    for (const secret of ["Uline1", "123456", "line:Uline1"]) {
+      assertEqual(
+        message.includes(secret),
+        false,
+        `例外メッセージに本人の ID が入っている（"${secret}" / message="${message}"）`,
+      );
+    }
+  });
+
+  await it("Supabase の RPC が失敗したとき、応答本文を例外に載せない", async () => {
+    // Postgres のエラーは違反した値（＝本人の ID）を引用することがある。
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/rest/v1/rpc/")) {
+        // 応答本文に本人の ID が入っている状況を模す。
+        return new Response(`{"message":"duplicate key value ... (Uline1) ..."}`, { status: 500 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    let message = "";
+    try {
+      await erasePerson(ENV, { kind: "line", id: "Uline1" });
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    assertEqual(
+      message.includes("Uline1"),
+      false,
+      `RPC の応答本文が例外に載っている（message="${message}"）`,
+    );
   });
 
   console.log(`\n=== 結果: ${passed}/${total} PASS ===`);
