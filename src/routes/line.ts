@@ -31,6 +31,7 @@ import { handleAccountLinkEvent } from "../lib/account-link";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { handleMyKarteFlow } from "../lib/my-karte";
 import { handleJournalFlow } from "../lib/journal";
+import { handleRojiSurvey } from "../lib/roji-survey-handler";
 import {
   buildResponseQuickReplies,
   FEEDBACK_POSITIVE_TEXT,
@@ -1018,6 +1019,17 @@ async function handleTextMessage(
   // 自動反映。tea-menu / 診断 / マイカルテと同じく後置（無関係発話は素通り）。
   const wasJournal = await handleJournalFlow(lineUserId, userMessage, env, responder);
   if (wasJournal) return;
+
+  // roji 最初のアンケート（6問・全部1タップ・状態は出来事の置き場から読み直す）。
+  //   Spec: https://www.notion.so/3b570c9d064c81e6b0fcf19356e65406
+  //   横取りするのは (a) トリガー発話 (b) `roji｜*` トークン (c) **ひとことの呼びかけを出した直後の自由文**
+  //   の 3 つだけ。それ以外は素通りする（既存の AI 自由対話フローを一切壊さない）。
+  //   ⚠ 順序: (c) が自由文を見るため、pending-state を持つ onboarding / feedback と、
+  //     完全一致トリガーを持つ tea-menu / menu-actions / 診断 / マイカルテ / 読みもの より **後**に置く。
+  //     これらの方が優先され、アンケートが横取りするのは「他のどれでもない自由文」だけになる。
+  //   ⚠ 公開していない: リッチメニューは差し替えていないため、この導線はお客さんの画面に現れない。
+  const wasRojiSurvey = await handleRojiSurvey(lineUserId, userMessage, env, responder);
+  if (wasRojiSurvey) return;
 
   // メッセージ長制限（MS8 8.2）
   let processedMessage = userMessage;

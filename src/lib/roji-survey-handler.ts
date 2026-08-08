@@ -1,0 +1,198 @@
+/**
+ * roji 最初のアンケート — LINE の配線（読む → 決める → 返す → 器に入れる）。
+ *
+ * 一次入力: roji 最初のアンケート Spec  https://www.notion.so/3b570c9d064c81e6b0fcf19356e65406
+ *
+ * ─ 順序（Spec ②「途中でやめても成立する」の担保）─
+ *   **返す前に、答えを器に入れる。** 返信に失敗しても答えは残る（好み診断の
+ *   runDiagnosisSideEffects と同じ姿勢。ただしこちらは 1 問ごとに書くので、より強い）。
+ *
+ * ─ 送信について（絶対）─
+ *   使うのは `responder`（reply 優先・push フォールバック）だけ。**こちらから話しかけない。**
+ *   push / broadcast / multicast を直接呼ばない。リッチメニューにも触れない。
+ *
+ * ─ 公開していない ─
+ *   入口はトリガー発話（SURVEY_TRIGGER）のみ。**リッチメニューの差し替えは行っていない**ので、
+ *   この導線は「動く状態」だが、お客さんの画面には現れない。
+ */
+
+import type { Env } from "../index";
+import type { LineResponder } from "./line";
+import { createSupabaseClient } from "./supabase";
+import { logFlowEvent, FLOW_EVENTS_TABLE, type FlowEventName } from "./flow-events";
+import {
+  parseSurveyAction,
+  planSurvey,
+  planWords,
+  buildSurveyState,
+  type SurveyEventRow,
+  type SurveyPlan,
+  type SurveyState,
+} from "./roji-survey";
+import {
+  recordSurveyKarteWith,
+  recordSurveyWord,
+  SURVEY_OCCASION,
+  type SurveyKarteDeps,
+} from "./roji-survey-record";
+import {
+  getFirestoreEnv,
+  getCustomerProfile,
+  updateCustomerProfile,
+  getLineUserProfile,
+  updateLineUserProfile,
+} from "./firestore";
+import { resolveCallerShopifyCustomerId } from "./shopify";
+
+/** 状態を読み直す範囲（アンケートは 1 回きりなので短くてよい）。 */
+const STATE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** ひとことの上限（LINE の 1 通の上限より十分に短く、原文はそのまま残す）。 */
+export const WORDS_MAX_LENGTH = 2000;
+
+/**
+ * この人のアンケートの出来事を読み直す（項目31 = 出来事の置き場）。
+ * 失敗は「まだ何も答えていない」に倒す（読めないことで先へ進めなくならないようにする）。
+ */
+export async function loadSurveyState(
+  env: Env,
+  lineUserId: string,
+  now: number = Date.now(),
+): Promise<SurveyState> {
+  try {
+    const supabase = createSupabaseClient(env);
+    const since = new Date(now - STATE_WINDOW_MS).toISOString();
+    const { data, error } = await supabase
+      .from(FLOW_EVENTS_TABLE)
+      .select("event_name, step, value, created_at")
+      .eq("user_ref", lineUserId)
+      .like("event_name", "survey.%")
+      .gte("created_at", since)
+      .order("created_at", { ascending: true })
+      .limit(200);
+    if (error) {
+      console.warn("[roji-survey] state read failed (treated as empty):", error.message);
+      return buildSurveyState([], now);
+    }
+    return buildSurveyState((data ?? []) as SurveyEventRow[], now);
+  } catch (err) {
+    console.warn(
+      "[roji-survey] state read unexpected error (treated as empty):",
+      err instanceof Error ? err.message : err,
+    );
+    return buildSurveyState([], now);
+  }
+}
+
+function karteDeps(env: Env): SurveyKarteDeps | null {
+  let fsEnv;
+  try {
+    fsEnv = getFirestoreEnv(env);
+  } catch {
+    return null; // Firebase 未設定 → カルテは書けない（出来事の記録は続ける）。
+  }
+  const supabase = createSupabaseClient(env);
+  return {
+    resolveShopifyId: (id) => resolveCallerShopifyCustomerId(id, "line", supabase),
+    getShopifyProfile: (id) => getCustomerProfile(id, fsEnv),
+    updateShopifyProfile: (id, updates) => updateCustomerProfile(id, updates, fsEnv),
+    getLineProfile: (id) => getLineUserProfile(id, fsEnv),
+    updateLineProfile: (id, updates) => updateLineUserProfile(id, updates, fsEnv),
+  };
+}
+
+/**
+ * プランを実行する（**器に入れてから返す**）。
+ * カルテの書き込みが落ちても出来事は残す。出来事が落ちても返信はする。
+ */
+async function applyPlan(
+  env: Env,
+  lineUserId: string,
+  plan: SurveyPlan,
+  state: SurveyState,
+  responder: LineResponder,
+): Promise<void> {
+  const supabase = createSupabaseClient(env);
+
+  // 1. カルテ（1問ごとに独立して・その場で）。
+  if (plan.karte) {
+    const deps = karteDeps(env);
+    if (deps) {
+      const isFirstTap =
+        plan.karte.step != null && (state.answers[plan.karte.step] ?? []).length === 0;
+      try {
+        await recordSurveyKarteWith(lineUserId, plan.karte, { isFirstTap }, deps);
+      } catch (err) {
+        console.warn(
+          "[roji-survey] karte write failed (non-blocking):",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  // 2. 出来事の置き場（項目31・29）。聞いた契機は必ず添える。
+  for (const ev of plan.events) {
+    await logFlowEvent(supabase, {
+      eventName: ev.eventName as FlowEventName,
+      userRef: lineUserId,
+      step: ev.step,
+      value: ev.value,
+      metadata: { occasion: SURVEY_OCCASION },
+    });
+  }
+
+  // 3. 返す（〔いまはやめておく〕は何も送らない）。
+  if (plan.message) {
+    await responder.text(plan.message.text, plan.message.quickReplies);
+  }
+}
+
+/**
+ * アンケートを進める。無関係な発話は false（＝素通り）。
+ *
+ * ひとことの受け取りだけは「呼びかけを出した直後の自由文」を横取りする。
+ * それ以外の自由文は一切横取りしない（既存の AI 会話を壊さない）。
+ */
+export async function handleRojiSurvey(
+  lineUserId: string,
+  userMessage: string,
+  env: Env,
+  responder: LineResponder,
+): Promise<boolean> {
+  const action = parseSurveyAction(userMessage);
+
+  if (action) {
+    const state = await loadSurveyState(env, lineUserId);
+    const plan = planSurvey(action, state);
+    await applyPlan(env, lineUserId, plan, state, responder);
+    return true;
+  }
+
+  // トークンでもトリガーでもない発話。ひとこと待ちのときだけ、言葉として受け取る。
+  const body = userMessage.trim();
+  if (!body || body.length > WORDS_MAX_LENGTH) return false;
+
+  const state = await loadSurveyState(env, lineUserId);
+  if (!state.awaitingWords) return false;
+
+  const supabase = createSupabaseClient(env);
+  // 言葉の置き場へ（原文のまま・分類は空・出所はアンケートの自由記述）。
+  const saved = await recordSurveyWord(supabase, lineUserId, body, state.awaitingContext ?? "ok");
+  if (!saved) {
+    // 器に入らなかったのに「残しました」と返さない。素通りさせて既存の経路に委ねる。
+    return false;
+  }
+
+  const next = planWords(state);
+  for (const ev of next.events) {
+    await logFlowEvent(supabase, {
+      eventName: ev.eventName as FlowEventName,
+      userRef: lineUserId,
+      value: ev.value,
+      metadata: { occasion: SURVEY_OCCASION },
+    });
+  }
+  await responder.text(next.message.text, next.message.quickReplies);
+  return true;
+}

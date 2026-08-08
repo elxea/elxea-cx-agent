@@ -64,7 +64,30 @@ export type FlowEventName =
   //   nextmonth.shown:    項目28 翌月反映の1行を画面に出した（表示のたび）。Q1 の分母。
   | "read.completed"
   | "feedback.shown"
-  | "nextmonth.shown";
+  | "nextmonth.shown"
+  // roji 最初のアンケート（Spec https://www.notion.so/3b570c9d064c81e6b0fcf19356e65406）。
+  //   すべて metadata.occasion = "survey"（項目31 の「聞いた契機」）を伴う。
+  //   survey.answer     : 項目31 押した記号そのもの（step=q1〜q6 / value=選択肢の記号）。**自由文は入れない**。
+  //   survey.start      : 案内を出した（＝アンケートを出したことの分母）。
+  //   survey.decline    : 〔いまはやめておく〕。追いかけないので、これ以上何も起きない。
+  //   survey.end        : 〔ここで終える〕。どこでやめたかは survey.answer の並びで分かる。
+  //   survey.estimate_shown     : 項目29 1行の推定を表示した（表示のたび）。
+  //   survey.estimate_corrected : 項目29 訂正した ＋ 項目20 の選び直し（value=言い換えの記号 / none）。
+  //   survey.words_prompt : ひとことの呼びかけを出した（value = 項目39「直前に押したもの」）。
+  //   survey.words_saved  : 言葉を置き場に入れた（**本文は入れない**。本文は roji_words にだけ在る）。
+  //   survey.quote_consent: 項目18 引用の許可を答えた（value = inside / outside）。
+  //   survey.finished     : 終わりの画面まで行った。
+  //   ※ 項目29・survey.start / decline は**全体の分母としてのみ使い、個人の推定には一切使わない**。
+  | "survey.start"
+  | "survey.decline"
+  | "survey.answer"
+  | "survey.end"
+  | "survey.estimate_shown"
+  | "survey.estimate_corrected"
+  | "survey.words_prompt"
+  | "survey.words_saved"
+  | "survey.quote_consent"
+  | "survey.finished";
 
 /** 記録する 1 イベントの入力。 */
 export interface FlowEventInput {
