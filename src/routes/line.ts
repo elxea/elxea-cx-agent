@@ -283,7 +283,11 @@ async function processEvents(
     //   （内部の記号を本人の吹き出しに出さないため）。
     if (event.type === "postback" && event.postback) {
       try {
-        await handleRojiSurvey(lineUserId, event.postback.data, env, responder);
+        // allowWordsCapture: false — postback の data は本人が書いた言葉ではないので、
+        //   ひとことの捕捉には**構造的に**入らない（roji 以外が postback を使い始めても事故らない）。
+        await handleRojiSurvey(lineUserId, event.postback.data, env, responder, {
+          allowWordsCapture: false,
+        });
       } catch (error) {
         console.error("Error processing postback event:", error);
         recordApiError(env, error instanceof Error ? error.message : String(error));

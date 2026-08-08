@@ -764,6 +764,9 @@ async function main() {
     const k = karte.read("Utest0001");
     assertEqual(k.drinkingScenes?.undecided, true, "項目11 の「決まっていない」が値として残らない");
     assertEqual(k.teaCategoryPreference?.undecided, true, "項目9 の「決まっていない」が値として残らない");
+    // 「決まっていない」は選んだ記号ではないので、選んだものの列には入れない（二重持ちにしない）。
+    assertEqual(k.drinkingScenes?.values ?? [], [], "項目11 の values に「決まっていない」が混ざった");
+    assertEqual(k.teaCategoryPreference?.values ?? [], [], "項目9 の values に「決まっていない」が混ざった");
     // 照合語彙は汚さない（どのお茶にも当たらない値を 1 つも入れない）。
     assertEqual(k.tasteProfile?.preferredCategories ?? [], [], "照合語彙に「決まっていない」が混ざった");
     // まだ聞いていない人は、そもそも項目が無い（＝空欄）。
@@ -813,6 +816,49 @@ async function main() {
     assertEqual(k.estimateCorrection?.choice, "explorer", "項目20");
     assertEqual(k.persona?.scores.explorer, SURVEY_PERSONA_WEIGHT, "項目7 の上書き（新しい軸）");
     assertEqual(k.persona?.primary, "explorer", "primary が訂正後になる");
+  });
+
+  await it("訂正を同じ言い換えで3回押しても、傾き（項目7）は重み1回分のまま", async () => {
+    const { karte } = await runFlow([
+      tap("q3", "serenity"),
+      "roji｜next",
+      "roji｜next",
+      "roji｜next",
+      "roji｜next",
+      "roji｜diff",
+      "roji｜fix｜explorer",
+      "roji｜fix｜explorer",
+      "roji｜fix｜explorer",
+    ]);
+    const s = karte.read("Utest0001").persona!.scores;
+    // 訂正の画面のボタンも1タップ。二度押し・2画面併用で同じタップが複数回届く。
+    assertEqual(
+      [s.serenity, s.explorer],
+      [0, SURVEY_PERSONA_WEIGHT],
+      "訂正の連打で傾きが積み上がっている",
+    );
+    assertEqual(karte.read("Utest0001").persona?.primary, "explorer", "primary");
+  });
+
+  await it("訂正を交互に押し替えても、正しく1つだけが立つ", async () => {
+    const { karte } = await runFlow([
+      tap("q3", "serenity"),
+      "roji｜next",
+      "roji｜next",
+      "roji｜next",
+      "roji｜next",
+      "roji｜diff",
+      "roji｜fix｜explorer",
+      "roji｜fix｜sensory",
+      "roji｜fix｜explorer",
+    ]);
+    const s = karte.read("Utest0001").persona!.scores;
+    assertEqual(
+      [s.serenity, s.explorer, s.sensory],
+      [0, SURVEY_PERSONA_WEIGHT, 0],
+      "押し替えの往復で傾きがずれている",
+    );
+    assertEqual(karte.read("Utest0001").estimateCorrection?.choice, "explorer", "項目20 の最新");
   });
 
   await it("〔どれも違う〕は呼びかけの文が変わる（ここがいちばん濃い言葉が出る場所）", () => {

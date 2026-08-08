@@ -256,6 +256,38 @@ describe("hermetic L1 — 動線17: roji 最初のアンケート", () => {
     expect(words[0].context_slug, "項目39 直前に押したもの").toBe("ok");
   });
 
+  it("roji 以外のボタン（postback）は、ひとこと待ちでも言葉として保存されない", async () => {
+    const user = synthLineUserId("f17j");
+    h.supabase.seed("roji_word_person_refs", [
+      { person_seq: 1, subject_kind: "line", subject_id: user },
+    ]);
+    // ひとこと待ちの状態にする。
+    await tap(user, SURVEY_TRIGGER);
+    await tap(user, "roji｜go");
+    await tap(user, "roji｜a｜q1｜morning");
+    for (let i = 0; i < 6; i++) await tap(user, "roji｜next");
+    await tap(user, "roji｜ok");
+    expect(lastText(), "ひとこと待ちになっていない").toBe("もし、付け足したいことがあれば。");
+
+    // ここで **roji 以外の機能のボタン** を押す（将来そういう機能が足された想定）。
+    await dispatchLineWebhook({
+      env,
+      channelSecret: String(env.LINE_CHANNEL_SECRET),
+      events: [postbackEvent(user, "someOtherFeature|action=subscribe&id=42")],
+    });
+    await settle();
+
+    // ボタンに仕込まれた内部の文字列が、本人の言葉として残ってはならない。
+    expect(h.supabase.all("roji_words").length, "他機能のボタンが言葉として保存された").toBe(0);
+    const saved = surveyEvents(user).filter((r) => r.event_name === "survey.words_saved");
+    expect(saved.length, "書いていないのに『書いた』が記録された").toBe(0);
+
+    // 本人が実際に打った言葉は、これまでどおり受け取れる。
+    await tap(user, "朝のほうが好きです。");
+    expect(h.supabase.all("roji_words").length, "本物のひとことが受け取れていない").toBe(1);
+    expect(h.supabase.all("roji_words")[0].body).toBe("朝のほうが好きです。");
+  });
+
   it("アンケートと無関係な発話は横取りしない（既存の動線を壊さない）", async () => {
     const user = synthLineUserId("f17h");
     // アンケートに入っていない人の自由文は、ひとことにならない。

@@ -106,7 +106,11 @@ export function surveyKarteUpdates(
         const values = cur.values ?? [];
         out.drinkingScenes = {
           ...cur,
-          values: values.includes(choice.slug) ? values : [...values, choice.slug],
+          // 「決まっていない」は **選んだ場面ではない**ので values に入れない（undecided だけで表す）。
+          // 二重に持つと、後から values と undecided が食い違ったときに
+          // どちらが本当かを決められなくなる（矛盾しようのない形にする）。
+          values:
+            choice.undecided || values.includes(choice.slug) ? values : [...values, choice.slug],
           ...(choice.undecided ? { undecided: true } : {}),
           updatedAt: now,
         };
@@ -150,7 +154,12 @@ export function surveyKarteUpdates(
         const prefValues = curPref.values ?? [];
         out.teaCategoryPreference = {
           ...curPref,
-          values: prefValues.includes(choice.slug) ? prefValues : [...prefValues, choice.slug],
+          // 「決まっていない」は **選んだカテゴリではない**ので values に入れない
+          // （drinkingScenes と扱いを揃える。型のコメント「green / oolong / black」とも一致させる）。
+          values:
+            choice.undecided || prefValues.includes(choice.slug)
+              ? prefValues
+              : [...prefValues, choice.slug],
           ...(choice.undecided ? { undecided: true } : {}),
           updatedAt: now,
         };
@@ -187,13 +196,18 @@ export function surveyKarteUpdates(
       choice: write.fixChoice,
       correctedAt: now,
     };
-    if (write.fixChoice) {
-      // 「上書き」なので、直前にアンケートが足した分を戻してから足し直す（二重加算にしない）。
-      // 戻す対象は「訂正の前に効いていた気持ち」= 問い3 の答え、または前回の訂正。
+    // 「上書き」なので、直前にアンケートが足した分を戻してから足し直す（二重加算にしない）。
+    // 戻す対象は「訂正の前に効いていた気持ち」= 問い3 の答え、または前回の訂正。
+    const prev =
+      write.fixUndo !== undefined ? write.fixUndo : (existing.estimateCorrection?.choice ?? null);
+    // **同じ言い換えを押し直したときは、傾きに一切触れない**（答えの経路と同じ基準）。
+    //   状態は出来事の置き場から組み直しているので、押し直しでは必ず prev === fixChoice になる。
+    //   この 1 条件だけで冪等になり、交互の押し替え（A→B→A）は prev が毎回変わるので正しく動く。
+    //   訂正の画面のボタンも 1 タップなので、二度押し・2 画面併用は普通に起きる。
+    //   傾きは購入と同格の重み 3 なので、静かに積み上がると割当が歪む。
+    if (write.fixChoice && prev !== write.fixChoice) {
       const base = { ...(existing.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 }) };
-      const prev =
-        write.fixUndo !== undefined ? write.fixUndo : (existing.estimateCorrection?.choice ?? null);
-      const undo = (prev === write.fixChoice ? null : prev) as PersonaType | null;
+      const undo = prev as PersonaType | null;
       if (undo && undo in base) {
         base[undo] = Math.max(0, (base[undo] ?? 0) - SURVEY_PERSONA_WEIGHT);
       }

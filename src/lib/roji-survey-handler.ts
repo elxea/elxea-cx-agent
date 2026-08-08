@@ -159,6 +159,18 @@ export async function handleRojiSurvey(
   userMessage: string,
   env: Env,
   responder: LineResponder,
+  opts: {
+    /**
+     * ひとこと（自由文）として受け取ってよい入力か。
+     *
+     * **postback からは必ず false**。postback の data は「本人が書いた言葉」ではなく
+     * ボタンに仕込まれた内部の文字列なので、言葉の置き場に入ってはならない。
+     * 将来 roji 以外の機能が postback を使い始めたとき、その内部文字列が
+     * ひとこと待ちの人の言葉として保存される事故を、**経路の分離**で防ぐ
+     * （「roji のトークンか」を判定するフィルタだと、判定漏れで事故が起きうる）。
+     */
+    allowWordsCapture?: boolean;
+  } = {},
 ): Promise<boolean> {
   const action = parseSurveyAction(userMessage);
 
@@ -169,7 +181,11 @@ export async function handleRojiSurvey(
     return true;
   }
 
-  // トークンでもトリガーでもない発話。ひとこと待ちのときだけ、言葉として受け取る。
+  // アンケートのトークンでもトリガーでもない入力。
+  //   自由文として受け取ってよい経路（＝本人が打った発話）でなければ、ここで手を引く。
+  if (opts.allowWordsCapture === false) return false;
+
+  // ひとこと待ちのときだけ、言葉として受け取る。
   const body = userMessage.trim();
   if (!body || body.length > WORDS_MAX_LENGTH) return false;
 
