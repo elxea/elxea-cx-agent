@@ -20,5 +20,10 @@
     "baseUrl": "."
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"],
-  "exclude": ["node_modules", "scripts/run-migration-*.ts", "scripts/migrate.ts"]
+  "exclude": [
+    "node_modules",
+    "scripts/run-migration-*.ts",
+    "scripts/migrate.ts",
+    "scripts/roji-safety-declarations.ts"
+  ]
 }
