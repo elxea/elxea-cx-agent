@@ -44,14 +44,19 @@ async function testWorkerResponds200(): Promise<void> {
 }
 
 async function testWebhookEndpointExists(): Promise<void> {
-  const res = await fetch(`${STAGING_URL}/webhook`, {
+  // ⚠ パスは `/webhook/line`（`src/index.ts` の `app.post("/webhook/line", lineWebhook)`）。
+  //   旧実装は `/webhook` を叩いていたが、そのルートは存在しないため staging / prod の
+  //   どちらでも必ず 404 になり、deploy-prod.sh の staging smoke ゲートが恒常的に落ちていた。
+  //   署名なしの POST は `lineWebhook` 入口の署名検証で 403 になる（イベント処理は走らず、
+  //   利用者へ 1 通も送らない）。ここで確かめるのは「ルートが在ること」だけ。
+  const res = await fetch(`${STAGING_URL}/webhook/line`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ events: [] }),
   });
-  // Should not be 404. A 400 or 401 without a valid LINE signature is expected.
+  // 404 以外なら在る。署名なしなので 403 が期待値。
   if (res.status === 404) {
-    throw new Error("Webhook endpoint returned 404 -- route not found");
+    throw new Error("Webhook endpoint returned 404 -- route not found (POST /webhook/line)");
   }
 }
 
@@ -76,7 +81,7 @@ async function testHealthEndpoint(): Promise<void> {
   console.log("");
 
   await runTest("Worker responds 200 at root", testWorkerResponds200);
-  await runTest("Webhook endpoint exists (POST /webhook)", testWebhookEndpointExists);
+  await runTest("Webhook endpoint exists (POST /webhook/line)", testWebhookEndpointExists);
   await runTest("Health endpoint returns 200", testHealthEndpoint);
 
   console.log("");
