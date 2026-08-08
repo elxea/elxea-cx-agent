@@ -578,6 +578,87 @@ git revert HEAD
 git push origin main
 ```
 
+## 本番反映の実施記録
+
+### 2026-08-08第3工程「配布 + 鍵の登録 + 実動作確認」— **配布は未実施（Cloudflare認証切れでブロック）**
+
+対象ブランチ `integration/roji-prod-rollout-20260808` / HEAD `5c19dd4`。
+**本番Workerへの配布・secret登録は1つも実行できていない。** 以下は事実の記録。
+
+**通ったもの:**
+
+| 項目 | 結果 |
+|---|---|
+| working tree | clean（未コミット差分なし） |
+| `npm run test:unit` | exit 0（68/68 PASS） |
+| `npx vitest run` | exit 0（19 files / 96 tests PASS） |
+| 本番ベースライン記録 | 下表のとおり取得（件数・メタのみ／本文は取得していない） |
+| stagingへ `031` 適用 | 完了（削除ジョブ3本を解除・本番と設定が揃った） |
+| 消去の実動作確認（**staging**） | **全項目PASS**（後述） |
+
+**本番ベースライン（2026-08-08T05:40Z取得・配布していないので現在も同値）:**
+
+- 行数: `conversations` 347 / `user_identity_map` 55 / `customer_linkages` 1 / `flow_events` 45 /
+  `conversation_daily_stats` 137 / `line_message_ledger` 4 / `account_link_nonces` 1（他は0）
+- `cron.job`: `daily-conversation-stats` のみ（1本・active）＝90日削除ジョブは停止済み（031適用済み）
+- `POST /api/erase`: **404**（＝新コード未配布）
+- ヘルスチェック `https://elxea-agent.setaka-on.workers.dev/`: **200** `{"status":"ok"}`
+- 台帳: `031`〜`037` すべて適用済み（＝**配布時に当てるmigrationは無い**＝`MIGRATE_ONLY=NONE`）
+
+**ブロッカー: Cloudflareへの書き込み認証が無い（Setakaの対応が要る）**
+
+- ローカルwranglerのOAuthは **2026-07-27T19:19Zに期限切れ**、refreshも `400 Bad Request` で失敗
+  （`~/Library/Preferences/.wrangler/config/default.toml`）。`wrangler whoami` = `Not logged in.`
+- `CLOUDFLARE_API_TOKEN` は**ローカル環境変数にも無い**。
+- **リポジトリにもorgにも `secrets.CLOUDFLARE_API_TOKEN` は未登録**（`.github/workflows/ci.yml` に
+  2026-07-27実測済みとして明記）。よってGitHub Actions経由の配布も同様に不可。
+- したがって `wrangler secret put ERASE_API_SECRET` も `wrangler deploy` も実行できない。
+
+**解消手順（どちらか一方でよい）:**
+
+```bash
+# 案1: ローカル OAuth を張り直す（対話・ブラウザ承認が要る）
+pnpm exec wrangler login
+
+# 案2: 最小権限の API トークンを発行して使う
+#   Cloudflare ダッシュボードで Workers Scripts:Edit / Account Settings:Read 相当を発行し
+export CLOUDFLARE_API_TOKEN=***
+```
+
+解消後の配布コマンド（**この形のまま実行する**）:
+
+```bash
+# 1. 鍵を登録（値は対話入力・履歴とログに残さない）
+pnpm exec wrangler secret put ERASE_API_SECRET
+
+# 2. 配布（migration は当てない／リッチメニューは差し替えない）
+CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE SUPABASE_DB_PASSWORD=*** ./scripts/deploy-prod.sh
+```
+
+> ⚠ `ROJI_SURVEY_ENABLED` は **登録しない**（未設定＝OFF）。メニュー未差し替えとの二重の安全を維持する。
+> ⚠ `DELIVERY_SEND_ENABLED` / `DORMANT_SEND_ENABLED` / `MARCHE_SEND_ENABLED` には触れない。
+
+**消去の実動作確認（stagingで実施・本番は未確認）**
+
+本番へ配布できていないため、**本番の `/api/erase` 経由の確認は未実施**。
+代わりにstagingのDB層（`roji_erase_person` / `roji_erasure_residue`）で通した。
+明示的テスト接頭辞 `ZZTESTERASE-` の架空の人1件を16表に作り、消して検算した結果:
+
+- 別名表の不動点解決: LINEのID **だけ**からEC顧客番号・Web識別子・`person_seq` に到達 [OK]
+- 消去: 12表から削除（`conversations` 2 / `customer_linkages` 1 / `user_identity_map` 1ほか）[OK]
+- 検算 `roji_erasure_residue`: **`clean=true`**・`remaining` 全項目0 [OK]
+- **痕跡走査**: 公開スキーマの**全テキスト列を総当たり**で走査し、架空の人の痕跡 **0件** [OK]
+- 図2の「残る」側: 匿名の言葉（`person_seq IS NULL`）・編む手間の記録・月の締め が**残存** [OK]
+- 実データ保全: 種まき前と消去後の**全28表の行数が完全一致**（既存行は1行も減っていない）[OK]
+- 冪等性: 同じIDを2回消しても2回目は0件・例外なし [OK]
+- 後片付け: テスト行を全削除し、stagingは試験前の状態へ**完全復帰**を確認 [OK]
+
+> **本番では未確認**。Firestore側の消去（本カルテ・未連携カルテ・comments）はWorker経由でしか
+> 走らないため、**stagingのDB層検証では覆えていない**。本番配布後に `/api/erase` で
+> 架空の人1件を通して初めて「消せます」が全経路で言える。
+
+**このセッションで本番に加えた変更: 無し**（読み取りのみ。行数・cron・health・`/api/erase` すべてベースラインと同値であることを再測して確認済み）。
+
 ## Monitoring Post-Deploy
 
 - Check Slack #alerts channel for error notifications
