@@ -717,8 +717,11 @@ export function diagnosisFlowEvents(
 export async function runDiagnosisSideEffects(deps: {
   /** LINE 返信（reply 優先・無料化）。失敗しても記録は道連れにしない。 */
   reply: () => Promise<void>;
-  /** 診断ファネル記録（fire-and-forget・失敗は内部で握りつぶす前提）。 */
-  logFlowEvents?: () => void;
+  /**
+   * 診断ファネル記録。**返信の後で待ち切る**（お客さまの応答は既に返っているので待っても遅くならない）。
+   * logFlowEvent 自体が決して throw しない fail-safe なので、待っても新しい失敗経路は増えない。
+   */
+  logFlowEvents?: () => void | Promise<void>;
   /** persona 記録（winner があるときのみ・fail-safe）。返信失敗と独立に必ず実行する。 */
   record?: (() => Promise<void>) | null;
   /** 返信失敗時のログ等（副作用なし・任意）。 */
@@ -733,7 +736,16 @@ export async function runDiagnosisSideEffects(deps: {
   }
 
   // 返信の成否に関わらずファネル記録（本番昇格前に必須・初期ファネルを失わない）。
-  deps.logFlowEvents?.();
+  //
+  // ここで **await する**（2026-08-09 修正・投げっぱなしをやめた理由）:
+  //   旧実装は `void logFlowEvent(...)` を投げるだけで、Q1〜Q3 の各段は直後に待つものが何も無く、
+  //   webhook 全体を包む waitUntil(processEvents) が解決 → Worker が畳まれ、Supabase への
+  //   書き込みが飛ぶ前に打ち切られていた。本番 flow_events の実測がそれを示している:
+  //     menu.tap(diagnosis) 12 件 / diag.start 0 / q1 0 / q2 0 / q3 2 / result 2
+  //   （q3・result だけ残るのは、直後に await するカルテ記録の往復が偶然 Worker を生かしていたため。
+  //     ＝生き残りが実装の保証ではなく所要時間の偶然に依存していた）。
+  //   返信（deps.reply）は既に完了しているので、ここで待ってもお客さまの体感は 1 ミリ秒も変わらない。
+  await deps.logFlowEvents?.();
 
   // 返信失敗と独立に persona 記録を完遂（堅牢化の中核）。record 自体は fail-safe。
   if (deps.record) {
@@ -802,11 +814,14 @@ export async function handlePreferenceDiagnosis(
       resultCarousel
         ? responder.flex(plan.message.text, resultCarousel, plan.message.quickReplies)
         : responder.text(plan.message.text, plan.message.quickReplies),
-    // 診断ファネル記録（P0-2・fire-and-forget・失敗は握りつぶし）。
-    logFlowEvents: () => {
-      for (const ev of diagnosisFlowEvents(userMessage, lineUserId, plan.winner)) {
-        void logFlowEvent(supabase, ev);
-      }
+    // 診断ファネル記録（P0-2・失敗は logFlowEvent 内部で握りつぶす）。
+    //   返信の後で **書き終わるまで待つ**（投げっぱなしだと Worker が畳まれて消える。上の注記参照）。
+    logFlowEvents: async () => {
+      await Promise.all(
+        diagnosisFlowEvents(userMessage, lineUserId, plan.winner).map((ev) =>
+          logFlowEvent(supabase, ev),
+        ),
+      );
     },
     // 結果確定時のみカルテへ記録（fail-safe: 例外を投げない）。
     //   3 タイプ（persona）は従来どおり weight=3 で加算し、あわせて Spec §7 の
