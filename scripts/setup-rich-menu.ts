@@ -5,7 +5,7 @@
  *
  * 6 枠レイアウト（2500x1686px・2×3 グリッド・各枠 833×843）:
  *   上段（3 枠）: ① お茶の淹れ方 | ② 好み診断 | ③ マイカルテ
- *   下段（3 枠）: ④ 定期便       | ⑤ 読みもの | ⑥ elxea について
+ *   下段（3 枠）: ④ 定期便       | ⑤ 読みもの | ⑥ roji をつくっています
  *   （旧 5 枠版の「相談」を削除し、③ マイカルテ・⑤ 読みもの を新設。★=新規）
  *   ※ 列幅は 833 / 833 / 834（合計 2500）。右列のみ 834 で端数を吸収する。
  *
@@ -18,7 +18,10 @@
  *     ③ "マイカルテ"                       → src/routes/line.ts マイカルテ完全一致（customer-karte・read-only）
  *     ④ "定期便について知りたい"            → src/lib/menu-actions.ts SUBSCRIPTION_TRIGGER
  *     ⑤ "読みもの"                         → src/lib/journal.ts READING_TRIGGER
- *     ⑥ "elxeaについて教えて"               → src/lib/menu-actions.ts ABOUT_TRIGGER
+ *     ⑥ "rojiをつくっています"              → src/lib/roji-survey-copy.ts SURVEY_TRIGGER
+ *        （2026-08-09 変更: 旧 ⑥「elxeaについて教えて」→ ABOUT_TRIGGER から差し替え。
+ *         ABOUT_TRIGGER は発話トリガーとして存続するが、メニューからの導線は無くなる。
+ *         画像は assets/rich-menu/richmenu-roji-survey.png を使うこと。）
  *
  * 実行: pnpm setup-rich-menu -- --channel prod|test
  *   - 順序（空白の窓を作らない・QA 指摘の修正）: create → image upload → set-default(new) → delete-old。
@@ -139,13 +142,13 @@ const richMenuBody = {
         text: "読みもの",
       },
     },
-    // 下段右: ⑥ elxea について（menu-actions.ts ABOUT_TRIGGER と一致）
+    // 下段右: ⑥ roji をつくっています（roji-survey-copy.ts SURVEY_TRIGGER と一致）
     {
       bounds: { x: 1666, y: 843, width: 834, height: 843 },
       action: {
         type: "message",
-        label: "elxea について",
-        text: "elxeaについて教えて",
+        label: "rojiをつくっています",
+        text: "rojiをつくっています",
       },
     },
   ],
@@ -302,7 +305,7 @@ async function main() {
       `   Rich Menu ID: ${richMenuId}\n` +
       "   6 枠レイアウト（2×3・各 833×843 / 右列 834）:\n" +
       "      上段: お茶の淹れ方 | 好み診断 | マイカルテ\n" +
-      "      下段: 定期便 | 読みもの | elxea について",
+      "      下段: 定期便 | 読みもの | roji をつくっています",
   );
 }
 
