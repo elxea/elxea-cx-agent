@@ -1,0 +1,16 @@
+{
+  "_comment_1": "LINE チャネルアクセストークンの発行日を覚えておくためのファイル。scripts/line-token-rotation.sh が読み書きする。",
+  "_comment_2": "トークンそのものは絶対に書かない。ここにあるのは『いつ発行したか』だけなので、漏れても実害はない。",
+  "_comment_3": "使い方: 本番なら scripts/line-token-state.prod.json、検証なら scripts/line-token-state.staging.json という名前でコピーして値を埋める (実ファイルは .gitignore 済み)。",
+  "_comment_4": "issued_at は現行トークンを発行した日、expires_at はその 30 日後。両方 YYYY-MM-DD (時刻・タイムゾーンは判定に使わない)。",
+  "_comment_5": "2 回目以降はスクリプトが自動で書き換えるため、人が触るのは初回のこの 1 回だけ。",
+
+  "env": "prod",
+  "secret_name": "LINE_CHANNEL_ACCESS_TOKEN",
+  "issued_at": "2026-08-10",
+  "expires_at": "2026-09-09",
+  "expires_in_seconds": 2592000,
+  "last_rotation_reason": "bootstrap-manual",
+  "last_checked_at": "2026-08-10",
+  "rotation_count": 0
+}
