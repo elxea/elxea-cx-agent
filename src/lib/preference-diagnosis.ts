@@ -48,8 +48,9 @@ import {
   updateCustomerProfile,
   getLineUserProfile,
   updateLineUserProfile,
-  mergePersonaScores,
+  mergePersonaScoresWithSource,
   computeTasteProfileUpdates,
+  PERSONA_AXES,
   type PersonaType,
   type PersonaScores,
   type TasteProfile,
@@ -166,11 +167,14 @@ const SCORE_TABLE: Record<"q1" | "q2" | "q3", Record<number, Partial<PersonaScor
 
 /**
  * 3 問の回答からペルソナを確定する（純粋）。
- * 合計最大軸で確定。同点は固定優先順 serenity → explorer → sensory の先勝ち
- * （既存 `mergePersonaScores` の primary 再計算と同一の tiebreak）。
+ * 合計最大軸で確定。同点は固定優先順 serenity → explorer → sensory の先勝ち。
+ *
+ * ここは**この 3 問の中の勝者**を決める場所で、カルテの primary を決める場所ではない
+ * （カルテ側の「同点はいまの primary を維持」は `pickPrimaryPersona` の役目）。
+ * その 3 問には「いまの答え」しか無いので、同点は固定順で決めるのが正しい。
+ * 走査は `PERSONA_AXES` の固定順で行い、キーの並び順に結果が左右されないようにする。
  */
 export function scoreDiagnosis(q1: number, q2: number, q3: number): PersonaType {
-  // キー挿入順が先勝ちの優先順（serenity → explorer → sensory）を決める。
   const scores: PersonaScores = { serenity: 0, explorer: 0, sensory: 0 };
   const apply = (delta: Partial<PersonaScores>) => {
     for (const [k, v] of Object.entries(delta) as Array<[PersonaType, number]>) {
@@ -181,10 +185,12 @@ export function scoreDiagnosis(q1: number, q2: number, q3: number): PersonaType 
   apply(SCORE_TABLE.q2[q2] ?? {});
   apply(SCORE_TABLE.q3[q3] ?? {});
 
-  // 先勝ち（strict >）で最大軸を選ぶ = mergePersonaScores と同一挙動。
-  return (Object.entries(scores) as Array<[PersonaType, number]>).reduce((a, b) =>
-    b[1] > a[1] ? b : a,
-  )[0];
+  // 固定順に strict > で最大軸を選ぶ（同点は先に来る軸が勝つ）。
+  let winner: PersonaType = PERSONA_AXES[0];
+  for (const axis of PERSONA_AXES) {
+    if (scores[axis] > scores[winner]) winner = axis;
+  }
+  return winner;
 }
 
 // ---------------------------------------------------------------------------
@@ -563,9 +569,19 @@ export async function recordDiagnosisPersonaWith(
   if (shopifyId) {
     const existing = await deps.getShopifyProfile(shopifyId);
     const existingScores = existing?.persona?.scores ?? zeroScores();
-    const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
+    const { scores, primary, sources } = mergePersonaScoresWithSource({
+      existingScores,
+      existingSources: existing?.personaScoreSources,
+      currentPrimary: existing?.persona?.primary ?? null,
+      signals: [winner],
+      weight: DIAGNOSIS_WEIGHT,
+      source: "diagnosis",
+      now,
+    });
     await deps.updateShopifyProfile(shopifyId, {
       persona: { primary, scores, lastUpdated: now },
+      // 点の内訳（どの出所が何点入れたか）も同じ 1 回の書き込みに載せる。
+      personaScoreSources: sources,
       // Spec §7: 味わい（Q2）と場面（Q1）も同じ 1 回の読み書きで足す（往復を増やさない）。
       ...(answers
         ? { tasteProfile: diagnosisTasteUpdate(existing?.tasteProfile, answers) }
@@ -578,10 +594,19 @@ export async function recordDiagnosisPersonaWith(
   // 未連携: LINE userId をキーにしたカルテへ（指摘 #2）。既存カルテと同種の persona のみ保持。
   const existingLine = await deps.getLineProfile(lineUserId);
   const existingScores = existingLine?.persona?.scores ?? zeroScores();
-  const { scores, primary } = mergePersonaScores(existingScores, [winner], DIAGNOSIS_WEIGHT);
+  const { scores, primary, sources } = mergePersonaScoresWithSource({
+    existingScores,
+    existingSources: existingLine?.personaScoreSources,
+    currentPrimary: existingLine?.persona?.primary ?? null,
+    signals: [winner],
+    weight: DIAGNOSIS_WEIGHT,
+    source: "diagnosis",
+    now,
+  });
   const updates: Partial<LineUserProfile> = {
     lineUserId,
     persona: { primary, scores, lastUpdated: now },
+    personaScoreSources: sources,
     ...(answers
       ? { tasteProfile: diagnosisTasteUpdate(existingLine?.tasteProfile, answers) }
       : {}),

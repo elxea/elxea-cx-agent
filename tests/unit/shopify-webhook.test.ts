@@ -303,7 +303,7 @@ it("タグ解決 0 件でも pipeline は呼ぶ（空タグは pipeline 内で�
 it("会話 serenity+1 済みに explorer 購入 +3 → serenity 保持・explorer 加算", () => {
   // 会話由来の既存スコア
   const existing = { serenity: 1, explorer: 0, sensory: 0 };
-  const { scores, primary } = mergePersonaScores(existing, ["explorer"], 3);
+  const { scores, primary } = mergePersonaScores(existing, ["explorer"], 3, "serenity");
   assertEqual(scores.serenity, 1, "会話 serenity は消えない（上書きされない）");
   assertEqual(scores.explorer, 3, "購入 explorer は +3");
   assertEqual(scores.sensory, 0);
@@ -311,19 +311,19 @@ it("会話 serenity+1 済みに explorer 購入 +3 → serenity 保持・explore
 });
 
 it("同一軸は累積加算（会話 +1 の上に購入 +3 = 4）", () => {
-  const { scores } = mergePersonaScores({ serenity: 1, explorer: 0, sensory: 0 }, ["serenity"], 3);
+  const { scores } = mergePersonaScores({ serenity: 1, explorer: 0, sensory: 0 }, ["serenity"], 3, "serenity");
   assertEqual(scores.serenity, 4);
 });
 
 it("既存が優勢なら購入後も primary は据え置き（別軸加算のため）", () => {
   const existing = { serenity: 10, explorer: 0, sensory: 0 };
-  const { primary } = mergePersonaScores(existing, ["explorer"], 3);
+  const { primary } = mergePersonaScores(existing, ["explorer"], 3, "serenity");
   assertEqual(primary, "serenity", "explorer+3 では serenity(10) を超えない");
 });
 
 it("入力を変更しない（純粋・非破壊）", () => {
   const existing = { serenity: 1, explorer: 2, sensory: 3 };
-  mergePersonaScores(existing, ["explorer"], 3);
+  mergePersonaScores(existing, ["explorer"], 3, null);
   assertEqual(existing.explorer, 2, "元オブジェクトは不変");
 });
 

@@ -206,7 +206,7 @@ it("DIAGNOSIS_WEIGHT は 3（Boss 確定値・購入と同格）", () => {
 it("新規ユーザー（scores=0）: 記録後 primary = winner（表示=記録 一致）", () => {
   const zero: PersonaScores = { serenity: 0, explorer: 0, sensory: 0 };
   for (const w of ["serenity", "explorer", "sensory"] as PersonaType[]) {
-    const { scores, primary } = mergePersonaScores(zero, [w], DIAGNOSIS_WEIGHT);
+    const { scores, primary } = mergePersonaScores(zero, [w], DIAGNOSIS_WEIGHT, null);
     assertEqual(primary, w, `new user primary=${w}`);
     assertEqual(scores[w], 3, `winner +3`);
   }
@@ -215,7 +215,7 @@ it("新規ユーザー（scores=0）: 記録後 primary = winner（表示=記録
 it("既存ユーザー（履歴が上回る）: primary は履歴側のまま（乖離許容・仕様）", () => {
   // 購入履歴で serenity=9 のユーザーが診断で sensory になっても、記録 primary は serenity のまま。
   const existing: PersonaScores = { serenity: 9, explorer: 0, sensory: 0 };
-  const { scores, primary } = mergePersonaScores(existing, ["sensory"], DIAGNOSIS_WEIGHT);
+  const { scores, primary } = mergePersonaScores(existing, ["sensory"], DIAGNOSIS_WEIGHT, "serenity");
   assertEqual(primary, "serenity", "history-dominant primary unchanged");
   assertEqual(scores.sensory, 3, "sensory still accrues +3 (別軸に累積)");
   assertEqual(scores.serenity, 9, "serenity preserved (上書きしない)");

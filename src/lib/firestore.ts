@@ -35,6 +35,48 @@ export type PersonaScores = {
   sensory: number;
 };
 
+/**
+ * 好みタイプの軸を並べる**固定順**（= 同点になったときの既定の優先順）。
+ *
+ * なぜ定数が要るか（非決定の封鎖点）:
+ *   従来 primary は `Object.entries(scores)` の並び順に依存して決めていた。JS のオブジェクトは
+ *   文字列キーの挿入順を保つが、**Firestore から読み直した scores のキー順は保証されない**
+ *   （本番で同一ドキュメントを 3 回読んで 3 回とも順序が違うことを実測済み）。
+ *   よって同点のとき「読むたびに勝者が変わる」= 人のタイプが理由なく入れ替わる状態だった。
+ *   走査を必ずこの配列の順で行うことで、入力のキー順に関わらず結果が一意に決まる。
+ */
+export const PERSONA_AXES = ["serenity", "explorer", "sensory"] as const;
+
+/**
+ * 好みタイプの点を入れた**出所**。どの入力が何点入れたかを内訳として残すための区分。
+ *
+ * - `diagnosis`     好み診断（weight=3）
+ * - `survey`        アンケートの問い3・その訂正（weight=3）
+ * - `purchase`      購入商品のタグ由来（weight=3）
+ * - `conversation`  会話からの抽出（weight=1）
+ *
+ * 「出所不明分」は**区分として持たない**。`scores` の合計から下の内訳の合計を引いた残りが
+ * 出所不明分であり（`unattributedPersonaScores`）、過去データを遡って割り振ることはしない。
+ */
+export type PersonaScoreSource = "diagnosis" | "survey" | "purchase" | "conversation";
+
+/**
+ * 好みタイプの点の**内訳（出所ごとの積み上げ）**。`persona.scores` とは別に持つ追加の記録。
+ *
+ * なぜ別に持つか: `persona.scores` は既に多くの読み手（配信の宛先抽出・カルテ表示・metafield 同期）が
+ * 使っている。合計の意味と型を変えると読み手が壊れる。よって**合計はそのまま**にして、
+ * 「その合計が何で出来ているか」だけを追加で持つ。
+ *
+ * 不変条件: 各軸で `Σ(内訳) <= scores[軸]`（超えない）。差が出所不明分。
+ */
+export type PersonaScoreSources = {
+  diagnosis?: PersonaScores;
+  survey?: PersonaScores;
+  purchase?: PersonaScores;
+  conversation?: PersonaScores;
+  lastUpdated?: string; // ISO 8601
+};
+
 export type PersonaProfile = {
   primary: PersonaType | null;
   scores: PersonaScores;
@@ -198,6 +240,19 @@ export type RojiKarteFields = {
   estimateLineUpdatedAt?: string | null;
   /** 項目20: 1行の推定への訂正。合流時は「新しい方」を採る。 */
   estimateCorrection?: EstimateCorrection;
+  /**
+   * 項目7（好みタイプ）の点の**内訳 = 出所ごとの積み上げ**。カルテの新しい「項目」ではなく、
+   * 既にある `persona.scores` が何で出来ているかの記録（合計そのものは一切変えない）。
+   *
+   * なぜ本カルテと未連携カルテの**両方**に置くか（= ここに置く理由）:
+   *   点は未連携のうちにも貯まる（診断・アンケートは連携前に答えられる）。片側にしか無いと
+   *   合流の瞬間に内訳だけが落ち、「合計はあるのに誰が入れたか分からない」状態になる。
+   *   `RojiKarteFields` に置けば両カルテに同じ形で入り、かつ `KARTE_MERGE_RULES` が
+   *   **合流規則を宣言するまで型検査を落とす**（宣言し忘れて黙って落ちる経路を塞ぐ）。
+   *
+   * 遡っての割り振りはしない: 本項目の導入前に貯まった点は出所不明のまま残す（触らない）。
+   */
+  personaScoreSources?: PersonaScoreSources;
 };
 
 export type CustomerProfile = RojiKarteFields & {
@@ -922,6 +977,47 @@ export async function recordBehaviorEvent(
 // PersonaScore マージ（純粋関数 — I/O なし・完全にユニットテスト可能）
 // ---------------------------------------------------------------------------
 
+/** 数値として読む（非数値・非有限は 0）。壊れた保存値で勝者決定を巻き込まないため。 */
+function numeric(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * 点数から**いまの好みタイプ（primary）を決める**（純粋・決定的）。
+ *
+ * ■ 何を直したか（この関数が在る理由）
+ *   従来は `Object.entries(scores).reduce(...)` で最大軸を選んでいた。最大が 1 つに決まる限りは
+ *   これで正しいが、**同点のときはキーの並び順が勝者を決めていた**。Firestore から読み直した
+ *   scores のキー順は保証されず（本番で同一ドキュメントを 3 回読んで 3 回とも順序が違った）、
+ *   同点の人はタイプ判定が読むたびに変わりうる状態だった。
+ *
+ * ■ 同点になったときの決め方（この順に見る）
+ *   1. **いまの primary が同点集合に居るならそれを残す**。人のタイプが、本人が何もしていないのに
+ *      入れ替わらないことを最優先する（新しい入力が古い入力を押しのける形にしない）。
+ *   2. いまの primary が同点集合に居ない / そもそも無い場合だけ、固定順
+ *      （serenity → explorer → sensory）の先頭を採る。
+ *   どちらの経路も入力のキー順に依存しない = 何度呼んでも同じ答えになる。
+ *
+ * @param scores 判定対象の点数
+ * @param currentPrimary 更新**前**の primary（未設定なら null）
+ */
+export function pickPrimaryPersona(
+  scores: PersonaScores,
+  currentPrimary: PersonaType | null | undefined,
+): PersonaType {
+  // 走査は必ず固定順で行う（Object.keys の順に依存しない）。
+  let max = Number.NEGATIVE_INFINITY;
+  for (const axis of PERSONA_AXES) {
+    const v = numeric(scores[axis]);
+    if (v > max) max = v;
+  }
+  const tied = PERSONA_AXES.filter((axis) => numeric(scores[axis]) === max);
+
+  // 同点なら、いまの primary を維持する（居なければ固定順の先頭）。
+  if (currentPrimary && tied.includes(currentPrimary)) return currentPrimary;
+  return tied[0];
+}
+
 /**
  * ペルソナシグナルを既存スコアに「加算」してマージする（純粋）。
  *
@@ -930,18 +1026,21 @@ export async function recordBehaviorEvent(
  * - 会話由来（weight=1）と購入由来（weight=3）は同じ軸に足し込まれるだけで、
  *   一方が他方を消すことはない（例: 会話で serenity+1 済みのユーザーが explorer 商品を
  *   購入しても serenity は保持され、explorer に +3 されるだけ）。
- * - primary は「最大スコアの軸」を再計算するだけ（tie は先勝ち = Object.entries 順）。
+ * - primary は `pickPrimaryPersona` で再計算する（同点はいまの primary を維持・決定的）。
  *
  * この不変条件により「購入判定が会話シグナルを上書きする」事故を構造的に防ぐ。
  *
  * @param existingScores 既存のペルソナスコア
  * @param personaSignals 今回のシグナル（重複含みうる。含まれた回数だけ加算する）
  * @param weight シグナル 1 件あたりの加算値（会話=1 / 購入=3）
+ * @param currentPrimary 更新**前**の primary。同点時にこれを維持する。
+ *        **省略不可**（省略できると呼び出し元ごとに同点の答えがぶれるため、型で必須にしている）
  */
 export function mergePersonaScores(
   existingScores: PersonaScores,
   personaSignals: PersonaType[],
   weight: number,
+  currentPrimary: PersonaType | null,
 ): { scores: PersonaScores; primary: PersonaType } {
   const scores: PersonaScores = { ...existingScores };
 
@@ -950,12 +1049,108 @@ export function mergePersonaScores(
     scores[signal] = (scores[signal] ?? 0) + weight;
   }
 
-  // primary を再計算（最大スコアの軸）。
-  const primary = (
-    Object.entries(scores) as Array<[PersonaType, number]>
-  ).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+  return { scores, primary: pickPrimaryPersona(scores, currentPrimary) };
+}
 
-  return { scores, primary };
+// ---------------------------------------------------------------------------
+// 点の出所の記録（純粋 — I/O なし）
+// ---------------------------------------------------------------------------
+
+/** 出所ごとの内訳 1 バケツを 0 埋めで読む（保存値が欠けていても軸を落とさない）。 */
+function readSourceBucket(bucket: PersonaScores | undefined): PersonaScores {
+  return {
+    serenity: numeric(bucket?.serenity),
+    explorer: numeric(bucket?.explorer),
+    sensory: numeric(bucket?.sensory),
+  };
+}
+
+/**
+ * ある出所のバケツに増減を反映する（純粋）。
+ *
+ * 増減が全部 0 のときは何も足さない（`lastUpdated` も動かさない = 意味のない書き込みを作らない）。
+ * バケツは 0 未満にしない（押し替えの取り消しが、その出所が入れた以上に引かないようにする）。
+ */
+export function addPersonaScoreSourceDeltas(
+  sources: PersonaScoreSources | undefined,
+  source: PersonaScoreSource,
+  deltas: Partial<Record<PersonaType, number>>,
+  now: string,
+): PersonaScoreSources {
+  const bucket = readSourceBucket(sources?.[source]);
+  let changed = false;
+  for (const axis of PERSONA_AXES) {
+    const d = numeric(deltas[axis]);
+    if (d === 0) continue;
+    bucket[axis] = Math.max(0, bucket[axis] + d);
+    changed = true;
+  }
+  if (!changed) return sources ?? {};
+  return { ...(sources ?? {}), [source]: bucket, lastUpdated: now };
+}
+
+/**
+ * 点数を足しつつ、**同じ 1 回の計算で出所の内訳も更新する**（純粋・Firestore の往復を増やさない）。
+ *
+ * 合計（`scores`）の作り方は従来と 1 点も変えていない。増えるのは `sources`（内訳）だけ。
+ *
+ * @param args.undo 押し替えの取り消し（アンケートで別の答えに押し替えたとき）。
+ *        この軸から weight 分を戻す（合計は 0 未満にしない = 従来の `Math.max(0, x - weight)` と同じ）。
+ */
+export function mergePersonaScoresWithSource(args: {
+  existingScores: PersonaScores;
+  existingSources: PersonaScoreSources | undefined;
+  /** 更新**前**の primary。同点時にこれを維持する。 */
+  currentPrimary: PersonaType | null;
+  signals: PersonaType[];
+  weight: number;
+  source: PersonaScoreSource;
+  undo?: PersonaType | null;
+  now: string;
+}): { scores: PersonaScores; primary: PersonaType; sources: PersonaScoreSources } {
+  const scores: PersonaScores = { ...args.existingScores };
+  const deltas: Partial<Record<PersonaType, number>> = {};
+
+  // 押し替えの取り消し（引く分）。合計から実際に引けた分だけ内訳からも引く（ずれを作らない）。
+  if (args.undo) {
+    const dec = Math.min(numeric(scores[args.undo]), args.weight);
+    if (dec > 0) {
+      scores[args.undo] = numeric(scores[args.undo]) - dec;
+      deltas[args.undo] = (deltas[args.undo] ?? 0) - dec;
+    }
+  }
+
+  for (const signal of args.signals) {
+    scores[signal] = (scores[signal] ?? 0) + args.weight;
+    deltas[signal] = (deltas[signal] ?? 0) + args.weight;
+  }
+
+  return {
+    scores,
+    primary: pickPrimaryPersona(scores, args.currentPrimary),
+    sources: addPersonaScoreSourceDeltas(args.existingSources, args.source, deltas, args.now),
+  };
+}
+
+/**
+ * 出所が分からない分（＝内訳のどのバケツにも属さない点）を軸ごとに出す（純粋）。
+ *
+ * 記録を始める前から貯まっていた点はここに出る。**遡って割り振ることはしない**ので、
+ * 「昔からある分」はこの残差として見えるだけでよい。負にはしない（内訳が合計を超えて見えても 0 に倒す）。
+ */
+export function unattributedPersonaScores(
+  scores: PersonaScores,
+  sources: PersonaScoreSources | undefined,
+): PersonaScores {
+  const out: PersonaScores = { serenity: 0, explorer: 0, sensory: 0 };
+  for (const axis of PERSONA_AXES) {
+    let attributed = 0;
+    for (const source of ["diagnosis", "survey", "purchase", "conversation"] as const) {
+      attributed += numeric(sources?.[source]?.[axis]);
+    }
+    out[axis] = Math.max(0, numeric(scores[axis]) - attributed);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -974,6 +1169,8 @@ function addPersonaScores(a: PersonaScores, b: PersonaScores): PersonaScores {
 /**
  * 2 つの PersonaProfile を累積統合する（純粋・I/O なし）。
  * scores は軸ごとに加算（`mergePersonaScores` 流儀・どちらも上書きしない）、primary は加算後の最大軸で再計算。
+ * 同点のときは `pickPrimaryPersona` に従い**base 側のいまの primary を維持**する（統合したというだけで
+ * 人のタイプが入れ替わらないようにする）。base に primary が無ければ incoming 側を候補にする。
  * どちらか一方が未定義ならもう一方をそのまま返す（統合すべき好みが無いときは base を返す）。
  */
 export function mergePersonaProfiles(
@@ -983,9 +1180,7 @@ export function mergePersonaProfiles(
   if (!incoming) return base;
   if (!base) return incoming;
   const scores = addPersonaScores(base.scores, incoming.scores);
-  const primary = (
-    Object.entries(scores) as Array<[PersonaType, number]>
-  ).reduce((x, y) => (y[1] > x[1] ? y : x))[0];
+  const primary = pickPrimaryPersona(scores, base.primary ?? incoming.primary ?? null);
   return { primary, scores, lastUpdated: new Date().toISOString() };
 }
 
@@ -1036,14 +1231,27 @@ export function mergeTasteProfiles(
  * - tasteProfile: preferredCategories / flavorPreferences は union（上限50・古いものから削除）、
  *   scenePref は新規があれば先頭を採用。
  * - persona: signals.persona_signals があれば mergePersonaScores で「別軸に累積加算」（weight 反映）。
+ *   同点時は既存 primary を維持し、点の出所（既定は会話由来）も内訳に積む。
  * - lastActiveAt を常に更新。
+ *
+ * @param personaOpts 点の出所の記録用。`source` 未指定は会話由来（この関数の既定の呼ばれ方）。
+ *   `existingSources` は既存の内訳（渡さないと内訳が毎回作り直しになるので、呼び出し側は必ず渡す）。
  */
 export function computeTasteProfileUpdates(
   signals: PreferenceSignals,
   existingTaste: TasteProfile | undefined,
   existingPersona: PersonaProfile | undefined,
   weight = 1,
-): { tasteProfile: TasteProfile; persona?: PersonaProfile; lastActiveAt: string } {
+  personaOpts?: {
+    source?: PersonaScoreSource;
+    existingSources?: PersonaScoreSources;
+  },
+): {
+  tasteProfile: TasteProfile;
+  persona?: PersonaProfile;
+  personaScoreSources?: PersonaScoreSources;
+  lastActiveAt: string;
+} {
   const now = new Date().toISOString();
   const taste = existingTaste ?? {
     preferredCategories: [],
@@ -1063,7 +1271,12 @@ export function computeTasteProfileUpdates(
       ? signals.scene_preferences[0]
       : taste.scenePref;
 
-  const result: { tasteProfile: TasteProfile; persona?: PersonaProfile; lastActiveAt: string } = {
+  const result: {
+    tasteProfile: TasteProfile;
+    persona?: PersonaProfile;
+    personaScoreSources?: PersonaScoreSources;
+    lastActiveAt: string;
+  } = {
     tasteProfile: {
       preferredCategories: mergedCategories,
       flavorPreferences: mergedFlavors,
@@ -1078,12 +1291,17 @@ export function computeTasteProfileUpdates(
       scores: { serenity: 0, explorer: 0, sensory: 0 },
       lastUpdated: now,
     };
-    const { scores, primary } = mergePersonaScores(
-      basePersona.scores,
-      signals.persona_signals,
+    const { scores, primary, sources } = mergePersonaScoresWithSource({
+      existingScores: basePersona.scores,
+      existingSources: personaOpts?.existingSources,
+      currentPrimary: basePersona.primary,
+      signals: signals.persona_signals,
       weight,
-    );
+      source: personaOpts?.source ?? "conversation",
+      now,
+    });
     result.persona = { primary, scores, lastUpdated: now };
+    result.personaScoreSources = sources;
   }
 
   return result;
@@ -1095,18 +1313,22 @@ export async function updateTasteProfile(
   existingProfile: CustomerProfile | null,
   env: FirestoreEnv,
   weight = 1,
+  source: PersonaScoreSource = "conversation",
 ): Promise<Partial<CustomerProfile>> {
   const merged = computeTasteProfileUpdates(
     signals,
     existingProfile?.tasteProfile,
     existingProfile?.persona,
     weight,
+    { source, existingSources: existingProfile?.personaScoreSources },
   );
   const updates: Partial<CustomerProfile> = {
     tasteProfile: merged.tasteProfile,
     lastActiveAt: merged.lastActiveAt,
   };
   if (merged.persona) updates.persona = merged.persona;
+  // 点の内訳は persona と**同じ 1 回の書き込み**に載せる（往復を増やさない）。
+  if (merged.personaScoreSources) updates.personaScoreSources = merged.personaScoreSources;
 
   await updateCustomerProfile(shopifyCustomerId, updates, env);
 
@@ -1129,12 +1351,14 @@ export async function updateLineUserTasteProfile(
   existingLineProfile: LineUserProfile | null,
   env: FirestoreEnv,
   weight = 1,
+  source: PersonaScoreSource = "conversation",
 ): Promise<Partial<LineUserProfile>> {
   const merged = computeTasteProfileUpdates(
     signals,
     existingLineProfile?.tasteProfile,
     existingLineProfile?.persona,
     weight,
+    { source, existingSources: existingLineProfile?.personaScoreSources },
   );
   const updates: Partial<LineUserProfile> = {
     lineUserId,
@@ -1142,6 +1366,8 @@ export async function updateLineUserTasteProfile(
     lastActiveAt: merged.lastActiveAt,
   };
   if (merged.persona) updates.persona = merged.persona;
+  // 点の内訳は persona と**同じ 1 回の書き込み**に載せる（往復を増やさない）。
+  if (merged.personaScoreSources) updates.personaScoreSources = merged.personaScoreSources;
   if (!existingLineProfile) updates.createdAt = merged.lastActiveAt;
 
   await updateLineUserProfile(lineUserId, updates, env);
@@ -1315,10 +1541,13 @@ export async function mergeLineUserIntoShopify(
         explorer: 0,
         sensory: 0,
       };
+      // 同点になったら本カルテ側のいまの primary を維持する（合流したというだけで
+      //   会員のタイプが入れ替わらないようにする）。本カルテに primary が無ければ未連携側を候補にする。
       const { scores, primary } = mergePersonaScores(
         baseScores,
         personaScoresToSignals(linePersona!.scores),
         1,
+        customerPersona?.primary ?? linePersona?.primary ?? null,
       );
       return { primary, scores, lastUpdated: now };
     },
@@ -1338,6 +1567,8 @@ export async function mergeLineUserIntoShopify(
         customer?.tasteProfile,
         customer?.persona,
         1,
+        // persona_signals は空なので内訳は動かないが、既存の内訳を渡して不要な作り直しを防ぐ。
+        { existingSources: customer?.personaScoreSources },
       );
       return mergedTaste.tasteProfile;
     },

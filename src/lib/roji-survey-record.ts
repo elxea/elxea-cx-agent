@@ -48,7 +48,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  mergePersonaScores,
+  mergePersonaScoresWithSource,
   type CustomerProfile,
   type LineUserProfile,
   type PersonaType,
@@ -136,16 +136,21 @@ export function surveyKarteUpdates(
         if (choice.undecided) break;
         const base = { ...(existing.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 }) };
         // 押し替えたときは、前に足した分を戻してから足す（連打・押し替えで積み上がらない）。
+        //   戻す・足すの両方を mergePersonaScoresWithSource が行い、点の内訳（出所=survey）も
+        //   同じ増減で動かす（合計と内訳がずれない）。同点のときはいまの primary を維持する。
         const undo = (write.replaces ?? null) as PersonaType | null;
-        if (undo && undo !== choice.slug && undo in base) {
-          base[undo] = Math.max(0, (base[undo] ?? 0) - SURVEY_PERSONA_WEIGHT);
-        }
-        const { scores, primary } = mergePersonaScores(
-          base,
-          [choice.slug as PersonaType],
-          SURVEY_PERSONA_WEIGHT,
-        );
+        const { scores, primary, sources } = mergePersonaScoresWithSource({
+          existingScores: base,
+          existingSources: existing.personaScoreSources,
+          currentPrimary: existing.persona?.primary ?? null,
+          signals: [choice.slug as PersonaType],
+          weight: SURVEY_PERSONA_WEIGHT,
+          source: "survey",
+          undo: undo && undo !== choice.slug ? undo : null,
+          now,
+        });
         out.persona = { primary, scores, lastUpdated: now };
+        out.personaScoreSources = sources;
         break;
       }
       case "q4": {
@@ -207,16 +212,18 @@ export function surveyKarteUpdates(
     //   傾きは購入と同格の重み 3 なので、静かに積み上がると割当が歪む。
     if (write.fixChoice && prev !== write.fixChoice) {
       const base = { ...(existing.persona?.scores ?? { serenity: 0, explorer: 0, sensory: 0 }) };
-      const undo = prev as PersonaType | null;
-      if (undo && undo in base) {
-        base[undo] = Math.max(0, (base[undo] ?? 0) - SURVEY_PERSONA_WEIGHT);
-      }
-      const { scores, primary } = mergePersonaScores(
-        base,
-        [write.fixChoice as PersonaType],
-        SURVEY_PERSONA_WEIGHT,
-      );
+      const { scores, primary, sources } = mergePersonaScoresWithSource({
+        existingScores: base,
+        existingSources: existing.personaScoreSources,
+        currentPrimary: existing.persona?.primary ?? null,
+        signals: [write.fixChoice as PersonaType],
+        weight: SURVEY_PERSONA_WEIGHT,
+        source: "survey",
+        undo: prev as PersonaType | null,
+        now,
+      });
       out.persona = { primary, scores, lastUpdated: now };
+      out.personaScoreSources = sources;
     }
   }
 

@@ -172,13 +172,14 @@ export async function runPurchasePreferencePipeline(
     // 既存プロファイルを取得
     const existingProfile = await getCustomerProfile(shopifyCustomerId, fsEnv);
 
-    // マージして更新（購入シグナルは +3 の重み）
+    // マージして更新（購入シグナルは +3 の重み・点の出所は「購入」として内訳に積む）
     const profileUpdates = await updateTasteProfile(
       shopifyCustomerId,
       signals,
       existingProfile,
       fsEnv,
       PURCHASE_SIGNAL_WEIGHT,
+      "purchase",
     );
 
     // lastPurchaseAt を更新

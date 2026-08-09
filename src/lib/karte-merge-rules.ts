@@ -49,7 +49,8 @@ import type {
  * - `skip`                  持ち越さない（識別子・制御フラグ・タイムスタンプ）。理由の明記を必須にする。
  * - `persona-sum`           好みタイプの点数 = 足す（別軸への累積加算）。呼び出し側の handler に委譲。
  * - `taste-union`           味・香り・カテゴリ = 両方入れる（重なりは1つに）。呼び出し側の handler に委譲。
- * - `numeric-sum`           数えるものは足す（項目12 窓への傾き）。
+ * - `numeric-sum`           数えるものは足す（項目12 窓への傾き）。**1段だけ**。
+ * - `nested-numeric-sum`    入れ子の数値表をそのまま足す（好みタイプの点の内訳 = 出所ごとの積み上げ）。
  * - `list-union`            リストは両方入れる・重複排除（項目13 また入れてほしい / もういらない）。
  * - `safety-union`          安全に関する申告 = 両方入れる。**消す方向の統合を絶対にしない**（項目6）。
  * - `most-restrictive-bool` 本人の設定 = 制限の強い方（項目18 引用の許可）。
@@ -62,6 +63,11 @@ export type MergeRule =
   | { strategy: "taste-union" }
   /** `exclude` はスコアでない付随キー（例: lastUpdated）。足し算の対象から外す。 */
   | { strategy: "numeric-sum"; exclude: readonly string[] }
+  /**
+   * `numeric-sum` の入れ子版。`{ 出所: { 軸: 点 } }` のように 1 段深いところに数値がある表を、
+   * 深さに関わらず数値だけ足す。`exclude` はどの深さでも足し算から外す（例: lastUpdated）。
+   */
+  | { strategy: "nested-numeric-sum"; exclude: readonly string[] }
   /** `lists` は配列を持つキー名。それ以外のキーは carry-if-empty で扱う。 */
   | { strategy: "list-union"; lists: readonly string[] }
   | { strategy: "safety-union" }
@@ -111,6 +117,12 @@ export const KARTE_MERGE_RULES: {
   // --- 好み（既存の 2 項目） ---
   persona: { strategy: "persona-sum" },
   tasteProfile: { strategy: "taste-union" },
+  /**
+   * 好みタイプの点の内訳（出所ごとの積み上げ）。合計（persona.scores）は persona-sum で足すので、
+   * 内訳も**同じ足し方**にしないと「合計は増えたのに内訳が増えない」ずれが合流のたびに開く。
+   * よって出所×軸の数値をそのまま足す。lastUpdated は足さず合流時刻で更新する。
+   */
+  personaScoreSources: { strategy: "nested-numeric-sum", exclude: ["lastUpdated"] },
 
   // --- 入口の答え（項目15）。穴1 で落ちていた本体 ---
   //   onboarding は複合オブジェクト。carry-if-empty は**サブキー単位**で効くため、
@@ -298,6 +310,63 @@ function applyNumericSum(
   }
   if (!changed) return {};
   // 更新時刻を持つ形（lastUpdated 等）なら合流時刻で更新する。
+  for (const k of exclude) {
+    if (k in lineValue || k in base) out[k] = now;
+  }
+  return { value: out };
+}
+
+/**
+ * 入れ子の数値表を深さに関わらず足し合わせる（純粋・再帰）。
+ *
+ * - 数値どうし → 足す（非有限・非数値は 0 扱い）
+ * - どちらもオブジェクト → 1 段潜って同じ判断（`{ 出所: { 軸: 点 } }` を正しく足すのはここ）
+ * - それ以外（文字列など） → carry-if-empty（本カルテ優先・空なら未連携側）
+ *
+ * `exclude` のキーはどの深さでも足さない。`changed` は「本カルテ側の値から実際に動いたか」を返す
+ * （動いていないなら書き込みを起こさないため）。
+ */
+function deepSumNumbers(
+  base: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  exclude: readonly string[],
+): { out: Record<string, unknown>; changed: boolean } {
+  const out: Record<string, unknown> = { ...base };
+  let changed = false;
+  for (const [k, v] of Object.entries(incoming)) {
+    if (exclude.includes(k)) continue;
+    if (typeof v === "number") {
+      const sum = sumNumeric(base[k], v);
+      if (sum !== base[k]) changed = true;
+      out[k] = sum;
+    } else if (isPlainObject(v)) {
+      const sub = deepSumNumbers(isPlainObject(base[k]) ? base[k] : {}, v, exclude);
+      if (sub.changed) {
+        out[k] = sub.out;
+        changed = true;
+      }
+    } else {
+      const c = applyCarryIfEmpty(v, base[k]);
+      if (c.value !== undefined) {
+        out[k] = c.value;
+        changed = true;
+      }
+    }
+  }
+  return { out, changed };
+}
+
+/** nested-numeric-sum — 入れ子の数値表を足す（好みタイプの点の内訳）。 */
+function applyNestedNumericSum(
+  lineValue: unknown,
+  customerValue: unknown,
+  exclude: readonly string[],
+  now: string,
+): FieldOutcome {
+  if (!isPlainObject(lineValue)) return applyCarryIfEmpty(lineValue, customerValue);
+  const base = isPlainObject(customerValue) ? customerValue : {};
+  const { out, changed } = deepSumNumbers(base, lineValue, exclude);
+  if (!changed) return {};
   for (const k of exclude) {
     if (k in lineValue || k in base) out[k] = now;
   }
@@ -496,6 +565,9 @@ export function computeKarteCarryover(
       }
       case "numeric-sum":
         outcome = applyNumericSum(lineValue, customerValue, rule.exclude, ctx.now);
+        break;
+      case "nested-numeric-sum":
+        outcome = applyNestedNumericSum(lineValue, customerValue, rule.exclude, ctx.now);
         break;
       case "list-union":
         outcome = applyListUnion(lineValue, customerValue, rule.lists, ctx.now);
