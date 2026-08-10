@@ -30,7 +30,14 @@ export type MenuTapValue =
   | "subscription"
   | "about";
 
-/** 5 枠トリガー文言 → value スラッグ（完全一致）。 */
+/**
+ * トリガー文言 → value スラッグ（完全一致）。
+ *
+ * 注意（2026-08-10）: 現行リッチメニューは 6 枠（③マイカルテ / ⑤読みもの / ⑥roji アンケート）だが、
+ * 本写像は 5 枠時代の値のままで、新 3 枠は menu.tap として記録されない（分布の欠測）。
+ * consult / about は枠を持たない発話専用トリガーになったが、発話としては来るため写像は残す。
+ * MenuTapValue の拡張は flow_events の集計スキーマに影響するため別タスクで扱う。
+ */
 const MENU_TRIGGERS: Record<string, MenuTapValue> = {
   [BREW_RICH_MENU_TRIGGER]: "brew",
   [DIAGNOSIS_TRIGGER]: "diagnosis",

@@ -1,11 +1,15 @@
 /**
- * Unit Tests -- menu-actions（リッチメニュー ③相談 / ④定期便 / ⑤elxeaについて の決定的応答）
+ * Unit Tests -- menu-actions（相談 / ④定期便 / elxea について の決定的応答）
  *
  * 純粋ロジック（Notion / LINE push / Firestore に触れない）を検証する:
  *   (a) トリガー文言がリッチメニュー（setup-rich-menu.ts）の message text と一致
- *   (b) ③相談: 初手 quick reply が 2-3 個・text は tea-menu / menu トリガーと非衝突（AI へ素通り）
+ *   (b) 相談: 初手 quick reply が 2-3 個・text は tea-menu / menu トリガーと非衝突（AI へ素通り）
  *   (c) ④定期便: subscriber / generic の出し分けメッセージ（両方リンクを含む）
- *   (d) ⑤elxea: ブランド紹介（URL 実在 /ja）＋ 配信設定の受け皿
+ *   (d) elxea について: ブランド紹介（URL 実在 /ja）＋ 配信設定の受け皿
+ *
+ * 注意（2026-08-10）: 相談 と elxea について はリッチメニューの枠を持たない
+ *   「発話専用トリガー」である（枠は 6 = roji アンケート導線に差し替え済み・commit e98843e）。
+ *   固定応答自体は後方互換で存続するため、応答ビルダーのテストは維持する。
  *   (e) インターセプタ順序: onboarding / feedback の後（pending-state 保護）
  *
  * 使用方法: npx tsx tests/unit/menu-actions.test.ts
@@ -23,6 +27,7 @@ import {
 import { parseTeaAction } from "../../src/lib/tea-menu";
 import { MY_KARTE_TRIGGER } from "../../src/lib/my-karte";
 import { READING_TRIGGER } from "../../src/lib/journal";
+import { SURVEY_TRIGGER } from "../../src/lib/roji-survey-copy";
 
 let total = 0,
   passed = 0,
@@ -54,8 +59,9 @@ console.log("\n--- (a) トリガー文言はリッチメニューの message tex
 
 it("トリガー定数が setup-rich-menu.ts の各枠 message text と一致（6枠 Option A）", () => {
   const src = readFileSync(new URL("../../scripts/setup-rich-menu.ts", import.meta.url), "utf8");
-  // 6枠 Option A: ①お茶の淹れ方 / ②好み診断 / ③マイカルテ / ④定期便 / ⑤読みもの / ⑥elxeaについて
-  //   （③相談 は 2026-07 に意図的に廃止 = リッチメニューから削除済み）。
+  // 6枠 Option A: ①お茶の淹れ方 / ②好み診断 / ③マイカルテ / ④定期便 / ⑤読みもの / ⑥roji アンケート
+  //   （相談 は 2026-07 に、elxea について は 2026-08-09 commit e98843e に意図的に廃止
+  //     = いずれもリッチメニューから削除済み・発話トリガーとしてのみ存続）。
   // ①お茶の淹れ方 は tea-menu が処理（トリガー一致は tea-menu 側で担保）
   assert(src.includes(`text: "お茶の淹れ方を知りたい"`), "①tea text present");
   // ②好み診断 は AI 会話へ（本モジュール非対象）
@@ -66,13 +72,16 @@ it("トリガー定数が setup-rich-menu.ts の各枠 message text と一致（
   assert(src.includes(`text: "${SUBSCRIPTION_TRIGGER}"`), "④定期便 text matches");
   // ⑤読みもの（★新規 = journal.ts READING_TRIGGER と一致）
   assert(src.includes(`text: "${READING_TRIGGER}"`), "⑤読みもの text matches");
-  // ⑥elxeaについて
-  assert(src.includes(`text: "${ABOUT_TRIGGER}"`), "⑥elxea text matches");
-  // ③相談（CONSULTATION_TRIGGER）は 6枠 Option A で廃止 = リッチメニューに存在しないことを固定。
-  assert(!src.includes(`text: "${CONSULTATION_TRIGGER}"`), "③相談 は削除済み（メニューに無い）");
+  // ⑥roji アンケート導線（= roji-survey-copy.ts SURVEY_TRIGGER と一致 / commit e98843e で差し替え）
+  assert(src.includes(`text: "${SURVEY_TRIGGER}"`), "⑥roji アンケート text matches");
+  // 相談（CONSULTATION_TRIGGER）/ elxea について（ABOUT_TRIGGER）は枠を持たない。
+  //   本番リッチメニュー画像が SoT。ここを固定して「setup-rich-menu.ts を実行すると
+  //   旧導線に巻き戻る」回帰（Issue: richmenu6-trigger-gap）を再発させない。
+  assert(!src.includes(`text: "${CONSULTATION_TRIGGER}"`), "相談 は削除済み（メニューに無い）");
+  assert(!src.includes(`text: "${ABOUT_TRIGGER}"`), "elxea について は削除済み（メニューに無い）");
 });
 
-console.log("\n--- (b) ③相談: 初手 quick reply ---");
+console.log("\n--- (b) 相談（発話専用）: 初手 quick reply ---");
 
 it("相談の初手は 2-3 個の quick reply を提示", () => {
   const m = buildConsultationPrompt();
@@ -116,7 +125,7 @@ it("subscriber と generic は別文面", () => {
   );
 });
 
-console.log("\n--- (d) ⑤elxea について ---");
+console.log("\n--- (d) elxea について（発話専用） ---");
 
 it("ブランド紹介 + 実在 URL(/ja) + AI 開示 + 配信頻度（opt-out 約束は書かない）", () => {
   const a = buildAboutMessage();
