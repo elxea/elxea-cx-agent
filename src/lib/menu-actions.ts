@@ -32,7 +32,14 @@ import {
 export const CONSULTATION_TRIGGER = "相談したいことがあります";
 /** ④ 定期便 */
 export const SUBSCRIPTION_TRIGGER = "定期便について知りたい";
-/** ⑤ elxea について */
+/**
+ * elxea について（**発話専用トリガー**・リッチメニューの枠は持たない）。
+ *
+ * 2026-08-09 commit e98843e でリッチメニュー枠 6 は roji アンケート導線
+ * （roji-survey-copy.ts SURVEY_TRIGGER / roji = 層2 のキュレーション体験サービス）に
+ * 差し替えられ、本文言を送る枠は無くなった。ただし自由発話でこの文言が来たときの
+ * 固定応答は後方互換で存続させる（利用者が過去のメニュー履歴から再送するため）。
+ */
 export const ABOUT_TRIGGER = "elxeaについて教えて";
 
 // ---------------------------------------------------------------------------
@@ -150,7 +157,7 @@ export async function handleMenuActionFlow(
     return true;
   }
 
-  // ⑤ elxea について — ブランド紹介 1 通
+  // elxea について（発話専用・メニュー枠なし）— ブランド紹介 1 通
   if (t === ABOUT_TRIGGER) {
     await responder.text(buildAboutMessage());
     return true;
