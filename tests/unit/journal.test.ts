@@ -71,6 +71,14 @@ function notionPage(id: string, props: Record<string, unknown>): { id: string; p
 function sel(name: string) {
   return { type: "select", select: { name } };
 }
+/** Notion "status" 型（Content Hub の `Status` の実型）。 */
+function status(name: string) {
+  return { type: "status", status: { name } };
+}
+/** Notion "multi_select" 型（`content_persona` / `target_layer` の実型）。 */
+function multi(...names: string[]) {
+  return { type: "multi_select", multi_select: names.map((name) => ({ name })) };
+}
 function title(text: string) {
   return { type: "title", title: [{ plain_text: text }] };
 }
@@ -175,6 +183,72 @@ describe("mapArticlePage — Channel/Status ゲート + ダミー + 本文なし
   it("未知の content_persona 値は null に落とす（内部語彙の混入防止）", () => {
     const p = notionPage("pg", { Channel: sel("Roji"), Title: title("t"), Status: sel("Draft"), content_persona: sel("weird") });
     assertEqual(mapArticlePage(anyMap(p), { includeDrafts: true })!.persona, null, "unknown persona → null");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapArticlePage — 実スキーマの型（2026-08-11 QA 検出の回帰防止）
+//
+// Content Hub の実型を Notion API で実測した結果、select 前提で読んでいた 3 つが別型だった:
+//   content_persona = multi_select / Status = status / target_layer = multi_select
+// この形で読めることを固定する。select 形の既存フィクスチャは上の describe が引き続き通す
+// （= 既存の select 読みを壊していないことの担保）。
+// ---------------------------------------------------------------------------
+
+describe("mapArticlePage — 実スキーマの型（multi_select / status）を読む", () => {
+  it("content_persona が multi_select（値あり）→ persona を読む", () => {
+    const p = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"),
+      content_persona: multi("explorer"),
+    });
+    assertEqual(mapArticlePage(anyMap(p), { includeDrafts: false })!.persona, "explorer", "multi_select persona");
+  });
+
+  it("content_persona が multi_select（空配列）→ null（落ちない）", () => {
+    const p = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"),
+      content_persona: multi(),
+    });
+    assertEqual(mapArticlePage(anyMap(p), { includeDrafts: false })!.persona, null, "empty multi_select → null");
+  });
+
+  it("content_persona プロパティ自体が無い → null（落ちない）", () => {
+    const p = notionPage("pg", { Channel: sel("Roji"), Title: title("t"), Status: status("Published") });
+    assertEqual(mapArticlePage(anyMap(p), { includeDrafts: false })!.persona, null, "missing prop → null");
+  });
+
+  it("content_persona が multi_select で複数値 → 最初の有効値（決定的）", () => {
+    const p = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"),
+      content_persona: multi("sensory", "serenity"),
+    });
+    assertEqual(mapArticlePage(anyMap(p), { includeDrafts: false })!.persona, "sensory", "first valid wins");
+  });
+
+  it("content_persona の先頭が未知語でも、後続の有効値を拾う", () => {
+    const p = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"),
+      content_persona: multi("weird", "serenity"),
+    });
+    assertEqual(mapArticlePage(anyMap(p), { includeDrafts: false })!.persona, "serenity", "skip unknown");
+  });
+
+  it("Status が status 型 → 本番ゲートが正しく効く（Published は通り Draft は落ちる）", () => {
+    const pub = notionPage("p", { Channel: sel("Roji"), Title: title("公開"), Status: status("Published") });
+    const draft = notionPage("d", { Channel: sel("Roji"), Title: title("下書き"), Status: status("Draft") });
+    assert(mapArticlePage(anyMap(pub), { includeDrafts: false }) !== null, "status型 Published が本番で残る");
+    assertEqual(mapArticlePage(anyMap(draft), { includeDrafts: false }), null, "status型 Draft は本番で落ちる");
+  });
+
+  it("target_layer が multi_select → 先頭値を読む / 空なら null", () => {
+    const withLayer = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"), target_layer: multi("wellbeing"),
+    });
+    assertEqual(mapArticlePage(anyMap(withLayer), { includeDrafts: false })!.targetLayer, "wellbeing", "multi layer");
+    const empty = notionPage("pg", {
+      Channel: sel("Roji"), Title: title("t"), Status: status("Published"), target_layer: multi(),
+    });
+    assertEqual(mapArticlePage(anyMap(empty), { includeDrafts: false })!.targetLayer, null, "empty → null");
   });
 });
 

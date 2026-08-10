@@ -20,6 +20,15 @@
  *
  * v1 スコープ: persona 一次マッチのみ。興味カルテ（interest 軸）拡張は v1.1 フォローアップ（本ファイルは
  *   `interestTags` を受ける口だけ用意し、v1 の呼び出しでは常に空 = persona だけで成立）。
+ *
+ * ─ 2026-08-11 修正（QA 検出・実スキーマを Notion API で実測して確定）─
+ *   Content Hub のプロパティ型が select に揃っていなかったため、select 専用リーダ（`propSelect`）で
+ *   読んでいた 3 つが**常に空**になっていた。`propChoice`（select / status / multi_select 兼用）へ差し替え:
+ *     - `content_persona` = multi_select → persona が常に null ＝ 出し分けが一度も効かない
+ *     - `Status`          = status       → 本番（`includeDrafts=false`）で Published/Ready 判定が常に
+ *                                          不成立となり、**記事が 1 本も出ない**
+ *     - `target_layer`    = multi_select → 二次マッチ（v1.1）用の値が常に null
+ *   select が入っている場合は従来どおり select が勝つため、既存の select 読み（Channel）は不変。
  */
 
 import type { Env } from "../index";
@@ -83,6 +92,21 @@ function toPersona(raw: string): PersonaType | null {
 }
 
 /**
+ * 候補名の並びから最初の有効な persona を採る（決定的）。
+ *
+ * `content_persona` は Notion 上 **multi_select**（実測 2026-08-11）で、原則 1 値運用だが
+ * 複数入る余地がある。並び順は Notion が返す順をそのまま使い、**最初に 3 値へ当たったもの**を採る
+ * （先頭が未知語でも次を見る＝人の付け間違いで null に落ちない）。乱数・時刻を読まない。
+ */
+function firstPersona(names: string[]): PersonaType | null {
+  for (const n of names) {
+    const hit = toPersona(n);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
  * bot が記事から取り出すフィールド（**本文は持たない**）。
  * title/excerpt/url/thumbnail は提示、persona/targetLayer/tags/publishedAt はマッチング・並べ替え用。
  */
@@ -131,6 +155,8 @@ interface NotionProp {
   title?: NotionRichText[];
   rich_text?: NotionRichText[];
   select?: { name: string } | null;
+  /** Notion の "status" 型（Content Hub の `Status` はこちら。select ではない）。 */
+  status?: { name: string } | null;
   multi_select?: Array<{ name: string }>;
   url?: string | null;
   relation?: Array<{ id: string }>;
@@ -150,6 +176,24 @@ function propRich(p?: NotionProp): string {
 }
 function propSelect(p?: NotionProp): string {
   return p?.select?.name ?? "";
+}
+/** multi_select の値名（Notion が返す順を保つ・空文字は捨てる）。 */
+function propMultiSelect(p?: NotionProp): string[] {
+  return (p?.multi_select ?? []).map((o) => (o?.name ?? "").trim()).filter((s) => s.length > 0);
+}
+/**
+ * 「1 つの値として読みたい選択系プロパティ」の寛容リーダ（**既存の select 読みを壊さない**）。
+ *
+ * Content Hub の実スキーマは 1 つの型に揃っていない（2026-08-11 に Notion API で実測）:
+ *   - `Channel`         = select
+ *   - `Status`          = **status**（select ではない → 旧 `propSelect` は常に "" を返していた）
+ *   - `content_persona` = **multi_select**（同上）
+ *   - `target_layer`    = **multi_select**（同上）
+ * 判定順は select → status → multi_select の先頭。**select が入っていれば従来どおり select が勝つ**ので、
+ * 既に select で読めていた箇所（Channel）は挙動が変わらない。プロパティ自体が無ければ ""。
+ */
+function propChoice(p?: NotionProp): string {
+  return propSelect(p) || (p?.status?.name ?? "").trim() || propMultiSelect(p)[0] || "";
 }
 function propUrl(p?: NotionProp): string {
   return (p?.url ?? "").trim();
@@ -182,9 +226,9 @@ export function mapArticlePage(
 ): ArticleItem | null {
   const p = page.properties;
 
-  if (propSelect(p["Channel"]) !== ARTICLE_CHANNEL) return null;
+  if (propChoice(p["Channel"]) !== ARTICLE_CHANNEL) return null;
 
-  const status = propSelect(p["Status"]);
+  const status = propChoice(p["Status"]);
   if (!opts.includeDrafts && !PUBLISHED_STATUSES.has(status)) return null;
 
   const title = propTitle(p["Title"]);
@@ -204,8 +248,10 @@ export function mapArticlePage(
     url,
     excerpt: propRich(p["🌐 Roji: Meta Description"]),
     thumbnailUrl,
-    persona: toPersona(propSelect(p["content_persona"])),
-    targetLayer: propSelect(p["target_layer"]) || null,
+    // content_persona は multi_select（select ではない）。multi_select を先に見て、
+    // 万一 select へ戻された場合も拾えるよう select 値を末尾に足す（どちらの型でも読める）。
+    persona: firstPersona([...propMultiSelect(p["content_persona"]), propSelect(p["content_persona"])]),
+    targetLayer: propChoice(p["target_layer"]) || null,
     tags: propRelation(p["Tags"]),
     publishedAt: propDate(p["Published Date"]),
   };
