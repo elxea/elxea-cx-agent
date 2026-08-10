@@ -24,6 +24,7 @@
     "node_modules",
     "scripts/run-migration-*.ts",
     "scripts/migrate.ts",
-    "scripts/roji-safety-declarations.ts"
+    "scripts/roji-safety-declarations.ts",
+    "scripts/roji-monthly-run.ts"
   ]
 }
