@@ -16,8 +16,9 @@
  *   npx tsx tests/unit/line-token-rotation.test.ts
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -416,6 +417,161 @@ it("状態ファイルの雛形にトークンらしき項目が無い", () => {
       `雛形に ${banned} が含まれています: ${parsed}`,
     );
   }
+});
+
+// ===========================================================================
+console.log("\n--- 検証工程の送り方（URL エンコード漏れの再発防止） ---");
+
+// 背景: 発行されるトークンは base64 系で '+' を含む。x-www-form-urlencoded では
+// '+' は空白として解釈されるため、素の `--data` で送ると LINE 側には別の文字列が
+// 届き、正しいトークンでも verify が必ず HTTP 400 になっていた
+// (Issue: line-rot-verify-400 / ローテーションが構造的に完了できない)。
+const MAIN_SRC = readFileSync(MAIN_SCRIPT, "utf8");
+
+it("verify 工程は --data-urlencode で送る（素の --data に戻っていない）", () => {
+  assertEqual(
+    /--data-urlencode\s+"access_token@/.test(MAIN_SRC),
+    true,
+    "verify の送信が --data-urlencode ではありません",
+  );
+  assertEqual(
+    MAIN_SRC.includes("printf 'access_token=%s'"),
+    false,
+    "verify ボディを自前で 'access_token=' 連結しています（'+' が壊れる旧実装）",
+  );
+});
+
+it("verify のトークンは argv ではなくファイル経由（ps から見えない）", () => {
+  // `name@file` 形式であること = 値そのものがコマンドラインに載らない
+  assertEqual(/--data-urlencode\s+"access_token@\$TMPDIR_WORK\//.test(MAIN_SRC), true);
+});
+
+/**
+ * 実測による再発防止: ローカルの HTTP サーバへ 2 通りの送り方で POST し、
+ * 受信側が復号したトークンが元の値と一致するかを見る。
+ * LINE へは一切繋がず、秘密も使わない（'+' を含むダミー値のみ）。
+ */
+function decodedTokenViaCurl(curlArgs: (bodyFile: string) => string[], token: string): string {
+  const workDir = mkdtempSync(path.join(tmpdir(), "ltr-encode-test-"));
+  const bodyFile = path.join(workDir, "token");
+  const portFile = path.join(workDir, "port");
+  const serverFile = path.join(workDir, "server.mjs");
+
+  // 受信側: x-www-form-urlencoded として解釈し、access_token の値をそのまま返す。
+  writeFileSync(
+    serverFile,
+    `import http from "node:http";
+import { writeFileSync } from "node:fs";
+const server = http.createServer((req, res) => {
+  let raw = "";
+  req.on("data", (c) => { raw += c; });
+  req.on("end", () => {
+    const value = new URLSearchParams(raw).get("access_token") ?? "";
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end(value);
+  });
+});
+server.listen(0, "127.0.0.1", () => {
+  writeFileSync(process.argv[2], String(server.address().port));
+});
+`,
+  );
+
+  const child = spawn(process.execPath, [serverFile, portFile], { stdio: "ignore" });
+  try {
+    let port = "";
+    for (let i = 0; i < 100 && !port; i++) {
+      if (existsSync(portFile)) port = readFileSync(portFile, "utf8").trim();
+      if (!port) execFileSync("sleep", ["0.05"]);
+    }
+    if (!port) throw new Error("ローカルサーバが起動しませんでした");
+
+    writeFileSync(bodyFile, token, { mode: 0o600 });
+    return execFileSync(
+      "curl",
+      [
+        "-s",
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/x-www-form-urlencoded",
+        ...curlArgs(bodyFile),
+        `http://127.0.0.1:${port}/v2/oauth/verify`,
+      ],
+      { encoding: "utf8" },
+    );
+  } finally {
+    child.kill();
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+// LINE のトークンと同じ性質（'+' '/' '=' を含む）のダミー値。秘密ではない。
+const PLUS_TOKEN = "aa+bb/cc+dd==";
+
+it("旧実装の送り方だとトークンが壊れて届く（'+' が空白になる）", () => {
+  const received = decodedTokenViaCurl(
+    (bodyFile) => {
+      const withPrefix = `${bodyFile}.prefixed`;
+      writeFileSync(withPrefix, `access_token=${PLUS_TOKEN}`, { mode: 0o600 });
+      return ["--data", `@${withPrefix}`];
+    },
+    PLUS_TOKEN,
+  );
+  assertEqual(received === PLUS_TOKEN, false, `壊れずに届いてしまった: ${received}`);
+  assertEqual(received, "aa bb/cc dd==");
+});
+
+it("現行実装の送り方ならトークンがそのまま届く", () => {
+  const received = decodedTokenViaCurl(
+    (bodyFile) => ["--data-urlencode", `access_token@${bodyFile}`],
+    PLUS_TOKEN,
+  );
+  assertEqual(received, PLUS_TOKEN);
+});
+
+// ===========================================================================
+console.log("\n--- 更新先（Cloudflare だけでなく Vercel も）---");
+
+// prod のトークンは Cloudflare Worker と Web アプリ (Vercel) の 2 箇所で消費される。
+// 更新先が片方だけだと、もう片方が 30 日で無言に失効する。
+it("prod は Vercel の production を更新対象にする", () => {
+  assertEqual(/VERCEL_TARGET_ENV="production"/.test(MAIN_SRC), true);
+  assertEqual(/vercel env add "\$TARGET_SECRET" "\$VERCEL_TARGET_ENV"/.test(MAIN_SRC), true);
+});
+
+it("staging は Vercel を更新しない（検証用トークンを本番 Web アプリに入れない）", () => {
+  assertEqual(/VERCEL_TARGET_ENV=""/.test(MAIN_SRC), true);
+});
+
+it("Vercel へ渡す値は標準入力（argv にトークンを載せない）", () => {
+  assertEqual(
+    /printf '%s' "\$NEW_TOKEN"\s*\\\n\s*\| vercel env add/.test(MAIN_SRC),
+    true,
+    "vercel へ標準入力で渡していません",
+  );
+});
+
+it("Vercel を更新できない環境ならトークン発行前に落ちる（片方だけ更新しない）", () => {
+  // 前提チェック節（＝発行 API を実際に叩く行より前）に vercel の可用性チェックがあること。
+  // 冒頭のコメントにも同じ URL が出るので、curl の実行行そのものを目印にする。
+  const preflightIndex = MAIN_SRC.indexOf("command -v vercel");
+  const issueIndex = MAIN_SRC.indexOf('-X POST "$LINE_API_BASE/v2/oauth/accessToken"');
+  assertEqual(preflightIndex > 0, true, "vercel の前提チェックがありません");
+  assertEqual(
+    preflightIndex < issueIndex,
+    true,
+    "vercel の前提チェックがトークン発行より後ろにあります",
+  );
+});
+
+it("--skip-vercel / 環境変数で意図的にだけ飛ばせる", () => {
+  assertEqual(MAIN_SRC.includes("--skip-vercel"), true);
+  assertEqual(MAIN_SRC.includes("LINE_TOKEN_ROTATION_SKIP_VERCEL"), true);
+});
+
+it("Vercel は再デプロイまで新しい値を読まないことを警告する", () => {
+  assertEqual(/再デプロイするまで新しい値を読みません/.test(MAIN_SRC), true);
 });
 
 // ===========================================================================

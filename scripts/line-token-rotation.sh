@@ -28,13 +28,22 @@
 #         初回実行の前に LINE Developers コンソールのチャネル基本設定から転記すること
 #         (チャネル ID は秘密情報ではないが、シークレットと同じ場所に置いて取り違えを防ぐ)。
 #   4. jq / curl が使えること。
+#   5. (prod のみ) vercel CLI が使えて、Web アプリのディレクトリが link 済みであること。
+#      prod トークンは Cloudflare Worker だけでなく **Web アプリ (Vercel) の運営向け
+#      監視通知** も消費するため、更新先が 2 つある。既定の場所は
+#      ../elxea-web-app で、LINE_TOKEN_VERCEL_DIR で変更できる。
+#      link されていない / CLI が無い場合は **トークンを発行する前に** 落ちる
+#      (片方だけ更新して残りを無言に失効させないため)。意図的に飛ばすときだけ
+#      --skip-vercel か LINE_TOKEN_ROTATION_SKIP_VERCEL=1。
 #
 # 【環境の取り違え防止 (このリポジトリで最も事故が重い箇所)】
 #   本番と検証は Worker も LINE 公式アカウントも別物である。よって --env は **必須** で
 #   既定値を持たない。env ごとに参照する変数・投入先 secret 名・状態ファイルがすべて分かれる。
 #
 #     --env prod      LINE_CHANNEL_ID      LINE_CHANNEL_SECRET      -> secret LINE_CHANNEL_ACCESS_TOKEN      (wrangler env なし)
+#                     + Vercel (Web アプリ) の production env LINE_CHANNEL_ACCESS_TOKEN
 #     --env staging   LINE_CHANNEL_ID_TEST LINE_CHANNEL_SECRET_TEST -> secret LINE_CHANNEL_ACCESS_TOKEN_TEST (wrangler --env staging)
+#                     Vercel は対象外 (検証用トークンで本番 Web アプリを動かさない)
 #
 #   さらに prod は本番 secret の書き換えなので Tier 2 (Setaka 承認) 相当とし、
 #   --yes-prod か LINE_TOKEN_ROTATION_PROD_APPROVED=1 が無い限り実行しない。
@@ -45,8 +54,9 @@
 #   - トークン・シークレットを stdout / stderr / ログファイルに一切書かない。
 #     表示するのは常に伏字 (`***`) と、値ではなく「桁数」「HTTP status」だけ。
 #   - シークレットをコマンドライン引数に置かない (ps で見えるため)。
-#     curl へはリクエストボディを 600 の一時ファイルにして `--data @file` で渡す。
-#     wrangler へは標準入力で渡す。awk へは環境変数で渡す。
+#     curl へはリクエストボディを 600 の一時ファイルにして `--data @file` /
+#     `--data-urlencode name@file` で渡す (後者は '+' を含む値が壊れないため必須)。
+#     wrangler / vercel へは標準入力で渡す。awk へは環境変数で渡す。
 #   - set -x (xtrace) を明示的に無効化する。有効なまま呼ばれるとボディが丸見えになる。
 #   - 一時ファイルは umask 077 + trap で必ず消す。
 #   - 状態ファイルにはトークンを一切書かない (「いつ発行したか」だけ)。
@@ -70,7 +80,7 @@
 #   1 = 使い方の誤り (env 未指定・prod 承認なし 等)
 #   2 = 判定不能 (状態ファイル欠落・破損・時計のずれ)
 #   3 = 前提不足 (依存コマンド / .dev.vars の項目 / wrangler 未認証)
-#   4 = 更新の失敗 (発行 API / 検証 / secret 投入 のいずれかが失敗)
+#   4 = 更新の失敗 (発行 API / 検証 / secret 投入 / Vercel env 投入 のいずれかが失敗)
 #   いずれも黙って 0 で終わらない。ジョブ基盤側は非 0 を必ずアラートにすること。
 #
 # 【登録先ジョブ基盤の案 (本スクリプトでは登録しない・Setaka 承認後に別途)】
@@ -104,6 +114,7 @@ DO_FORCE=0
 DO_PROBE=0
 DRY_RUN=0
 YES_PROD="${LINE_TOKEN_ROTATION_PROD_APPROVED:-0}"
+SKIP_VERCEL="${LINE_TOKEN_ROTATION_SKIP_VERCEL:-0}"
 
 usage() {
   sed -n '2,/^####/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -118,6 +129,7 @@ while [ $# -gt 0 ]; do
     --probe)     DO_PROBE=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     --yes-prod)  YES_PROD=1; shift ;;
+    --skip-vercel) SKIP_VERCEL=1; shift ;;
     -h|--help)   usage 0 ;;
     *)           die "不明な引数: $1 (--help で使い方)" 1 ;;
   esac
@@ -128,11 +140,16 @@ case "$ENV_NAME" in
     ID_VAR="LINE_CHANNEL_ID";      SECRET_VAR="LINE_CHANNEL_SECRET"
     TARGET_SECRET="LINE_CHANNEL_ACCESS_TOKEN"
     WRANGLER_ENV_ARGS=()
+    # 同じトークンを使う 2 つ目の消費者 = Web アプリ (Vercel) の production。
+    VERCEL_TARGET_ENV="production"
     ;;
   staging)
     ID_VAR="LINE_CHANNEL_ID_TEST"; SECRET_VAR="LINE_CHANNEL_SECRET_TEST"
     TARGET_SECRET="LINE_CHANNEL_ACCESS_TOKEN_TEST"
     WRANGLER_ENV_ARGS=(--env staging)
+    # staging のテスト OA トークンを Web アプリへ入れる運用は無い (入れると検証用
+    # トークンで本番 Web アプリが動く取り違えになる)。よって対象外。
+    VERCEL_TARGET_ENV=""
     ;;
   "")
     die "--env は必須です (prod | staging)。既定値は意図的に持たせていません。" 1
@@ -156,6 +173,21 @@ for cmd in curl jq; do
 done
 [ -f "$REPO_ROOT/wrangler.toml" ] || die "リポジトリ直下で実行してください (wrangler.toml が見つかりません)" 3
 [ -f "$DEV_VARS" ]                || die ".dev.vars がありません: $DEV_VARS" 3
+
+# 同じトークンを消費するのは Cloudflare Worker だけではない。Web アプリ (Vercel) の
+# 運営向け監視通知も同じ prod トークンを使う。更新先から漏れると Cloudflare 側だけ
+# 新しくなり、Vercel 側は 30 日で無言に失効する (2026-08 の実態がこれだった)。
+# よって「Vercel を更新できる状態か」は **トークンを発行する前に** 確かめて fail-loud
+# する。ここで落ちれば LINE 側にトークンを 1 本も発行していない。
+UPDATE_VERCEL=0
+VERCEL_DIR="${LINE_TOKEN_VERCEL_DIR:-$REPO_ROOT/../elxea-web-app}"
+if [ -n "$VERCEL_TARGET_ENV" ] && [ "$SKIP_VERCEL" != "1" ]; then
+  command -v vercel >/dev/null 2>&1 \
+    || die "vercel CLI がありません。Web アプリ側の env を更新できないため中断します (意図的に飛ばすなら --skip-vercel)" 3
+  [ -f "$VERCEL_DIR/.vercel/project.json" ] \
+    || die "Vercel プロジェクトが link されていません: $VERCEL_DIR/.vercel/project.json (場所は LINE_TOKEN_VERCEL_DIR で指定 / 意図的に飛ばすなら --skip-vercel)" 3
+  UPDATE_VERCEL=1
+fi
 
 # --- .dev.vars から 1 項目だけ取り出す (source しない = 任意コード実行を避ける) ------
 read_dev_var() {
@@ -276,12 +308,19 @@ log "発行 OK (長さ ${#NEW_TOKEN} 文字・有効期間 $((EXPIRES_IN / 86400
 
 # --- 2. 発行されたトークンが本当に想定チャネルのものか検証 --------------------------
 # ここを飛ばすと、チャネルを取り違えたトークンを本番へ投入して全 API が落ちる。
-printf 'access_token=%s' "$NEW_TOKEN" > "$TMPDIR_WORK/verify_body"
+#
+# ボディは **必ず URL エンコードして送る** (`--data-urlencode`)。発行されるトークンは
+# base64 系で '+' '/' '=' を含み、application/x-www-form-urlencoded では '+' が空白と
+# して解釈される。素の `--data` で送ると LINE 側には '+' が ' ' に化けた別の文字列が
+# 届くため、正しいトークンでも検証が必ず HTTP 400 になり、**ローテーションが構造的に
+# 一度も完了できない** (Issue: line-rot-verify-400)。
+# `name@file` 形式なので値は argv に載らない (ps から見えない) = 既存の安全規律を保つ。
+printf '%s' "$NEW_TOKEN" > "$TMPDIR_WORK/verify_token"
 VERIFY_STATUS="$(curl -s -o "$TMPDIR_WORK/verify_res.json" -w '%{http_code}' \
   -X POST "$LINE_API_BASE/v2/oauth/verify" \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  --data @"$TMPDIR_WORK/verify_body" || echo "000")"
-rm -f "$TMPDIR_WORK/verify_body"
+  --data-urlencode "access_token@$TMPDIR_WORK/verify_token" || echo "000")"
+rm -f "$TMPDIR_WORK/verify_token"
 [ "$VERIFY_STATUS" = "200" ] || die "発行直後の検証に失敗しました (HTTP $VERIFY_STATUS)。secret は書き換えていません。" 4
 
 VERIFIED_CLIENT_ID="$(jq -r '.client_id // empty' "$TMPDIR_WORK/verify_res.json")"
@@ -302,6 +341,22 @@ if ! printf '%s' "$NEW_TOKEN" \
   die "secret 投入に失敗しました ($TARGET_SECRET / env=$ENV_NAME)。状態ファイルは更新していません。" 4
 fi
 log "secret 投入 OK ($TARGET_SECRET / env=$ENV_NAME)"
+
+# --- 3.5 Web アプリ (Vercel) の env も同じ値へ揃える --------------------------------
+# 値は標準入力で渡す (argv に載せない)。`--force` は既存値の上書き指定で、
+# rm → add の 2 手順の代わりに使う (rm と add の間に「本番に値が無い」瞬間を作らない)。
+if [ "$UPDATE_VERCEL" -eq 1 ]; then
+  if ! printf '%s' "$NEW_TOKEN" \
+    | vercel env add "$TARGET_SECRET" "$VERCEL_TARGET_ENV" \
+        --cwd "$VERCEL_DIR" --force --yes \
+        >/dev/null 2>"$TMPDIR_WORK/vercel_err"; then
+    log "[FAIL] vercel の出力: $(tr -d '\r' < "$TMPDIR_WORK/vercel_err" | tail -n 5)"
+    die "Vercel env の更新に失敗しました ($TARGET_SECRET / $VERCEL_TARGET_ENV)。Cloudflare の secret は更新済みですが状態ファイルは更新していないので、次回実行で再試行されます。" 4
+  fi
+  log "Vercel env 更新 OK ($TARGET_SECRET / $VERCEL_TARGET_ENV / dir=$VERCEL_DIR)"
+  # Vercel の env は「次のデプロイ」から有効。稼働中のデプロイは古い値を掴み続ける。
+  log "[WARN] Vercel は再デプロイするまで新しい値を読みません。本番デプロイは Tier 2 (Setaka 承認) なので、承認後に再デプロイしてください。"
+fi
 
 # --- 4. .dev.vars を同じ値に揃える (ローカル開発が古いトークンで動かないように) --------
 # awk へは環境変数で渡す。argv に置くと ps から見える。
@@ -353,9 +408,13 @@ log "状態ファイル更新 OK (issued_at=$TODAY expires_at=$EXPIRES_AT)"
 #       旧トークンを使い続ける。ここで revoke すると、その間の返信・配信が 401 で落ちる。
 #   (b) LINE は 1 チャネル 30 本まで同時に有効で、31 本目の発行で最古が自動失効する。
 #       月 1 回の更新なら 2 年半ぶん溜めても上限に当たらず、放置の実害がない。
-# 明示的に失効させたい場合 (漏洩時など) は、旧トークンを手元に用意して次を実行する:
+# 明示的に失効させたい場合 (漏洩時など) は、旧トークンを 600 のファイルに置いて次を実行する。
+# ここも verify と同じ理由で **--data-urlencode が必須** (素の --data だと '+' を含む
+# トークンが空白に化けて別の文字列になり、失効させたつもりで失効していない):
+#   umask 077; printf '%s' "$OLD" > /tmp/old_token
 #   curl -s -X POST https://api.line.me/v2/oauth/revoke \
-#     -H 'Content-Type: application/x-www-form-urlencoded' --data @<(printf 'access_token=%s' "$OLD")
+#     -H 'Content-Type: application/x-www-form-urlencoded' \
+#     --data-urlencode "access_token@/tmp/old_token"; rm -f /tmp/old_token
 log "旧トークンは失効させていません (切り替え中の 401 を避けるため。詳細はスクリプト末尾のコメント)"
 
 log "[OK] 更新完了 (env=$ENV_NAME reason=$REASON 次回更新目安=${LTR_ROTATE_AFTER_DAYS} 日後)"
