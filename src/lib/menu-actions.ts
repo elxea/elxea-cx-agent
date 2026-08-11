@@ -23,6 +23,7 @@ import {
   emitLinkageButton,
   isMarcheSourceUser,
 } from "./subscriber-linkage";
+import { isSalesSurfaceEnabled } from "./sales-surface";
 
 // ---------------------------------------------------------------------------
 // トリガー（リッチメニュー message text と完全一致）
@@ -132,6 +133,49 @@ export function buildSubscriptionMessage(kind: "subscriber" | "generic"): string
   );
 }
 
+/**
+ * ④ 定期便（売り込み面 OFF・既定時）の中立応答。
+ *
+ * roji「物販の匂いを出さない」に従い、**未利用の方への定期便の常設案内**（便益の訴求・
+ * 連携ボタンのファネル）は出さない。お客様が自分から尋ねたときの受け皿として、
+ * 事実の案内先（EC サイト）だけを 1 通返す。便益・評価・煽りの言葉は置かない。
+ * 機能定義 v1.5 3-5・Phase 0 タスク4。
+ */
+/** ④ 定期便で返す応答の種類。 */
+export type SubscriptionResponseKind =
+  /** 利用中の方へのお手続き案内（購入後サポート・常時有効）。 */
+  | "subscriber"
+  /** 中立の案内先 1 通（売り込み面 OFF・既定）。 */
+  | "inquiry"
+  /** 従来の紹介 1 通のみ（売り込み面 ON・連携済み非定期便）。 */
+  | "generic"
+  /** 従来の紹介 + 連携ボタンのファネル（売り込み面 ON・未連携）。 */
+  | "generic_with_linkage";
+
+/**
+ * ④ 定期便の応答種別を決める（純粋・I/O なし）。
+ *
+ * 売り込み面 OFF（既定）では、利用中の方以外に**定期便の常設案内を出さない**。
+ * 便益の訴求・連携ボタンのファネルは売り込み面 ON のときだけ復活する。
+ */
+export function decideSubscriptionResponse(opts: {
+  salesEnabled: boolean;
+  linked: boolean;
+  isSubscriber: boolean;
+}): SubscriptionResponseKind {
+  if (opts.isSubscriber) return "subscriber";
+  if (!opts.salesEnabled) return "inquiry";
+  return opts.linked ? "generic" : "generic_with_linkage";
+}
+
+export function buildSubscriptionInquiryReply(): string {
+  return (
+    "定期便の内容とお申し込みは、elxea のサイトでご覧いただけます。\n" +
+    `${SUBSCRIPTION_URL}\n\n` +
+    "お茶のことでしたら、このままメッセージでお尋ねくださいね。"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // オーケストレーション（インターセプタ本体）
 // ---------------------------------------------------------------------------
@@ -169,9 +213,19 @@ export async function handleMenuActionFlow(
   //   - 未連携                → generic 紹介 + 便益 1 行 + 連携ボタン（LIFF 設定時）/ generic のみ（未設定・fail-safe）
   if (t === SUBSCRIPTION_TRIGGER) {
     const resolution = await resolveLinkedSubscriber(lineUserId, env);
-    if (resolution.isSubscriber) {
+    const kind = decideSubscriptionResponse({
+      salesEnabled: isSalesSurfaceEnabled(env),
+      linked: resolution.linked,
+      isSubscriber: resolution.isSubscriber,
+    });
+    if (kind === "subscriber") {
+      // 利用中の方への手続き案内は「購入後のサポート」であり売り込みではないため、フラグに関わらず維持する。
       await responder.text(buildSubscriptionMessage("subscriber"));
-    } else if (resolution.linked) {
+    } else if (kind === "inquiry") {
+      // 売り込み面 OFF（既定）: 未利用の方への定期便の常設案内（便益 + 連携ボタンのファネル）を出さない。
+      //   受け皿は EC サイト側に寄せ、ここでは中立な案内先 1 通で着地させる。
+      await responder.text(buildSubscriptionInquiryReply());
+    } else if (kind === "generic") {
       // 連携済み非定期便: 従来どおり generic 紹介のみ（連携済みなので連携導線は不要）。
       await responder.text(buildSubscriptionMessage("generic"));
     } else {

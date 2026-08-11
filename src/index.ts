@@ -128,6 +128,13 @@ export type Env = {
    * DELIVERY/DORMANT/MARCHE_SEND_ENABLED とは独立（アンケートは返信のみで送信系 API を呼ばない）。
    */
   ROJI_SURVEY_ENABLED?: string;
+  /**
+   * 売り込み面（商品カード・カートリンク・定期便案内の常設枠）の機能ゲート。
+   * "true" のときだけ露出する。既定 未設定=false（fail-closed = 外れている状態）。
+   * roji「物販の匂いを出さない」への適合。機能定義 v1.5 3-2/3-5・Phase 0 タスク4。
+   * 唯一の参照点は sales-surface.ts の isSalesSurfaceEnabled。
+   */
+  SALES_SURFACE_ENABLED?: string;
   // ── R2（配信画像ホスティング）──
   // Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する。put は承認 pin 時のみ。
   /** Cloudflare アカウント ID（R2 put 用）。承認 pin 時のみ必須。 */

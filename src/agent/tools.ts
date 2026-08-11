@@ -1,4 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { isSalesSurfaceEnabled, type SalesSurfaceEnv } from "../lib/sales-surface";
 
 /**
  * エージェントが使用できるツール定義。
@@ -6,6 +7,9 @@ import type Anthropic from "@anthropic-ai/sdk";
  * - escalate_to_human: オペレーターへのエスカレーション
  * - lookup_my_orders: 顧客の注文履歴照会（LINE↔Shopify紐付け）
  * - get_order_detail: 注文番号による注文詳細照会
+ *
+ * 売り込み面（recommend_product / create_cart_link）は既定で露出しない。
+ * 露出可否は agentTools(env) が sales-surface.ts のフラグで決める。
  */
 
 /** エスカレーションツール（MS2 2.4） */
@@ -170,18 +174,41 @@ const SET_BROADCAST_OPTOUT_TOOL: Anthropic.Tool = {
   },
 };
 
-/** 全ツールをエクスポート */
+/**
+ * 常時露出するツール（売り込み面に属さないもの）。
+ *
+ * RECOMMEND_PRODUCT_TOOL / CREATE_CART_LINK_TOOL はここに含めない。
+ *   roji「物販の匂いを出さない」に反するため、既定では AI に露出させない
+ *   （機能定義 v1.5 3-2/3-5・Phase 0 タスク4）。定義・実体は削除せず SALES_TOOLS に隔離し、
+ *   SALES_SURFACE_ENABLED="true" のときだけ agentTools() が合流させる。
+ */
 export const AGENT_TOOLS: Anthropic.Tool[] = [
   ESCALATION_TOOL,
   LOOKUP_ORDERS_TOOL,
   ORDER_DETAIL_TOOL,
-  RECOMMEND_PRODUCT_TOOL,
-  CREATE_CART_LINK_TOOL,
   // SET_BROADCAST_OPTOUT_TOOL: opt-out 機能は当面廃止（配信停止は LINE 標準ブロックに委譲・
   //   2026-07-13 オーナー方針）。AI が「配信を止めた」と偽の約束をしないよう、AI へのツール露出を停止。
   //   定義（SET_BROADCAST_OPTOUT_TOOL）・実体（broadcast-optout.ts）・core.ts ハンドラ・migration 020 は
   //   将来の再導入用に温存（眠らせるのみ・削除しない）。
 ];
+
+/**
+ * 売り込み面のツール（既定では露出しない・温存）。
+ * 有効化は SALES_SURFACE_ENABLED="true" のときだけ（sales-surface.ts が唯一の判定点）。
+ */
+export const SALES_TOOLS: Anthropic.Tool[] = [
+  RECOMMEND_PRODUCT_TOOL,
+  CREATE_CART_LINK_TOOL,
+];
+
+/**
+ * この env で AI に露出させるツール一覧。
+ * 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は**そもそも渡さない**
+ * （AI が呼びようがない状態にする＝プロンプト依存の抑止に頼らない）。
+ */
+export function agentTools(env: SalesSurfaceEnv | undefined | null): Anthropic.Tool[] {
+  return isSalesSurfaceEnabled(env) ? [...AGENT_TOOLS, ...SALES_TOOLS] : AGENT_TOOLS;
+}
 
 /** 後方互換のため旧名もエクスポート */
 export const ESCALATION_TOOLS = AGENT_TOOLS;

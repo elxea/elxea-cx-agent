@@ -31,8 +31,13 @@ import {
   type PersonalizationFacts,
 } from "../lib/personalization-context";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
-import { SYSTEM_PROMPT, buildPersonaPromptFragment } from "./system-prompt";
-import { AGENT_TOOLS } from "./tools";
+import { systemPrompt, buildPersonaPromptFragment } from "./system-prompt";
+import { agentTools } from "./tools";
+import {
+  isSalesSurfaceEnabled,
+  isSalesTool,
+  SALES_TOOL_DISABLED_RESULT,
+} from "../lib/sales-surface";
 import { withTimeout } from "../lib/utils";
 import { recordEscalation } from "../lib/alerts";
 import { applyBrandGuard } from "../lib/brand-guard";
@@ -406,7 +411,7 @@ export async function runAgent(
           // キャッシュ断片化を避けて第2ブロック (可変) 側へ移動する。
           {
             type: "text" as const,
-            text: SYSTEM_PROMPT,
+            text: systemPrompt(env),
             cache_control: { type: "ephemeral" as const },
           },
           {
@@ -414,11 +419,15 @@ export async function runAgent(
             text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext,
           },
         ],
-        tools: AGENT_TOOLS.map((tool, i) =>
-          i === AGENT_TOOLS.length - 1
-            ? { ...tool, cache_control: { type: "ephemeral" as const } }
-            : tool,
-        ),
+        // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
+        tools: (() => {
+          const tools = agentTools(env);
+          return tools.map((tool, i) =>
+            i === tools.length - 1
+              ? { ...tool, cache_control: { type: "ephemeral" as const } }
+              : tool,
+          );
+        })(),
         messages,
       }),
       TIMEOUT_LLM_CALL_MS,
@@ -491,7 +500,8 @@ export async function runAgent(
       }
 
       // 商品カード追跡（Flex Message + チャネル非依存 productCards）
-      if (toolUse.name === "recommend_product") {
+      // 売り込み面が無効（既定）ならカードは組み立てない（三重ガード: 露出停止・実行拒否・描画停止）。
+      if (toolUse.name === "recommend_product" && isSalesSurfaceEnabled(env)) {
         const input = toolUse.input as {
           products: Array<{
             name: string;
@@ -531,8 +541,12 @@ export async function runAgent(
         }
       }
 
-      // カートリンク追跡
-      if (toolUse.name === "create_cart_link" && execResult.cartLink?.checkoutUrl) {
+      // カートリンク追跡（売り込み面が無効なら executeTool が実行を拒否するため cartLink は付かない）
+      if (
+        toolUse.name === "create_cart_link" &&
+        isSalesSurfaceEnabled(env) &&
+        execResult.cartLink?.checkoutUrl
+      ) {
         cartLink = { checkoutUrl: execResult.cartLink.checkoutUrl };
 
         // LINE 用: カート Flex Message（購入ボタン付き）
@@ -795,12 +809,16 @@ export async function runAgentStreaming(
     system: [
       // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
       // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
-      { type: "text" as const, text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" as const } },
+      { type: "text" as const, text: systemPrompt(env), cache_control: { type: "ephemeral" as const } },
       { type: "text" as const, text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext },
     ],
-    tools: AGENT_TOOLS.map((tool, i) =>
-      i === AGENT_TOOLS.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
-    ),
+    // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
+    tools: (() => {
+      const tools = agentTools(env);
+      return tools.map((tool, i) =>
+        i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
+      );
+    })(),
   };
 
   /** ツール結果の共通後処理 */
@@ -809,7 +827,8 @@ export async function runAgentStreaming(
       const od = execResult.orderDetail.data;
       flexMessages.push({ altText: `注文 ${od.orderName} の詳細`, contents: orderCard(od) });
     }
-    if (toolUse.name === "recommend_product") {
+    // 売り込み面が無効（既定）ならカードは組み立てない（三重ガード: 露出停止・実行拒否・描画停止）。
+    if (toolUse.name === "recommend_product" && isSalesSurfaceEnabled(env)) {
       const input = toolUse.input as { products: Array<{ name: string; description: string; price: string; product_url: string }> };
       const products = input.products.map((p) => ({ name: p.name, description: p.description, price: p.price, productUrl: p.product_url }));
       for (const p of products) productCards.push(p);
@@ -817,7 +836,11 @@ export async function runAgentStreaming(
       else if (products.length > 1) flexMessages.push({ altText: `${products.length}件の商品のご案内`, contents: productCarousel(products) });
       callbacks.onProductCards(products.map((p) => ({ name: p.name, price: p.price, url: p.productUrl, image: null, description: p.description })));
     }
-    if (toolUse.name === "create_cart_link" && execResult.cartLink?.checkoutUrl) {
+    if (
+      toolUse.name === "create_cart_link" &&
+      isSalesSurfaceEnabled(env) &&
+      execResult.cartLink?.checkoutUrl
+    ) {
       cartLink = { checkoutUrl: execResult.cartLink.checkoutUrl };
       callbacks.onCartLink(execResult.cartLink.checkoutUrl);
       flexMessages.push({
@@ -1160,6 +1183,13 @@ async function executeTool(
   env: Env,
 ): Promise<ToolExecResult> {
   try {
+    // fail-closed: 売り込み面が無効なら、万一 AI が過去履歴等から売り込みツールを呼んでも実行しない
+    //   （露出停止＝呼べない、に加えた二重ガード。Shopify カート生成 API にも触れない）。
+    if (isSalesTool(toolUse.name) && !isSalesSurfaceEnabled(env)) {
+      console.warn(`[sales-surface] blocked disabled tool call: ${toolUse.name}`);
+      return { text: SALES_TOOL_DISABLED_RESULT };
+    }
+
     switch (toolUse.name) {
       case "escalate_to_human":
         return { text: "オペレーターに通知しました。" };

@@ -17,6 +17,10 @@
  *     ② "好みに合うお茶を診断してほしいです" → src/lib/preference-diagnosis.ts DIAGNOSIS_TRIGGER
  *     ③ "マイカルテ"                       → src/routes/line.ts マイカルテ完全一致（customer-karte・read-only）
  *     ④ "定期便について知りたい"            → src/lib/menu-actions.ts SUBSCRIPTION_TRIGGER
+ *        （2026-08-11: 売り込み面 OFF が既定になり、④ をタップしても定期便の案内（便益 + 連携
+ *         ボタンのファネル）は出ず、中立の案内先 1 通で着地する。**枠そのものを画像ごと外す**のは
+ *         リッチメニューの再登録＝本番操作のため未実施。roji 公開に向けて枠を差し替える場合は
+ *         新しい画像と本スクリプトの areas を同時に更新すること。機能定義 v1.5 3-5 / Phase 0 タスク4）
  *     ⑤ "読みもの"                         → src/lib/journal.ts READING_TRIGGER
  *     ⑥ "rojiをつくっています"              → src/lib/roji-survey-copy.ts SURVEY_TRIGGER
  *        （2026-08-09 変更: 旧 ⑥「elxeaについて教えて」→ ABOUT_TRIGGER から差し替え。
