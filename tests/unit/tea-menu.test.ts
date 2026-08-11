@@ -109,11 +109,12 @@ it("PAGE_SIZE は 11（前へ/次へ 2枠で上限13に収まる）", () => {
   assertEqual(TEA_LIST_PAGE_SIZE, 11, "page size");
 });
 
-it("カード: 温度/味・香り/別のお茶（楽しみ方なし=温度+味・香り+別のお茶）", () => {
+it("カード: 淹れ方の目安/味・香り/別のお茶（楽しみ方なし=淹れ方+味・香り+別のお茶）", () => {
   const t = FIXTURE.find((x) => x.number === "10101")!;
   const m = buildTeaCard(t);
   const labels = m.quickReplies.map((q) => q.action.label);
-  assert(labels.some((l) => l.includes("温度")), "has 温度");
+  // 語り口（Phase 0 タスク5）: ラベルは「温度・抽出時間」から「淹れ方の目安」へ。
+  assert(labels.some((l) => l.includes("淹れ方の目安")), "has 淹れ方の目安");
   assert(labels.some((l) => l.includes("味・香り")), "has 味・香り");
   assert(!labels.some((l) => l.includes("楽しみ方")), "no 楽しみ方 (0件)");
   assert(labels.some((l) => l.includes("別のお茶")), "has 別のお茶");
@@ -122,13 +123,27 @@ it("カード: 温度/味・香り/別のお茶（楽しみ方なし=温度+味�
   assertEqual(back.action.text, "お茶を選ぶ｜1", "back to list page1");
 });
 
-it("温度回答: How to Brew 本文を整形して直返し（創作なし）", () => {
+it("淹れ方回答: How to Brew 本文を整形して直返し（創作なし）", () => {
   const t = FIXTURE.find((x) => x.number === "10101")!;
   const m = buildBrewAnswer(t);
   assert(m.text.includes("80℃ / 120ml / 60sec"), "brew text verbatim");
   assert(m.text.includes("10101｜"), "shows number (番号｜名前)");
-  // 温度回答の後は温度を除いた選択肢を再提示
-  assert(!m.quickReplies.some((q) => q.action.label.includes("温度")), "excludes 温度 in followup");
+  // 淹れ方回答の後は自分自身を除いた選択肢を再提示
+  assert(!m.quickReplies.some((q) => q.action.label.includes("淹れ方")), "excludes 淹れ方 in followup");
+});
+
+it("淹れ方回答: 数値は変えず、目安として置く（正解の提示にしない）", () => {
+  const t = FIXTURE.find((x) => x.number === "10101")!;
+  const m = buildBrewAnswer(t);
+  // データ不変: How to Brew 本文はそのまま
+  assert(m.text.includes("80℃ / 120ml / 60sec"), "数値は不変");
+  // 語り口: 目安として置き、好みで動かせることを添える
+  assert(m.text.includes("淹れ方の目安です"), "目安として置く");
+  assert(m.text.includes("お好みで"), "好みで調整できると添える");
+  // break-proof: 断定・推薦の語を出さない（旧「おすすめの淹れ方はこちらです」なら失敗）
+  for (const ng of ["おすすめの淹れ方", "正しい淹れ方", "正解", "すべき"]) {
+    assert(!m.text.includes(ng), `禁止表現なし: ${ng}`);
+  }
 });
 
 console.log("\n--- (b) 番号直指定 ---");
@@ -364,17 +379,17 @@ it("温度回答: 次の1手は 味・香り + お茶の一覧 の2個だけ（�
   assertEqual(m.quickReplies.length, 2, "1手=2個");
   assert(labels.some((l) => l.includes("味・香り")), "sibling=味・香り");
   assert(labels.some((l) => l.includes("お茶の一覧")), "has お茶の一覧");
-  assert(!labels.some((l) => l.includes("温度")), "no 自分自身（温度）");
+  assert(!labels.some((l) => l.includes("淹れ方")), "no 自分自身（淹れ方）");
   assert(!labels.some((l) => l.includes("感想")), "no 感想 in terminal");
   const back = m.quickReplies.find((q) => q.action.label.includes("お茶の一覧"))!;
   assertEqual(back.action.text, "お茶を選ぶ｜1", "一覧へ");
 });
 
-it("味・香り回答: 次の1手は 温度・抽出時間 + お茶の一覧", () => {
+it("味・香り回答: 次の1手は 淹れ方の目安 + お茶の一覧", () => {
   const t = FIXTURE.find((x) => x.number === "10101")!;
   const m = buildFlavorAnswer(t);
   const labels = m.quickReplies.map((q) => q.action.label);
-  assert(labels.some((l) => l.includes("温度")), "sibling=温度");
+  assert(labels.some((l) => l.includes("淹れ方の目安")), "sibling=淹れ方の目安");
   assert(labels.some((l) => l.includes("お茶の一覧")), "has 一覧");
   assert(m.quickReplies.length <= 2, "1〜2個");
 });

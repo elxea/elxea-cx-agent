@@ -104,7 +104,7 @@ export function buildEntryWelcome(): WelcomeMessage {
 function buildMarcheResponse(): WelcomeMessage {
   const text =
     "ありがとうございます。お手元のお茶の袋に、5桁の番号が書かれています。" +
-    "その番号をこのトークに送っていただくと、そのお茶の淹れ方をご案内します。" +
+    "その番号をこのトークに送っていただくと、そのお茶の淹れ方の目安をお伝えします。" +
     "よろしければ、番号を送ってみてくださいね。";
 
   const quickReplies: QuickReplyItem[] = [

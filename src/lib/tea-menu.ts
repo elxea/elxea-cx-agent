@@ -14,7 +14,7 @@
  * フロー（タップ圧縮版・オーナー確定 2026-07-13「3 タップ以内」）:
  *   entry（トリガー発話 / リッチメニュー①） → 販売中のお茶を一覧で直返し
  *     （種類選択層は廃止。quick reply・13 以内、13 超はページング「次へ／前へ」）
- *       → お茶カード → 🌡温度・抽出時間 / 👃味・香り /（🍵楽しみ方: データがある時のみ）
+ *       → お茶カード → 🌡淹れ方の目安 / 👃味・香り /（🍵楽しみ方: データがある時のみ）
  *   entry②（予備）: 5 桁番号を含むメッセージ → 該当お茶に直行
  *
  *   タップ数（メニュータップ含む happy path）:
@@ -361,7 +361,7 @@ function cardItemQuickReplies(
   origin?: Origin,
 ): QuickReplyItem[] {
   const items: QuickReplyItem[] = [];
-  if (exclude !== "brew") items.push(qr("🌡 温度・抽出時間", withOrigin(`${TOK.brew}${tea.number}`, origin)));
+  if (exclude !== "brew") items.push(qr("🌡 淹れ方の目安", withOrigin(`${TOK.brew}${tea.number}`, origin)));
   if (exclude !== "flavor") items.push(qr("👃 味・香り", withOrigin(`${TOK.flavor}${tea.number}`, origin)));
   // 楽しみ方はデータがある時のみ表示（無ければ選択肢に出さない）
   if (exclude !== "enjoy" && tea.enjoy.trim()) {
@@ -390,7 +390,7 @@ function nextStepQuickReplies(
   const items: QuickReplyItem[] = [];
   switch (sibling) {
     case "brew":
-      if (brewText(tea)) items.push(qr("🌡 温度・抽出時間", `${TOK.brew}${tea.number}`));
+      if (brewText(tea)) items.push(qr("🌡 淹れ方の目安", `${TOK.brew}${tea.number}`));
       break;
     case "flavor":
       if (tea.flavorProfiles.length > 0 || tea.descShort.trim()) {
@@ -430,18 +430,24 @@ function brewText(tea: TeaItem): string {
 }
 
 /**
- * 🌡温度・抽出時間の回答。
+ * 🌡淹れ方の目安の回答。
  *
  * UX③（淹れ方 + 楽しみ方の同時提示）: 淹れ方（How to Brew）に続けて、データがある時だけ
  * 「楽しみ方」（和菓子との相性・水出し・レモンを添える 等の創造的なヒント。Notion「楽しみ方」列・
  * 既存 30/30 充足）をひと区切り置いて併記する。楽しみ方が空なら淹れ方だけを返す（従来挙動）。
  * 楽しみ方の中身はオーナーが Notion で編集する前提で、ここは表示配線のみ（本文は再創作しない）。
  * 静か・丁寧のトーンと既存の次の1手（quickReplies）は維持する。
+ *
+ * 語り口（Phase 0 タスク5 / roji「正解を押し付けない」）: 温度・抽出時間は**目安**として置く。
+ *   数値そのもの（Notion の How to Brew / temp / time / water）は一切変えない。変えるのは枠づけの
+ *   文言だけで、断定（「おすすめの淹れ方」「正しい淹れ方」等）を外し、末尾で好みに合わせて動かして
+ *   よいことを一言添える。出典: トーン定義 Spec 3-3「淹れ方の温度・時間は目安として置く」。
+ *   末尾文に「正解」の語は使わない（同 5-3 の禁止語に触れるため、語自体を避けて態度で示す）。
  */
 export function buildBrewAnswer(tea: TeaItem): OutMessage {
   const brew = brewText(tea);
   const brewBody = brew
-    ? `おすすめの淹れ方はこちらです。\n\n${brew}`
+    ? `淹れ方の目安です。\n\n${brew}\n\nお好みで、湯温や時間を少し変えてみるのもいいかもしれません。`
     : "申し訳ありません、このお茶の淹れ方はまだ登録されていません。";
   const enjoy = tea.enjoy.trim();
   const body = enjoy ? `${brewBody}\n\n― 楽しみ方 ―\n${enjoy}` : brewBody;

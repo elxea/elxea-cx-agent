@@ -387,8 +387,10 @@ function extractTeaMenuText(page: NotionPage): string {
   const time = extractText(p["How-to_Time(Sec)"]);
   const water = extractText(p["How-to_Water(ml)"]);
   if (temp || time || water) {
+    // 語り口（Phase 0 タスク5）: src/sync/knowledge.ts と同一の置き換え（「推奨」→「目安」）。
+    //   数値そのものは変えない。
     parts.push(
-      `推奨抽出: ${temp ? `${temp}℃` : ""} ${water ? `${water}ml` : ""} ${time ? `${time}秒` : ""}`.trim(),
+      `淹れ方の目安: ${temp ? `${temp}℃` : ""} ${water ? `${water}ml` : ""} ${time ? `${time}秒` : ""}`.trim(),
     );
   }
 
