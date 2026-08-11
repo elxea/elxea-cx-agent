@@ -1,6 +1,10 @@
 /**
  * Identity Link Route -- POST /api/identity/link
  *
+ * @layer CDP — CDP 所有。src/routes 配下は既定では CX（チャネルの入口）だが、この経路だけは
+ *   例外で、やっていることは本人同定と会話履歴の統合＝名寄せそのもの。
+ *   誤って CX 扱いにすると「文言の都合で名寄せ条件を触る」事故につながるため CDP を明示する。
+ *
  * LINE Login や Shopify OAuth 後に、anonymous session を
  * identified user に統合するエンドポイント。
  *

@@ -45,6 +45,8 @@ LINE Webhook → Hono → Claude API (tool_use) → LINE Push
 Cron (*/15) → delivery-orchestrator → Notion「配信コンテンツ」DB → LINE broadcast/multicast
 ```
 
+**CDP（データ基盤）と CX（顧客体験）の境界の正本は、自動生成の [`docs/layer-map.md`](docs/layer-map.md)**（`npx tsx scripts/layer-map.ts --out docs/layer-map.md` で再生成。手で編集しない）。
+
 ## LINE 配信サブシステム（触る前に必ずドキュメントを読む）
 
 対話とは別に、Notion の「配信コンテンツ」DB を運用者インターフェースとする**一斉配信**の仕組みを持つ。

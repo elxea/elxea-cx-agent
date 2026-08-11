@@ -1,6 +1,10 @@
 /**
  * 配信オーケストレータ（T9）。
  *
+ * @layer CX — CX 所有・CDP を読む。宛先集合（delivery-audience / target-resolver）と
+ *   通数台帳（message-ledger）は CDP に問い合わせるだけで、ここが決めるのは
+ *   「いつ・どの文面を・どのチャネルへ出すか」という体験側の判断。台帳の形は持たない。
+ *
  * 設計: 「Notion駆動 LINE配信 設計確定版 v1.0」§5/§6/§8
  *   ③検出 → claim(台帳=真の排他) → 対象解決 → 通数ガード(guardAndClaim)
  *   → pinning 照合 → 送信(stub 可) → 結果書戻し → reaper(Sending タイムアウト回収)。

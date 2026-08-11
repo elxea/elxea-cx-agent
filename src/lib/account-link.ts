@@ -1,6 +1,10 @@
 /**
  * LINE Account Link（LINE 純正のアカウント連携）— linkToken 発行 / nonce 発行・消費 / 連携成立。
  *
+ * @layer CDP — CDP 所有。LINE 上の導線に見えるが、本体は「同一人物である」と確定させる名寄せ処理。
+ *   連携成立の条件は本人性の判定であり、体験（誘い文句・ボタン）とは切り離して扱う。
+ *   セキュリティ境界（SEC-1: email 等値では連携させない）もこの層が守る。
+ *
  * 一次情報（出典）:
  *   - https://developers.line.biz/ja/docs/messaging-api/linking-accounts/
  *   - https://raw.githubusercontent.com/line/line-openapi/main/messaging-api.yml （issueLinkToken）

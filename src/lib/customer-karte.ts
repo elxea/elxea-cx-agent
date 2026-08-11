@@ -1,6 +1,10 @@
 /**
  * 「次の一杯」選定用カルテ（persona / tasteProfile）のローダ（fail-safe・I/O シーム）。
  *
+ * @layer CDP — CDP 所有。顧客カルテという事実の読み出し口（I/O シーム）であり、
+ *   複数の CX 面（会話・次の一杯）へ同じ源から供給する役割を持つ。見せ方は持たない
+ *   （提示は my-karte＝CX 側）。
+ *
  * 監査 punch-list #2 の是正配線: 会話側（agent/core.ts の buildPersonalizationBlock）が
  * カルテを AI 文脈へ読むのと同じ源から、tea-menu の「次の一杯」選定にも persona/tasteProfile を
  * 供給する（「会話はカルテを読むのに次の提案は読まない」非対称の解消）。

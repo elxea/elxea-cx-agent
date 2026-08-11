@@ -1,6 +1,10 @@
 /**
  * A-2a 評価後の「次の一杯」— 2 軸データ活用版の選定ロジック（純粋・状態レス）。
  *
+ * @layer CX — CX 所有・CDP を読む。カルテ（persona / tasteProfile）と銘柄データを
+ *   受け取って「次に何を薦めるか」を決める提案ロジック。データは引数で渡される純粋関数で、
+ *   自分では読み書きしない（I/O は customer-karte 側＝CDP が担う）。
+ *
  * 設計正本: 個別最適化(出し分け)設計案 v2（承認済み）
  *   https://app.notion.com/p/39f70c9d064c815f8316f458e173d770
  * データ根拠: Phase 0 as-built（docs/personalization-phase0-inventory.md §2・§3）
