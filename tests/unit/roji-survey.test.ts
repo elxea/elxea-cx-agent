@@ -889,6 +889,82 @@ async function main() {
     assertEqual(prompts.map((r) => r.value), ["ok", "ok"], "呼びかけの文脈（項目39）が残る");
   });
 
+  // -------------------------------------------------------------------------
+  // 〔書かない〕で「ひとこと待ち」が必ず解けること
+  //
+  // 起きていた事故: 呼びかけ（survey.words_prompt）で立った待ちを survey.finished が
+  // 解いていなかったため、〔書かない〕を押した人の **その後 24 時間の自由文がすべて**
+  // 「ひとこと」として言葉の置き場に入り、AI の会話の代わりに終わりの画面が返っていた。
+  // 「書かない」と言った人の言葉を黙って保存する状態を、二度作らないために固定する。
+  // -------------------------------------------------------------------------
+
+  await it("〔書かない〕のあとは自由文を横取りしない（呼びかけ → 書かない で待ちが解ける）", async () => {
+    const { events } = await runFlow([
+      tap("q1", "morning"),
+      "roji｜next",
+      "roji｜ok",
+      "roji｜skip",
+    ]);
+    assertTrue(
+      events.rows.some((r) => r.event_name === "survey.finished"),
+      "〔書かない〕で終わりまで行った出来事が残っていない",
+    );
+    const state = events.state();
+    assertEqual(state.awaitingWords, false, "〔書かない〕なのに、ひとこと待ちが続いている");
+    assertEqual(state.awaitingContext, null, "待ちの文脈（項目39）が残ってしまっている");
+    assertEqual(state.wordsWritten, false, "書いていないのに『書いた』になっている");
+  });
+
+  await it("待ちが解けるのは出来事の履歴からも同じ（状態は履歴から組み直す）", () => {
+    // 実装と同じ並び（呼びかけ → 終わり）を生のログとして与える。
+    const rows: SurveyEventRow[] = [
+      { event_name: "survey.words_prompt", step: null, value: "ok", created_at: "2026-08-08T00:00:01.000Z" },
+      { event_name: "survey.finished", step: null, value: null, created_at: "2026-08-08T00:00:02.000Z" },
+    ];
+    const s = buildSurveyState(rows, Date.parse("2026-08-08T00:10:00.000Z"));
+    assertEqual(s.awaitingWords, false, "終わったログなのに待ちが立っている");
+    assertEqual(s.awaitingContext, null, "終わったログなのに文脈が残っている");
+  });
+
+  await it("引用の許可まで行った人も待ちが解けている（言葉 → 許可 → 終わり）", async () => {
+    const { events } = await runFlow([
+      tap("q1", "morning"),
+      "roji｜next",
+      "roji｜ok",
+    ]);
+    // 言葉を書いた（planWords 相当）→ 引用の許可 → 終わり。
+    events.push("survey.words_saved", undefined, "ok");
+    events.push("survey.quote_consent", undefined, "inside");
+    events.push("survey.finished");
+    const state = events.state();
+    assertEqual(state.awaitingWords, false, "終わったのに待ちが続いている");
+    assertEqual(state.wordsWritten, true, "書いた事実が残っていない");
+    assertEqual(state.quoteAsked, true, "許可を聞いた事実が残っていない");
+  });
+
+  await it("終わったあとに戻ってきたら、待ちは正しく立ち直る（終わり → 新しい呼びかけ）", async () => {
+    const { events } = await runFlow([
+      tap("q1", "morning"),
+      "roji｜next",
+      "roji｜ok",
+      "roji｜skip",
+    ]);
+    assertEqual(events.state().awaitingWords, false, "一度は解けているはず");
+    // もう一度触れて、確認 → 呼びかけまで戻った人。
+    events.push("survey.confirm", undefined, "ok");
+    events.push("survey.words_prompt", undefined, "ok");
+    const state = events.state();
+    assertEqual(state.awaitingWords, true, "戻ってきた人の待ちが立たない");
+    assertEqual(state.awaitingContext, "ok", "戻ってきた人の文脈が立たない");
+  });
+
+  await it("呼びかけの直後は、ちゃんと待っている（解きすぎていないことの対照）", async () => {
+    const { events } = await runFlow([tap("q1", "morning"), "roji｜next", "roji｜ok"]);
+    const state = events.state();
+    assertEqual(state.awaitingWords, true, "呼びかけたのに待っていない");
+    assertEqual(state.awaitingContext, "ok", "呼びかけの文脈が立っていない");
+  });
+
   await it("1つも答えずに終えた人の最後の画面に、空行が2つ続かない", () => {
     const s = buildFinalScreen({});
     assertTrue(!s.includes("\n\n\n"), `空行が2つ続いている: ${JSON.stringify(s)}`);
