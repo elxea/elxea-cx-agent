@@ -86,11 +86,17 @@ function makeRecordingDeps(tagMap: Map<string, string[]> = new Map()) {
     updateProfile: [] as Array<{ id: string; updates: Record<string, unknown> }>,
     pipeline: [] as Array<{ id: string; lineItems: Array<{ productTags: string[] }> }>,
     fetchTags: [] as string[][],
+    // 配送台帳（038）へ書いた行。誰に・いつ・何が届いたかの記録。
+    deliveries: [] as Array<Record<string, unknown>>,
   };
   const deps: ShopifyOrderDeps = {
     fetchProductTags: async (ids) => {
       calls.fetchTags.push(ids);
       return tagMap;
+    },
+    recordDeliveries: async (rows) => {
+      for (const r of rows) calls.deliveries.push(r as unknown as Record<string, unknown>);
+      return { inserted: rows.length, updated: 0, kept: 0 };
     },
     runPurchasePipeline: async (id, lineItems) => {
       calls.pipeline.push({ id, lineItems });

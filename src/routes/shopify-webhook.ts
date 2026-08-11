@@ -64,7 +64,8 @@ export async function shopifyOrderWebhook(c: Context<{ Bindings: Env }>) {
   }
 
   // 4. バックグラウンド処理（即時 200 を返す）
-  const deps = createShopifyOrderDeps();
+  // 配送台帳（誰に・いつ・何が届いたか）も同じ Supabase 接続で書く。
+  const deps = createShopifyOrderDeps(supabase);
   c.executionCtx.waitUntil(
     handleShopifyOrder(order, c.env, deps).then((result) => {
       console.log("[shopify-webhook] order processed:", JSON.stringify(result));

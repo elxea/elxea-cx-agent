@@ -20,6 +20,12 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
+import {
+  createSupabaseDeliveryLedgerStore,
+  extractDeliveryRecords,
+  type DeliveryRecord,
+  type DeliveryWriteResult,
+} from "./delivery-ledger";
 import { getFirestoreEnv, updateCustomerProfile } from "./firestore";
 import { runPurchasePreferencePipeline } from "./preference-pipeline";
 import { fetchProductTagsByIds } from "./shopify";
@@ -36,9 +42,23 @@ export type ShopifyOrderPayload = {
   tags?: string | string[] | null;
   customer?: { id?: number | string | null } | null;
   line_items?: Array<{
+    /** 明細 ID。配送台帳の二重計上を防ぐ鍵の一部（038）。 */
+    id?: number | string | null;
     product_id?: number | string | null;
+    /** 以下は配送台帳（何が・どの銘柄が届いたか）のために読む。 */
+    variant_id?: number | string | null;
+    title?: string | null;
+    variant_title?: string | null;
+    name?: string | null;
+    sku?: string | null;
+    quantity?: number | null;
     selling_plan_allocation?: unknown;
     selling_plan_id?: string | number | null;
+  }> | null;
+  /** 発送の記録。あれば配送台帳の「届いた日」をこちらから取る（注文日より確か）。 */
+  fulfillments?: Array<{
+    created_at?: string | null;
+    status?: string | null;
   }> | null;
 };
 
@@ -65,6 +85,11 @@ export type ShopifyOrderDeps = {
     lineItems: Array<{ productTags: string[] }>,
     env: Env,
   ) => Promise<void>;
+  /**
+   * 配送台帳へ「誰に・いつ・何が届いたか」を書く（migration 038 / 機能定義 第5節 タスク9）。
+   * **この記録は過去に遡って作れない**ため、属性更新やペルソナ加算より先に実行する。
+   */
+  recordDeliveries: (rows: DeliveryRecord[]) => Promise<DeliveryWriteResult>;
   /** CustomerProfile の部分更新（lastPurchaseAt / isSubscriber）。 */
   updateProfile: (
     shopifyCustomerId: string,
@@ -88,6 +113,10 @@ export type ShopifyOrderResult = {
   isSubscriber?: boolean;
   pipelineInvoked?: boolean;
   lastPurchaseAtUpdated?: boolean;
+  /** 配送台帳に書いた行数（新規＋更新）。0 は「書く中身が無かった」。 */
+  deliveriesRecorded?: number;
+  /** 配送台帳への書き込みに失敗したときだけ入る（他の経路は続行する）。 */
+  deliveryLedgerError?: string;
   reason?: string;
 };
 
@@ -186,16 +215,51 @@ export async function handleShopifyOrder(
   deps: ShopifyOrderDeps,
 ): Promise<ShopifyOrderResult> {
   try {
-    // Firebase 未設定なら属性更新経路は成立しない（fail-safe スキップ）。
+    const shopifyCustomerId = extractCustomerId(order);
+    if (!shopifyCustomerId) {
+      // 誰に届いたか分からない記録は作らない（guest checkout）。
+      return { status: "skipped_no_customer" };
+    }
+
+    // 商品タグ（配送台帳の分類とペルソナ加算の両方で使う）。
+    // 台帳は最優先なので、タグが引けなくても**書く**（分類は 'unknown' のまま残す）。
+    const productIds = extractProductIds(order);
+    let tagMap = new Map<string, string[]>();
+    let tagFetchError: string | undefined;
+    try {
+      tagMap = await deps.fetchProductTags(productIds, env);
+    } catch (err) {
+      tagFetchError = err instanceof Error ? err.message : String(err);
+    }
+
+    // ── 1. 配送台帳（何より先に書く。遡って作れない記録だから）─────────────
+    let deliveriesRecorded = 0;
+    let deliveryLedgerError: string | undefined;
+    try {
+      const rows = extractDeliveryRecords(order, { productTags: tagMap });
+      const written = await deps.recordDeliveries(rows);
+      deliveriesRecorded = written.inserted + written.updated;
+    } catch (err) {
+      // 台帳が書けなくても他の経路は止めない（ここで throw すると属性更新まで巻き添えになる）。
+      deliveryLedgerError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (tagFetchError) {
+      // タグが引けない = ペルソナ加算の材料が無い。台帳を書いたうえで異常として返す。
+      return {
+        status: "error",
+        shopifyCustomerId,
+        deliveriesRecorded,
+        deliveryLedgerError,
+        reason: `product tags fetch failed: ${tagFetchError}`,
+      };
+    }
+
+    // Firebase 未設定なら属性更新経路は成立しない（fail-safe スキップ）。台帳は上で書き済み。
     try {
       getFirestoreEnv(env);
     } catch {
-      return { status: "skipped_firebase_unset" };
-    }
-
-    const shopifyCustomerId = extractCustomerId(order);
-    if (!shopifyCustomerId) {
-      return { status: "skipped_no_customer" };
+      return { status: "skipped_firebase_unset", deliveriesRecorded, deliveryLedgerError };
     }
 
     const isSubscriber = detectSubscriptionFromOrder(order);
@@ -215,9 +279,7 @@ export async function handleShopifyOrder(
       env,
     );
 
-    // 商品タグを解決してペルソナパイプラインに通電。
-    const productIds = extractProductIds(order);
-    const tagMap = await deps.fetchProductTags(productIds, env);
+    // 解決済みのタグでペルソナパイプラインに通電。
     const lineItems = productIds.map((pid) => ({
       productTags: tagMap.get(pid) ?? [],
     }));
@@ -230,6 +292,8 @@ export async function handleShopifyOrder(
       isSubscriber,
       pipelineInvoked: true,
       lastPurchaseAtUpdated: true,
+      deliveriesRecorded,
+      deliveryLedgerError,
     };
   } catch (err) {
     return {
@@ -265,10 +329,21 @@ export function createSupabaseIdempotencyStore(
   };
 }
 
-/** 実 I/O 版の deps を構築する（本番経路）。 */
-export function createShopifyOrderDeps(): ShopifyOrderDeps {
+/**
+ * 実 I/O 版の deps を構築する（本番経路）。
+ *
+ * @param supabase 配送台帳（Supabase RPC `record_tea_deliveries`）への接続。
+ */
+export function createShopifyOrderDeps(supabase: SupabaseClient): ShopifyOrderDeps {
+  const ledger = createSupabaseDeliveryLedgerStore(supabase as unknown as {
+    rpc(fn: string, args: Record<string, unknown>): Promise<{
+      data: unknown;
+      error: { message: string } | null;
+    }>;
+  });
   return {
     fetchProductTags: (productIds, env) => fetchProductTagsByIds(productIds, env),
+    recordDeliveries: (rows) => ledger.record(rows),
     runPurchasePipeline: (customerId, lineItems, env) =>
       runPurchasePreferencePipeline(customerId, lineItems, env),
     updateProfile: async (customerId, updates, env) => {

@@ -287,6 +287,20 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
   // 037: 消す対象のベタ書きをやめ information_schema からの列挙に統一（roji_person_key_map 追加 +
   //      roji_erase_person / roji_erasure_residue を差し替え）。036 と同じく関数のみ。
   "037_roji_erase_enumerate_stores": { idempotent: true, specs: [] },
+  // 038: 配送台帳（誰に・いつ・何が届いたか）の新設。033（roji の「割当を決めた記録」）とは
+  //      別の事実（「実際に届いた事実」）を持つ独立表で、033 に列を足していない。
+  //      新設 table + 新設 function があるため、実在で一意に判定できる正の sentinel を持てる。
+  //      IF NOT EXISTS / CREATE OR REPLACE のみで冪等。
+  "038_tea_delivery_ledger": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "tea_delivery_ledger" },
+      { kind: "function", func: "record_tea_deliveries" },
+      { kind: "function", func: "tea_delivery_period" },
+      { kind: "function", func: "tea_delivery_basis_rank" },
+      { kind: "rls", table: "tea_delivery_ledger" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

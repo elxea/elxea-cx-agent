@@ -25,6 +25,7 @@
     "scripts/run-migration-*.ts",
     "scripts/migrate.ts",
     "scripts/roji-safety-declarations.ts",
-    "scripts/roji-monthly-run.ts"
+    "scripts/roji-monthly-run.ts",
+    "scripts/record-delivery.ts"
   ]
 }
