@@ -35,6 +35,7 @@
     "regression": "npx tsx scripts/knowledge-regression.ts",
     "test:staging-smoke": "npx tsx tests/staging/smoke.test.ts",
     "test:staging-webhook-contract": "npx tsx tests/staging/webhook-contract.test.ts",
+    "test:staging-account-link": "npx tsx tests/staging/account-link-e2e.ts",
     "test:hermetic": "vitest run",
     "roji:monthly-run": "npx tsx scripts/roji-monthly-run.ts"
   },
