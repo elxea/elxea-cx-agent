@@ -7,6 +7,8 @@
  *   (c) System Prompt: 既定では商品カード・購入導線の指示を含まず、「買う導線を置かない」を含む
  *   (d) ④定期便の常設枠: 既定では未利用の方へ案内を出さない（中立の受け皿 1 通で着地）
  *   (e) 中立応答の文面: 便益訴求・煽り語・購入ボタンを含まない
+ *   (f) Quick Reply: 既定では売り込みツール由来の Quick Reply を出さない（fail-closed）
+ *   (g) ペルソナ断片: どのペルソナでも商品提案の指示を持たない（未判定を含む）
  *
  * 使用方法: npx tsx tests/unit/sales-surface.test.ts
  */
@@ -19,7 +21,12 @@ import {
   EC_SITE_URL,
 } from "../../src/lib/sales-surface";
 import { AGENT_TOOLS, SALES_TOOLS, agentTools } from "../../src/agent/tools";
-import { SYSTEM_PROMPT, systemPrompt } from "../../src/agent/system-prompt";
+import {
+  SYSTEM_PROMPT,
+  systemPrompt,
+  buildPersonaPromptFragment,
+} from "../../src/agent/system-prompt";
+import { generateQuickReplies } from "../../src/agent/core";
 import {
   decideSubscriptionResponse,
   buildSubscriptionInquiryReply,
@@ -215,6 +222,128 @@ it("従来の generic 紹介文は温存されている（復活可能・削除�
   assert(
     buildSubscriptionMessage("generic").includes("選ぶ手間なく"),
     "generic 紹介文が失われている",
+  );
+});
+
+console.log("\n--- (f) Quick Reply の fail-closed ---");
+
+// usedTools は実行可否と無関係に積まれる（モデルが呼んだ事実がそのまま入る）。
+// executeTool 側で実行を拒否しても Quick Reply だけが顧客に出る、という抜けを塞ぐ。
+it("OFF なら create_cart_link 由来の Quick Reply を出さない", () => {
+  assertEqual(
+    generateQuickReplies(["create_cart_link"], false, false).length,
+    0,
+    "OFF でカート導線の Quick Reply が出ている",
+  );
+});
+
+it("OFF なら recommend_product 由来の Quick Reply を出さない", () => {
+  assertEqual(
+    generateQuickReplies(["recommend_product"], false, false).length,
+    0,
+    "OFF で商品提案の Quick Reply が出ている",
+  );
+});
+
+it("OFF の Quick Reply 全体に購入導線・煽り語が出ない", () => {
+  const labels = [
+    ...generateQuickReplies(["create_cart_link", "recommend_product"], false, false),
+    ...generateQuickReplies(["lookup_my_orders"], false, false),
+    ...generateQuickReplies([], false, false),
+    ...generateQuickReplies([], true, false),
+  ]
+    .map((q) => `${q.label} ${q.text}`)
+    .join(" ");
+  for (const ng of ["購入", "カート", "おすすめ", "お得", "今だけ"]) {
+    assert(!labels.includes(ng), `OFF の Quick Reply に売り込み語「${ng}」が含まれる`);
+  }
+});
+
+it("OFF でも売り込み以外（注文照会・エスカレーション）の Quick Reply は残る", () => {
+  assert(
+    generateQuickReplies(["get_order_detail"], false, false).length > 0,
+    "注文照会の Quick Reply まで消えている",
+  );
+  assert(
+    generateQuickReplies(["lookup_my_orders"], false, false).length > 0,
+    "注文照会の Quick Reply まで消えている",
+  );
+  assertEqual(
+    generateQuickReplies(["create_cart_link"], true, false).length,
+    1,
+    "エスカレーション時の Quick Reply が失われている",
+  );
+});
+
+it("売り込みツールが積まれていても OFF なら注文照会の分岐に落ちる", () => {
+  // 売り込み分岐を「早期 return で塞ぐ」のではなく「条件から外す」ことの確認。
+  const qr = generateQuickReplies(["recommend_product", "lookup_my_orders"], false, false);
+  assert(qr.length > 0, "後続の注文照会分岐に落ちていない");
+  assert(
+    qr.every((q) => !`${q.label}${q.text}`.includes("購入")),
+    "購入導線が混ざっている",
+  );
+});
+
+it("ON なら従来の Quick Reply は温存されている（復活可能・削除していない）", () => {
+  assert(
+    generateQuickReplies(["create_cart_link"], false, true).length > 0,
+    "ON でカート導線の Quick Reply が失われている",
+  );
+  assert(
+    generateQuickReplies(["recommend_product"], false, true).some((q) =>
+      q.text.includes("購入"),
+    ),
+    "ON で商品提案の Quick Reply が失われている",
+  );
+});
+
+console.log("\n--- (g) ペルソナ断片に売り込み指示が無い ---");
+
+// 未判定は新規ユーザーの既定状態＝最も多くの人が通る経路。
+// 断片が「商品提案を中心に」と言うと、同じ system メッセージ内の
+// 「買う導線を置かない / 煽り・評価の言葉を使わない」と正面から矛盾する。
+const PERSONAS = ["serenity", "explorer", "sensory"] as const;
+
+it("未判定の断片に商品提案の指示が無い", () => {
+  const f = buildPersonaPromptFragment(null);
+  for (const ng of ["商品提案", "ベストセラー", "定番品", "おすすめ", "購入"]) {
+    assert(!f.includes(ng), `未判定の断片に売り込み指示「${ng}」が含まれる`);
+  }
+});
+
+it("全ペルソナ断片に商品提案・勧誘の指示が無い（1 体前提で方針を揃える）", () => {
+  for (const p of PERSONAS) {
+    const f = buildPersonaPromptFragment(p);
+    for (const ng of ["提案", "勧め", "おすすめ", "購入", "優先"]) {
+      assert(!f.includes(ng), `${p} の断片に売り込み指示「${ng}」が含まれる`);
+    }
+  }
+});
+
+it("全ペルソナ断片に煽り語（希少性・緊急性）が無い", () => {
+  for (const p of PERSONAS) {
+    const f = buildPersonaPromptFragment(p);
+    // serenity の「急かす表現（「今すぐ」「限定」）は避ける」は禁止の明示なので対象外にする。
+    const directives = f
+      .split("\n")
+      .filter((l) => !l.includes("避け"))
+      .join("\n");
+    for (const ng of ["季節限定", "今だけ", "残りわずか", "お得"]) {
+      assert(!directives.includes(ng), `${p} の断片に煽り語「${ng}」が含まれる`);
+    }
+  }
+});
+
+it("ペルソナ断片は口調・話題の調整として機能し続ける（空にしていない）", () => {
+  for (const p of PERSONAS) {
+    const f = buildPersonaPromptFragment(p);
+    assert(f.includes("口調"), `${p} の断片から口調指示が失われている`);
+    assert(f.includes("話題"), `${p} の断片から話題指示が失われている`);
+  }
+  assert(
+    buildPersonaPromptFragment(null).includes("ニュートラル"),
+    "未判定の中立指示が失われている",
   );
 });
 
