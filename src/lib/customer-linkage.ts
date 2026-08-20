@@ -220,3 +220,82 @@ export async function clearCustomerLinkage(
     };
   }
 }
+
+/**
+ * 連携状態（読み取り側の戻り値）。
+ *
+ * ⚠ line_user_id を **含めない**（型の上で持てない）。web-app には「連携しているか」と
+ *   「いつからか」だけを渡す約束（P1 QA 要件 3）で、LINE の生 ID を Web 側に流出させない。
+ *   下の getLinkageStatus は select も `linked_at` のみに絞ってあり、うっかり足しても
+ *   型と クエリ の両方を直さない限り漏れない構造にしている。
+ */
+export type CustomerLinkageStatus = {
+  /** 有効な連携行が 1 件以上あるか。 */
+  linked: boolean;
+  /** 現在有効な連携のうち最も古い linked_at（＝いつから連携しているか）。無ければ null。 */
+  linkedAt: string | null;
+  /** 有効な連携行の件数（N:1 = 世帯共有で 2 以上になりうる）。 */
+  count: number;
+};
+
+export type CustomerLinkageStatusResult =
+  | { ok: true; status: CustomerLinkageStatus }
+  | { ok: false; error: string };
+
+/**
+ * Shopify 顧客に紐づく「今有効な」LINE 連携の状態を読む（P1: マイページの連携状態表示）。
+ *
+ * これまで customer_linkages は書き込み（upsert / clear）専用で、**Web から状態を読む経路が
+ * 無かった**。そのため連携が成立してもマイページの表示は何も変わらず、お客さまが
+ * 「連携できたのか分からない」状態に置かれていた。本関数がその読み取り口の中身。
+ *
+ * ## 「連携済み」の定義（P1 で確定・QA 要件 5）
+ *   `shopify_customer_id = 指定顧客` かつ `unfollowed_at IS NULL` の行が **1 件以上**あれば連携済み。
+ *   - migration 027 で同一 Shopify 顧客に複数 LINE を許す（N:1・世帯共有）ため、件数は 1 とは限らない。
+ *     UI は有無だけを出すが、判断材料として count も返す。
+ *   - `unfollowed_at`（migration 020）は LINE 友だち解除（ブロック/退会相当）の検知時刻。
+ *     入っている行は「LINE 側で切れている」ので連携済みに数えない。配信対象解決
+ *     （020 の部分インデックス）と同じ条件に揃えてあり、「マイページは連携済みと言うのに
+ *     配信は届かない」というズレが起きないようにしている。
+ *   - clearCustomerLinkage による解除は shopify_customer_id を null にするので、
+ *     この検索条件では最初からヒットしない（行削除ではないが未連携として扱われる）。
+ *
+ * ⚠ 解除の状態遷移（行削除か旗立てか・粒度）は P1 では確定していない。本関数は
+ *   **現状の書き込み実装が作るデータをそのまま読むだけ**で、新しい状態遷移を定義しない。
+ *
+ * never throw（呼び出し側のマイページ描画を落とさない）。失敗は ok:false で返す。
+ */
+export async function getLinkageStatus(
+  supabase: SupabaseClient,
+  shopifyCustomerId: string,
+): Promise<CustomerLinkageStatusResult> {
+  if (!shopifyCustomerId) {
+    return { ok: false, error: "shopifyCustomerId is required" };
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("customer_linkages")
+      // ⚠ line_user_id を select しない（生値を持ち出さない・QA 要件 3 の構造的担保）。
+      .select("linked_at")
+      .eq("shopify_customer_id", shopifyCustomerId)
+      .is("unfollowed_at", null)
+      // 最古を先頭に（linked_at が null の行は末尾に寄せる）。
+      .order("linked_at", { ascending: true, nullsFirst: false });
+
+    if (error) return { ok: false, error: error.message };
+
+    const rows = (data ?? []) as Array<{ linked_at?: string | null }>;
+    const linkedAt = rows.find((row) => !!row.linked_at)?.linked_at ?? null;
+
+    return {
+      ok: true,
+      status: { linked: rows.length > 0, linkedAt, count: rows.length },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}

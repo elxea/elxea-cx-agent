@@ -15,6 +15,7 @@ import {
   identityLinkLineHandler,
   identityLinkLiffHandler,
   identityAccountLinkNonceHandler,
+  identityLinkageStatusHandler,
 } from "./routes/identity";
 import { shopifyOrderWebhook } from "./routes/shopify-webhook";
 import { classifyCron } from "./lib/cron-routing";
@@ -247,6 +248,10 @@ app.post("/api/identity/link-line", identityLinkLineHandler);
 app.post("/api/identity/link-liff", identityLinkLiffHandler);
 // LINE 純正 Account Link: nonce 発行（web-app サーバから X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）
 app.post("/api/identity/account-link-nonce", identityAccountLinkNonceHandler);
+// P1: 連携状態の読み取り（web-app サーバから X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）。
+//   GET だが公開エンドポイントではない。無認証にすると顧客 ID の総当たりで
+//   「誰が LINE 連携しているか」を外部から列挙できてしまう。
+app.get("/api/identity/linkage-status", identityLinkageStatusHandler);
 
 /**
  * LIFF Follow Ref API。

@@ -26,7 +26,7 @@ import {
   normalizeShopifyCustomerId,
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
-import { upsertCustomerLinkage } from "../lib/customer-linkage";
+import { upsertCustomerLinkage, getLinkageStatus } from "../lib/customer-linkage";
 import {
   issueAccountLinkNonce,
   isValidLinkTokenFormat,
@@ -396,6 +396,63 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     console.error("[identity/link-liff] error:", err);
     return c.json({ error: "Internal server error" }, 500);
   }
+}
+
+/**
+ * GET /api/identity/linkage-status?shopify_customer_id=...
+ *
+ * P1（マイページに LINE 連携状態を表示）の読み取り口。customer_linkages はこれまで
+ * 書き込み専用（link-liff / account-link / clear）で、**Web から状態を読む経路が無かった**。
+ * そのため連携が成立してもマイページは何も変わらず「連携できたのか分からない」まま置かれていた。
+ *
+ * 認証（link-liff / account-link-nonce と同一方式・fail-closed）:
+ *   X-API-Key（SYNC_API_SECRET）必須。**ブラウザから直叩きさせない**。
+ *   これを緩めると「顧客 ID を総当たりして誰が LINE 連携しているかを外部から列挙できる」
+ *   会員の在籍情報の漏洩経路になる（GET は副作用が無いぶん見落とされやすいので明記する）。
+ *
+ * 顧客 ID の出どころ（このハンドラの外にある前提・link-liff と同じ約束）:
+ *   shopify_customer_id は web-app が **サーバ認証済み Shopify セッション（requireAuth）** から
+ *   確定した値であること。ブラウザ自己申告の customer_id を web-app が転送してはならない
+ *   （転送すると他人の連携状態を覗ける）。cx-agent 側では検証できないため web-app 側の責務。
+ *
+ * 返す情報（QA 要件 3・最小開示）:
+ *   連携の有無 + 最小メタ（いつからか・件数）だけ。**line_user_id の生値は返さない**。
+ *   getLinkageStatus が select を linked_at のみに絞っており、戻り値の型にも生 ID が無い。
+ *
+ * スコープ（QA 要件 4）:
+ *   状態の**表示**だけ。解除 API はここに作らない（解除の状態遷移定義が未確定のため P1b）。
+ *
+ * レスポンス:
+ * { linked: boolean, linkedAt: string | null, count: number }
+ */
+export async function identityLinkageStatusHandler(
+  c: Context<{ Bindings: Env }>,
+) {
+  // C: server-to-server 認証（SYNC_API_SECRET）。fail-closed。ブラウザ直叩き不可。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
+  // shopify_customer_id を数値へ正規化（GID / 数値のどちらでも受ける）
+  const normalized = normalizeShopifyCustomerId(
+    c.req.query("shopify_customer_id"),
+  );
+  if ("error" in normalized) {
+    return c.json({ error: normalized.error }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+
+  const result = await getLinkageStatus(supabase, normalized.numericId);
+  if (!result.ok) {
+    console.error("[identity/linkage-status] query failed:", result.error);
+    return c.json({ error: "Failed to read linkage status" }, 500);
+  }
+
+  return c.json({
+    linked: result.status.linked,
+    linkedAt: result.status.linkedAt,
+    count: result.status.count,
+  });
 }
 
 /**
