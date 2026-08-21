@@ -26,6 +26,7 @@
     "scripts/migrate.ts",
     "scripts/roji-safety-declarations.ts",
     "scripts/roji-monthly-run.ts",
-    "scripts/record-delivery.ts"
+    "scripts/record-delivery.ts",
+    "scripts/inventory-identity.ts"
   ]
 }
