@@ -26,7 +26,14 @@ import {
   normalizeShopifyCustomerId,
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
-import { upsertCustomerLinkage, getLinkageStatus } from "../lib/customer-linkage";
+import {
+  upsertCustomerLinkage,
+  getLinkageStatus,
+  getLinkageByLineUser,
+  listLinkedLineUserIds,
+  clearCustomerLinkage,
+  resolveUnlinkTargets,
+} from "../lib/customer-linkage";
 import {
   issueAccountLinkNonce,
   isValidLinkTokenFormat,
@@ -399,7 +406,7 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
 }
 
 /**
- * GET /api/identity/linkage-status?shopify_customer_id=...
+ * GET /api/identity/linkage-status?shopify_customer_id=... | ?line_user_id=...
  *
  * P1（マイページに LINE 連携状態を表示）の読み取り口。customer_linkages はこれまで
  * 書き込み専用（link-liff / account-link / clear）で、**Web から状態を読む経路が無かった**。
@@ -419,11 +426,33 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
  *   連携の有無 + 最小メタ（いつからか・件数）だけ。**line_user_id の生値は返さない**。
  *   getLinkageStatus が select を linked_at のみに絞っており、戻り値の型にも生 ID が無い。
  *
- * スコープ（QA 要件 4）:
- *   状態の**表示**だけ。解除 API はここに作らない（解除の状態遷移定義が未確定のため P1b）。
+ * ## 逆引き（line_user_id 指定）— 本人解決の分裂を塞ぐために追加した第 2 の引き方
+ *
+ * `?line_user_id=U...` を渡すと **その LINE が連携している Shopify 顧客**を返す。
+ * web-app の `resolveIdentity` は LINE セッションのとき `users/line:{lineUserId}` という
+ * 別の棚に解決し、連携台帳を一切見ていなかった。そのため「連携済みなのに、メールで
+ * ログインしたときと LINE でログインしたときで別のマイページが見える」（分裂の根因）。
+ * 逆引きはその解決に使う読み取り口で、**新しい台帳は作らず customer_linkages を逆から引く**。
+ *
+ * ⚠ 開示方針が順引きと非対称なことの理由:
+ *   順引きは line_user_id を返さない（Web 側が知る必要の無い他人の生 ID を渡さない）。
+ *   逆引きは逆に shopify_customer_id を返す。呼び出し側は「自分がサーバ検証済みで
+ *   持っている LINE userId」の持ち主が誰の棚を見るべきかを知る必要があり、これを
+ *   返さないと本人解決そのものが成立しないため。信頼境界は順引きと同一
+ *   （X-API-Key を持つサーバのみ・ブラウザ直叩き不可）で、新たな露出面は増えない。
+ *   前提（このハンドラの外）: line_user_id は web-app が **サーバ側で検証済み**の値
+ *   （id_token の sub / 暗号化 cookie の復号結果）であること。ブラウザ自己申告を転送しない。
+ *
+ * 排他: shopify_customer_id と line_user_id は **どちらか一方だけ**を指定する。
+ *   両方 / どちらも無しは 400（どちらを見たのか曖昧なまま「未連携」を返さない）。
+ *
+ * スコープ:
+ *   状態の**読み取り**だけ。解除は別ハンドラ（`identityUnlinkHandler`）。
  *
  * レスポンス:
- * { linked: boolean, linkedAt: string | null, count: number }
+ *   順引き: { linked: boolean, linkedAt: string | null, count: number }
+ *   逆引き: { linked: boolean, linkedAt: string | null, count: number,
+ *             shopify_customer_id: string | null }
  */
 export async function identityLinkageStatusHandler(
   c: Context<{ Bindings: Env }>,
@@ -432,15 +461,46 @@ export async function identityLinkageStatusHandler(
   const unauthorized = requireSyncApiKey(c);
   if (unauthorized) return unauthorized;
 
-  // shopify_customer_id を数値へ正規化（GID / 数値のどちらでも受ける）
-  const normalized = normalizeShopifyCustomerId(
-    c.req.query("shopify_customer_id"),
-  );
-  if ("error" in normalized) {
-    return c.json({ error: normalized.error }, 400);
+  const rawShopifyCustomerId = c.req.query("shopify_customer_id");
+  const rawLineUserId = c.req.query("line_user_id");
+
+  const hasShopify = typeof rawShopifyCustomerId === "string" && rawShopifyCustomerId !== "";
+  const hasLine = typeof rawLineUserId === "string" && rawLineUserId !== "";
+
+  if (hasShopify && hasLine) {
+    return c.json(
+      { error: "Specify either shopify_customer_id or line_user_id, not both" },
+      400,
+    );
   }
 
   const supabase = createSupabaseClient(c.env);
+
+  // --- 逆引き: LINE userId → Shopify 顧客（本人解決） ---
+  if (hasLine) {
+    const invalid = validateLineMessagingUserId(rawLineUserId as string);
+    if (invalid) return c.json({ error: invalid }, 400);
+
+    const reverse = await getLinkageByLineUser(supabase, rawLineUserId as string);
+    if (!reverse.ok) {
+      console.error("[identity/linkage-status] reverse query failed:", reverse.error);
+      return c.json({ error: "Failed to read linkage status" }, 500);
+    }
+
+    return c.json({
+      linked: reverse.linkage.linked,
+      linkedAt: reverse.linkage.linkedAt,
+      count: reverse.linkage.count,
+      shopify_customer_id: reverse.linkage.shopifyCustomerId,
+    });
+  }
+
+  // --- 順引き: Shopify 顧客 → 連携の有無（従来どおり） ---
+  // shopify_customer_id を数値へ正規化（GID / 数値のどちらでも受ける）
+  const normalized = normalizeShopifyCustomerId(rawShopifyCustomerId);
+  if ("error" in normalized) {
+    return c.json({ error: normalized.error }, 400);
+  }
 
   const result = await getLinkageStatus(supabase, normalized.numericId);
   if (!result.ok) {
@@ -452,6 +512,129 @@ export async function identityLinkageStatusHandler(
     linked: result.status.linked,
     linkedAt: result.status.linkedAt,
     count: result.status.count,
+  });
+}
+
+/**
+ * POST /api/identity/unlink
+ *
+ * Web（マイページ）からの連携解除。**解除ロジックは新規に起こさず、既存の
+ * `clearCustomerLinkage`（`src/lib/customer-linkage.ts`）への HTTP 入口を足すだけ**。
+ * 別実装を起こすと「解除とは何か」の定義が 2 つに割れる。
+ *
+ * ## なぜ必要か（これが無いと解除が嘘になる）
+ *   これまで解除は 2 系統に割れていた。
+ *   - web-app `DELETE /api/user/line-link` … Firestore の `lineUserId` を消すだけで、
+ *     Bot ランタイムが読む `customer_linkages` には触れない。**消えていないのに 200 を返す**。
+ *   - cx-agent `clearCustomerLinkage` … 実体はあるが HTTP 入口が無く、LINE トークの
+ *     完全一致キーワードからしか到達できない。
+ *   本ハンドラが後者に入口を与え、web-app の DELETE がここを呼んでから Firestore を消す
+ *   （順序が逆だと、cx が失敗したときに Firestore だけ消えて状態が割れる）。
+ *
+ * ## verb が POST である理由（DELETE ではない）
+ *   このリポジトリに `app.delete` は 1 本も無く、CORS の `allowMethods` にも DELETE が
+ *   入っていない（`src/index.ts` の cors 設定）。既存の流儀に合わせて POST にする。
+ *
+ * 認証（link-liff / linkage-status と同一方式・fail-closed）:
+ *   X-API-Key（SYNC_API_SECRET）必須。**ブラウザから直叩きさせない**。
+ *   無認証にすると任意の顧客の連携を外せる（サービス妨害 + 配信の一斉停止）。
+ *
+ * なりすまし不能性の分担（このハンドラの外にある前提・link-liff と同じ約束）:
+ *   shopify_customer_id は web-app が **サーバ認証済み Shopify セッション（requireAuth）**
+ *   から確定した値であること。ブラウザ自己申告の customer_id を転送してはならない。
+ *
+ * ## N:1（世帯共有）の扱い
+ *   1 顧客に複数の LINE が紐づきうる（migration 027）。
+ *   - `line_user_id` 省略 … その顧客の**有効な連携をすべて**解除する。
+ *   - `line_user_id` 指定 … その 1 件だけ解除する。ただし **指定 ID がその顧客に
+ *     紐づいていることを先に確認**する（確認しないと、他人の LINE の連携を
+ *     自分の顧客 ID で外せてしまう）。紐づいていなければ 403。
+ *
+ * ## 行は消さない（罠 G-23）
+ *   `clearCustomerLinkage` は連携 3 列を null にするだけで行を削除しない。同じ行に
+ *   `broadcast_opted_out` / `unfollowed_at` が同居しており、行ごと消すとお客さまが
+ *   設定した配信停止が巻き戻る。
+ *
+ * 冪等: 元から未連携でも 200（`cleared_count: 0`）。二度押し・再送で壊れない。
+ *
+ * リクエストボディ:
+ * {
+ *   shopify_customer_id: string,  // 必須。GID or 数値。内部で数値へ正規化
+ *   line_user_id?: string,        // 任意。N:1 のとき解除対象を 1 件に絞る
+ * }
+ *
+ * レスポンス:
+ * { success: true, cleared_count: number, remaining_count: number }
+ *
+ * ⚠ 応答に LINE の生 ID を載せない（件数だけ）。
+ */
+export async function identityUnlinkHandler(c: Context<{ Bindings: Env }>) {
+  // C: server-to-server 認証（SYNC_API_SECRET）。fail-closed。ブラウザ直叩き不可。
+  const unauthorized = requireSyncApiKey(c);
+  if (unauthorized) return unauthorized;
+
+  let body: {
+    shopify_customer_id?: string;
+    line_user_id?: string;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const normalized = normalizeShopifyCustomerId(body.shopify_customer_id);
+  if ("error" in normalized) {
+    return c.json({ error: normalized.error }, 400);
+  }
+
+  const targetLineUserId = body.line_user_id;
+  if (targetLineUserId !== undefined) {
+    const invalid = validateLineMessagingUserId(targetLineUserId);
+    if (invalid) return c.json({ error: invalid }, 400);
+  }
+
+  const supabase = createSupabaseClient(c.env);
+
+  // 解除対象の決定。ここで引いた生 ID は cx-agent の中だけで使う（応答に載せない）。
+  const listed = await listLinkedLineUserIds(supabase, normalized.numericId);
+  if (!listed.ok) {
+    console.error("[identity/unlink] lookup failed:", listed.error);
+    return c.json({ error: "Failed to resolve linkages" }, 500);
+  }
+
+  // 所有権の確認を含む対象決定（純関数。指定 ID がこの顧客に紐づいていなければ外させない）。
+  const decided = resolveUnlinkTargets(listed.lineUserIds, targetLineUserId);
+  if (!decided.ok) {
+    return c.json({ error: decided.error }, 403);
+  }
+  const targets = decided.targets;
+
+  let clearedCount = 0;
+  for (const lineUserId of targets) {
+    const result = await clearCustomerLinkage(supabase, lineUserId);
+    if (!result.ok) {
+      // 一部成功のまま「成功」を返さない。どこまで消えたかを添えて 500 にする
+      // （成功偽装をしないのが本 PR の主旨そのもの）。
+      console.error("[identity/unlink] clear failed:", result.error);
+      return c.json(
+        { error: "Failed to clear linkage", cleared_count: clearedCount },
+        500,
+      );
+    }
+    if (result.cleared) clearedCount++;
+  }
+
+  const remainingCount = Math.max(listed.lineUserIds.length - targets.length, 0);
+
+  console.log(
+    `[identity/unlink] cleared=${clearedCount} requested=${targets.length} remaining=${remainingCount}`,
+  );
+
+  return c.json({
+    success: true,
+    cleared_count: clearedCount,
+    remaining_count: remainingCount,
   });
 }
 
