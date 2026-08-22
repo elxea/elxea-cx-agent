@@ -15,6 +15,8 @@ import {
   identityLinkLineHandler,
   identityLinkLiffHandler,
   identityAccountLinkNonceHandler,
+  identityLinkageStatusHandler,
+  identityUnlinkHandler,
 } from "./routes/identity";
 import { shopifyOrderWebhook } from "./routes/shopify-webhook";
 import { classifyCron } from "./lib/cron-routing";
@@ -249,6 +251,16 @@ app.post("/api/identity/link-line", identityLinkLineHandler);
 app.post("/api/identity/link-liff", identityLinkLiffHandler);
 // LINE 純正 Account Link: nonce 発行（web-app サーバから X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）
 app.post("/api/identity/account-link-nonce", identityAccountLinkNonceHandler);
+// P1: 連携状態の読み取り（web-app サーバから X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）。
+//   GET だが公開エンドポイントではない。無認証にすると顧客 ID の総当たりで
+//   「誰が LINE 連携しているか」を外部から列挙できてしまう。
+app.get("/api/identity/linkage-status", identityLinkageStatusHandler);
+// 連携解除（web-app の DELETE /api/user/line-link から X-API-Key 付きで呼ぶ・ブラウザ直叩き不可）。
+//   既存 clearCustomerLinkage への HTTP 入口。これが無かったため web 側の解除は
+//   Firestore しか消せず「消えていないのに成功を返す」状態だった。
+//   verb が POST なのはこのリポジトリに app.delete が 1 本も無く、CORS の
+//   allowMethods にも DELETE が入っていないため（既存の流儀に合わせる）。
+app.post("/api/identity/unlink", identityUnlinkHandler);
 
 /**
  * LIFF Follow Ref API。

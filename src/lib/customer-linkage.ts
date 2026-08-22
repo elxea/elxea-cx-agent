@@ -220,3 +220,274 @@ export async function clearCustomerLinkage(
     };
   }
 }
+
+/**
+ * 連携状態（読み取り側の戻り値）。
+ *
+ * ⚠ line_user_id を **含めない**（型の上で持てない）。web-app には「連携しているか」と
+ *   「いつからか」だけを渡す約束（P1 QA 要件 3）で、LINE の生 ID を Web 側に流出させない。
+ *   下の getLinkageStatus は select も `linked_at` のみに絞ってあり、うっかり足しても
+ *   型と クエリ の両方を直さない限り漏れない構造にしている。
+ */
+export type CustomerLinkageStatus = {
+  /** 有効な連携行が 1 件以上あるか。 */
+  linked: boolean;
+  /** 現在有効な連携のうち最も古い linked_at（＝いつから連携しているか）。無ければ null。 */
+  linkedAt: string | null;
+  /** 有効な連携行の件数（N:1 = 世帯共有で 2 以上になりうる）。 */
+  count: number;
+};
+
+export type CustomerLinkageStatusResult =
+  | { ok: true; status: CustomerLinkageStatus }
+  | { ok: false; error: string };
+
+/**
+ * Shopify 顧客に紐づく「今有効な」LINE 連携の状態を読む（P1: マイページの連携状態表示）。
+ *
+ * これまで customer_linkages は書き込み（upsert / clear）専用で、**Web から状態を読む経路が
+ * 無かった**。そのため連携が成立してもマイページの表示は何も変わらず、お客さまが
+ * 「連携できたのか分からない」状態に置かれていた。本関数がその読み取り口の中身。
+ *
+ * ## 「連携済み」の定義（P1 で確定・QA 要件 5）
+ *   `shopify_customer_id = 指定顧客` かつ `unfollowed_at IS NULL` の行が **1 件以上**あれば連携済み。
+ *   - migration 027 で同一 Shopify 顧客に複数 LINE を許す（N:1・世帯共有）ため、件数は 1 とは限らない。
+ *     UI は有無だけを出すが、判断材料として count も返す。
+ *   - `unfollowed_at`（migration 020）は LINE 友だち解除（ブロック/退会相当）の検知時刻。
+ *     入っている行は「LINE 側で切れている」ので連携済みに数えない。配信対象解決
+ *     （020 の部分インデックス）と同じ条件に揃えてあり、「マイページは連携済みと言うのに
+ *     配信は届かない」というズレが起きないようにしている。
+ *   - clearCustomerLinkage による解除は shopify_customer_id を null にするので、
+ *     この検索条件では最初からヒットしない（行削除ではないが未連携として扱われる）。
+ *
+ * ⚠ 解除の状態遷移（行削除か旗立てか・粒度）は P1 では確定していない。本関数は
+ *   **現状の書き込み実装が作るデータをそのまま読むだけ**で、新しい状態遷移を定義しない。
+ *
+ * never throw（呼び出し側のマイページ描画を落とさない）。失敗は ok:false で返す。
+ */
+export async function getLinkageStatus(
+  supabase: SupabaseClient,
+  shopifyCustomerId: string,
+): Promise<CustomerLinkageStatusResult> {
+  if (!shopifyCustomerId) {
+    return { ok: false, error: "shopifyCustomerId is required" };
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("customer_linkages")
+      // ⚠ line_user_id を select しない（生値を持ち出さない・QA 要件 3 の構造的担保）。
+      .select("linked_at")
+      .eq("shopify_customer_id", shopifyCustomerId)
+      .is("unfollowed_at", null)
+      // 最古を先頭に（linked_at が null の行は末尾に寄せる）。
+      .order("linked_at", { ascending: true, nullsFirst: false });
+
+    if (error) return { ok: false, error: error.message };
+
+    const rows = (data ?? []) as Array<{ linked_at?: string | null }>;
+    const linkedAt = rows.find((row) => !!row.linked_at)?.linked_at ?? null;
+
+    return {
+      ok: true,
+      status: { linked: rows.length > 0, linkedAt, count: rows.length },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * 逆引き（LINE userId → Shopify 顧客）の結果。
+ *
+ * ⚠ `getLinkageStatus`（順引き）と非対称に **`shopifyCustomerId` を含む**。
+ *   順引きが line_user_id を返さないのは「Web 側が知る必要が無い他人の生 ID を渡さない」
+ *   ためだが、逆引きの用途は真逆で、**呼び出し側が既にサーバ検証済みで持っている
+ *   LINE userId から、その本人が誰の棚を見るべきかを決める**こと。ここで顧客 ID を
+ *   返さないと本人解決が成立しない（それが「マイページ分裂」の根因そのもの）。
+ *   信頼境界は順引きと同一（X-API-Key を持つサーバのみ）。
+ */
+export type LineUserLinkage = {
+  /** 有効な連携行があるか。 */
+  linked: boolean;
+  /** 連携先の Shopify 顧客 ID（数値文字列）。未連携・曖昧なら null。 */
+  shopifyCustomerId: string | null;
+  /** 連携日時（ISO 8601）。無ければ null。 */
+  linkedAt: string | null;
+  /** ヒットした有効行の件数。0 / 1 が正常。2 以上は台帳の異常（下記）。 */
+  count: number;
+};
+
+export type LineUserLinkageResult =
+  | { ok: true; linkage: LineUserLinkage }
+  | { ok: false; error: string };
+
+/**
+ * LINE userId から「今有効な」連携先 Shopify 顧客を引く（本人解決の逆引き）。
+ *
+ * ## なぜ必要か
+ *   web-app の `resolveIdentity` は、LINE セッションのとき `users/line:{lineUserId}` という
+ *   別の棚に解決し、連携台帳を一切見ていなかった。そのため「連携済みなのに、メールで
+ *   ログインしたときと LINE でログインしたときで別のマイページが見える」。本関数はその
+ *   欠陥を塞ぐための読み取り口で、**新しい台帳は作らず既存 customer_linkages を逆から引く**。
+ *
+ * ## 「連携済み」の定義（順引き getLinkageStatus と同一に揃える）
+ *   `line_user_id = 指定 ID` かつ `unfollowed_at IS NULL` かつ `shopify_customer_id IS NOT NULL`。
+ *   - `clearCustomerLinkage`（解除）は `shopify_customer_id` を null にするので、解除後は
+ *     ここで自動的にヒットしなくなる（＝解除が本人解決に即座に効く）。
+ *   - `unfollowed_at` を除外条件に含めるのは順引きと同じ。「マイページは連携済みと言うのに
+ *     配信は届かない」というズレを作らない。
+ *
+ * ## ⚠ `.single()` を使わない（罠 G-3）
+ *   `customer_linkages` は既に N:1（世帯共有）が成立しており、`.single()` は複数行で
+ *   PostgREST エラーになる。そのエラーを握り潰す既存コードは「連携済みの人を静かに
+ *   未連携に落とす」壊れ方をしている。本関数は配列で受けて件数で判断する。
+ *   line_user_id には UNIQUE があるため通常 0 / 1 件だが、**制約が将来外れても
+ *   静かに壊れない**ように 2 件以上を明示的に異常として扱う（曖昧なまま「この顧客だ」と
+ *   決めるのは、他人の注文履歴を見せる事故に直結するため fail-closed にする）。
+ *
+ * never throw（呼び出し側の SSR を落とさない）。失敗は ok:false で返す。
+ *
+ * @param lineUserId route 側で形式検証済みの LINE userId。
+ */
+export async function getLinkageByLineUser(
+  supabase: SupabaseClient,
+  lineUserId: string,
+): Promise<LineUserLinkageResult> {
+  if (!lineUserId) return { ok: false, error: "lineUserId is required" };
+
+  try {
+    const { data, error } = await supabase
+      .from("customer_linkages")
+      .select("shopify_customer_id, linked_at")
+      .eq("line_user_id", lineUserId)
+      .is("unfollowed_at", null)
+      .not("shopify_customer_id", "is", null)
+      .order("linked_at", { ascending: true, nullsFirst: false });
+
+    if (error) return { ok: false, error: error.message };
+
+    const rows = (data ?? []) as Array<{
+      shopify_customer_id?: string | null;
+      linked_at?: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      return {
+        ok: true,
+        linkage: { linked: false, shopifyCustomerId: null, linkedAt: null, count: 0 },
+      };
+    }
+
+    // 2 件以上 = 1 つの LINE が複数の Shopify 顧客を指している。どちらの棚を見せるかを
+    // 推測で決めない（fail-closed）。件数だけ返して呼び出し側に未連携と同じ扱いをさせる。
+    const distinct = new Set(rows.map((r) => String(r.shopify_customer_id)));
+    if (distinct.size > 1) {
+      console.warn(
+        `[customer-linkage] ambiguous reverse linkage: ${distinct.size} distinct customers for one LINE user`,
+      );
+      return {
+        ok: true,
+        linkage: {
+          linked: false,
+          shopifyCustomerId: null,
+          linkedAt: null,
+          count: rows.length,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      linkage: {
+        linked: true,
+        shopifyCustomerId: String(rows[0].shopify_customer_id),
+        linkedAt: rows.find((r) => !!r.linked_at)?.linked_at ?? null,
+        count: rows.length,
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** 顧客に紐づく LINE userId 一覧の取得結果。 */
+export type LinkedLineUserIdsResult =
+  | { ok: true; lineUserIds: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Shopify 顧客に紐づく「今有効な」LINE userId を列挙する（解除の対象決定に使う内部関数）。
+ *
+ * ⚠ 戻り値は **cx-agent の内部にとどめる**。HTTP 応答に載せてはならない
+ *   （web-app に LINE の生 ID を渡さない約束・P1 QA 要件 3）。解除ハンドラはこの一覧を
+ *   使って `clearCustomerLinkage` を呼び、外へは件数だけを返す。
+ *
+ * ⚠ `.single()` を使わない（罠 G-3）。N:1（世帯共有）で複数行が正常。
+ *
+ * never throw。失敗は ok:false。
+ */
+export async function listLinkedLineUserIds(
+  supabase: SupabaseClient,
+  shopifyCustomerId: string,
+): Promise<LinkedLineUserIdsResult> {
+  if (!shopifyCustomerId) {
+    return { ok: false, error: "shopifyCustomerId is required" };
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("customer_linkages")
+      .select("line_user_id")
+      .eq("shopify_customer_id", shopifyCustomerId);
+
+    if (error) return { ok: false, error: error.message };
+
+    const rows = (data ?? []) as Array<{ line_user_id?: string | null }>;
+    const ids = rows
+      .map((r) => r.line_user_id)
+      .filter((v): v is string => typeof v === "string" && v.length > 0);
+
+    return { ok: true, lineUserIds: ids };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** 解除対象の決定結果。 */
+export type UnlinkTargetResult =
+  | { ok: true; targets: string[] }
+  | { ok: false; error: "line_user_id is not linked to this customer" };
+
+/**
+ * 解除の対象を決める純関数（route が HTTP に翻訳する前の判断）。
+ *
+ * N:1（世帯共有・migration 027）では 1 顧客に複数の LINE が紐づく。
+ *   - `requested` 省略 … その顧客の連携をすべて外す。
+ *   - `requested` 指定 … その 1 件だけ外す。ただし **その ID が当の顧客に紐づいて
+ *     いることを先に確かめる**。確かめずに通すと、他人の LINE の連携を自分の
+ *     顧客 ID で外せてしまう（所有権の確認が無い解除は、他人への嫌がらせ経路になる）。
+ *
+ * DB にも HTTP にも触れないので、この判断だけを単体で固定できる。
+ */
+export function resolveUnlinkTargets(
+  linkedLineUserIds: string[],
+  requested?: string,
+): UnlinkTargetResult {
+  if (requested === undefined) {
+    return { ok: true, targets: linkedLineUserIds };
+  }
+  if (!linkedLineUserIds.includes(requested)) {
+    return { ok: false, error: "line_user_id is not linked to this customer" };
+  }
+  return { ok: true, targets: [requested] };
+}
