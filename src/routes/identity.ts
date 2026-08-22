@@ -423,8 +423,17 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
  *   （転送すると他人の連携状態を覗ける）。cx-agent 側では検証できないため web-app 側の責務。
  *
  * 返す情報（QA 要件 3・最小開示）:
- *   連携の有無 + 最小メタ（いつからか・件数）だけ。**line_user_id の生値は返さない**。
- *   getLinkageStatus が select を linked_at のみに絞っており、戻り値の型にも生 ID が無い。
+ *   連携の有無 + 最小メタ（いつからか・件数・今届くか）だけ。**line_user_id の生値は返さない**。
+ *   getLinkageStatus は select を `linked_at, unfollowed_at` に絞っており、戻り値の型にも生 ID が無い。
+ *
+ * ## `unfollowed` — 連携可否と配信可否を分けて返す（P4・2026-08-22）
+ *
+ * `linked` は「結び付いているか」、`unfollowed` は「今この LINE に届くか」。
+ * 以前は連携判定に `unfollowed_at IS NULL` が混ざっていたため、**LINE 公式アカウントを
+ * ブロックしただけのお客さまが「未連携」として返り**、web-app 側の本人解決が空の
+ * `line:` 棚に落ちていた（お気に入り・行動ログが消えたように見える）。
+ * ブロックは配信の意思表示であって連携の取り消しではない。連携が外れる経路は
+ * `POST /api/identity/unlink`（解除）だけ、が P4 後の不変条件。
  *
  * ## 逆引き（line_user_id 指定）— 本人解決の分裂を塞ぐために追加した第 2 の引き方
  *
@@ -450,8 +459,8 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
  *   状態の**読み取り**だけ。解除は別ハンドラ（`identityUnlinkHandler`）。
  *
  * レスポンス:
- *   順引き: { linked: boolean, linkedAt: string | null, count: number }
- *   逆引き: { linked: boolean, linkedAt: string | null, count: number,
+ *   順引き: { linked: boolean, linkedAt: string | null, count: number, unfollowed: boolean }
+ *   逆引き: { linked: boolean, linkedAt: string | null, count: number, unfollowed: boolean,
  *             shopify_customer_id: string | null }
  */
 export async function identityLinkageStatusHandler(
@@ -491,6 +500,8 @@ export async function identityLinkageStatusHandler(
       linked: reverse.linkage.linked,
       linkedAt: reverse.linkage.linkedAt,
       count: reverse.linkage.count,
+      /* 連携はあるが今は届かない（ブロック / 友だち解除）。連携の有無とは別の事実（P4）。 */
+      unfollowed: reverse.linkage.unfollowed,
       shopify_customer_id: reverse.linkage.shopifyCustomerId,
     });
   }
@@ -512,6 +523,7 @@ export async function identityLinkageStatusHandler(
     linked: result.status.linked,
     linkedAt: result.status.linkedAt,
     count: result.status.count,
+    unfollowed: result.status.unfollowed,
   });
 }
 

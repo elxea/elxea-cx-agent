@@ -4,9 +4,11 @@
  * 検証対象:
  *   1. 認証ゲート（SYNC_API_SECRET）— 未指定 / 不一致 / サーバ側 secret 未設定 → 401（fail-closed）
  *   2. 入力検証 — shopify_customer_id 欠落 / 非数値 → 400
- *   3. 判定ロジック（getLinkageStatus）— unfollowed_at IS NULL の行が 1 件以上で linked=true、
+ *   3. 判定ロジック（getLinkageStatus）— 連携行が 1 件以上で linked=true、
  *      N:1（世帯共有）で count が増える、最古の linked_at を返す
  *   4. 最小開示 — クエリが line_user_id を select しない / 応答に生 ID が現れない（QA 要件 3）
+ *   5. 連携可否と配信可否の分離（P4・2026-08-22）— ブロック（unfollowed_at）で連携が
+ *      消えない。順引き・逆引きの両方で linked=true のまま unfollowed=true が付く
  *
  * 実 Supabase / 実ネットワークには触れない。認証・検証段は Supabase 到達より前に return するため
  * mock Context だけで確認でき、判定ロジックは mock SupabaseClient で行を差し替えて観測する。
@@ -19,7 +21,10 @@ import type { Context } from "hono";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../../src/index";
 import { identityLinkageStatusHandler } from "../../src/routes/identity";
-import { getLinkageStatus } from "../../src/lib/customer-linkage";
+import {
+  getLinkageStatus,
+  getLinkageByLineUser,
+} from "../../src/lib/customer-linkage";
 
 // ---------------------------------------------------------------------------
 // テストハーネス（外部依存なし・async 対応）
@@ -98,10 +103,19 @@ type SelectCall = {
   columns: string;
   eq: Array<[string, unknown]>;
   is: Array<[string, unknown]>;
+  not: Array<[string, string, unknown]>;
+};
+
+/** 行の形は順引き（linked_at / unfollowed_at）と逆引き（+ shopify_customer_id）の和集合。 */
+type MockRow = {
+  linked_at?: string | null;
+  unfollowed_at?: string | null;
+  shopify_customer_id?: string | null;
+  line_user_id?: string;
 };
 
 function makeMockSupabase(
-  rows: Array<{ linked_at?: string | null }>,
+  rows: MockRow[],
   errorMessage: string | null = null,
 ): { client: SupabaseClient; calls: SelectCall[] } {
   const calls: SelectCall[] = [];
@@ -109,7 +123,7 @@ function makeMockSupabase(
     from(table: string) {
       return {
         select(columns: string) {
-          const call: SelectCall = { table, columns, eq: [], is: [] };
+          const call: SelectCall = { table, columns, eq: [], is: [], not: [] };
           calls.push(call);
           const builder = {
             eq(column: string, value: unknown) {
@@ -118,6 +132,10 @@ function makeMockSupabase(
             },
             is(column: string, value: unknown) {
               call.is.push([column, value]);
+              return builder;
+            },
+            not(column: string, op: string, value: unknown) {
+              call.not.push([column, op, value]);
               return builder;
             },
             order() {
@@ -269,14 +287,14 @@ describe("getLinkageStatus / 連携済み判定", () => {
 // ---------------------------------------------------------------------------
 
 describe("getLinkageStatus / クエリ条件と最小開示", () => {
-  it("unfollowed_at IS NULL で絞る（QA 要件 5 の連携済み定義）", async () => {
+  it("unfollowed_at で絞らない（P4: ブロックは連携の取り消しではない）", async () => {
     const { client, calls } = makeMockSupabase([]);
     await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
     assertEqual(calls.length, 1);
     assertEqual(calls[0].table, "customer_linkages");
     assertTrue(
-      calls[0].is.some(([col, val]) => col === "unfollowed_at" && val === null),
-      "unfollowed_at IS NULL 条件がある",
+      !calls[0].is.some(([col]) => col === "unfollowed_at"),
+      "unfollowed_at IS NULL 条件が無い（連携可否と配信可否を混ぜない）",
     );
   });
 
@@ -294,7 +312,7 @@ describe("getLinkageStatus / クエリ条件と最小開示", () => {
   it("select に line_user_id を含めない（生値を DB から持ち出さない）", async () => {
     const { client, calls } = makeMockSupabase([]);
     await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
-    assertEqual(calls[0].columns, "linked_at");
+    assertEqual(calls[0].columns, "linked_at, unfollowed_at");
     assertTrue(
       !calls[0].columns.includes("line_user_id"),
       "select 句に line_user_id が無い",
@@ -314,7 +332,120 @@ describe("getLinkageStatus / クエリ条件と最小開示", () => {
       !JSON.stringify(r.status).includes(SENTINEL_LINE_ID),
       "戻り値に LINE の生 ID が現れない",
     );
-    assertEqual(Object.keys(r.status).sort().join(","), "count,linked,linkedAt");
+    assertEqual(
+      Object.keys(r.status).sort().join(","),
+      "count,linked,linkedAt,unfollowed",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. 連携可否と配信可否の分離（P4・2026-08-22 の回帰テスト）
+//
+//    本番に「連携済みだが LINE をブロック中」の行が実在し、旧実装ではその人が
+//    未連携として返っていた。ブロックしても連携は残る、を両方向で固定する。
+// ---------------------------------------------------------------------------
+
+describe("P4 / ブロック中でも連携は維持される（順引き）", () => {
+  it("unfollowed_at 入りの行 1 件 → linked=true（連携は消えない）", async () => {
+    const { client } = makeMockSupabase([
+      { linked_at: "2026-07-24T19:58:27.657Z", unfollowed_at: "2026-08-01T00:00:00.000Z" },
+    ]);
+    const r = await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.status.linked, true, "ブロックで連携が消えない");
+    assertEqual(r.status.count, 1);
+    assertEqual(r.status.linkedAt, "2026-07-24T19:58:27.657Z");
+  });
+
+  it("全行が unfollowed → unfollowed=true（届かないことは別に伝える）", async () => {
+    const { client } = makeMockSupabase([
+      { linked_at: "2026-07-24T19:58:27.657Z", unfollowed_at: "2026-08-01T00:00:00.000Z" },
+    ]);
+    const r = await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.status.unfollowed, true);
+  });
+
+  it("N:1 で 1 件でも生きていれば unfollowed=false（世帯の誰かには届く）", async () => {
+    const { client } = makeMockSupabase([
+      { linked_at: "2026-07-01T00:00:00.000Z", unfollowed_at: "2026-08-01T00:00:00.000Z" },
+      { linked_at: "2026-08-19T21:13:00.000Z", unfollowed_at: null },
+    ]);
+    const r = await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.status.linked, true);
+    assertEqual(r.status.count, 2);
+    assertEqual(r.status.unfollowed, false);
+  });
+
+  it("連携 0 件 → unfollowed=false（届かないのではなく相手がいない）", async () => {
+    const { client } = makeMockSupabase([]);
+    const r = await getLinkageStatus(client, VALID_SHOPIFY_NUMERIC);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.status.linked, false);
+    assertEqual(r.status.unfollowed, false);
+  });
+});
+
+describe("P4 / ブロック中でも連携は維持される（逆引き）", () => {
+  it("unfollowed_at 入りでも shopifyCustomerId を返す（棚が分裂しない）", async () => {
+    const { client } = makeMockSupabase([
+      {
+        shopify_customer_id: "900800400001",
+        linked_at: "2026-07-24T19:58:27.657Z",
+        unfollowed_at: "2026-08-01T00:00:00.000Z",
+      },
+    ]);
+    const r = await getLinkageByLineUser(client, SENTINEL_LINE_ID);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.linkage.linked, true, "ブロックで本人解決が切れない");
+    assertEqual(r.linkage.shopifyCustomerId, "900800400001");
+    assertEqual(r.linkage.unfollowed, true);
+  });
+
+  it("逆引きも unfollowed_at で絞らない（クエリ条件の回帰）", async () => {
+    const { client, calls } = makeMockSupabase([]);
+    await getLinkageByLineUser(client, SENTINEL_LINE_ID);
+    assertEqual(calls.length, 1);
+    assertTrue(
+      !calls[0].is.some(([col]) => col === "unfollowed_at"),
+      "unfollowed_at IS NULL 条件が無い",
+    );
+    assertTrue(
+      calls[0].not.some(
+        ([col, op, val]) => col === "shopify_customer_id" && op === "is" && val === null,
+      ),
+      "連携の有無は shopify_customer_id IS NOT NULL だけで決める",
+    );
+  });
+
+  it("解除済み（該当行なし）→ linked=false / unfollowed=false", async () => {
+    const { client } = makeMockSupabase([]);
+    const r = await getLinkageByLineUser(client, SENTINEL_LINE_ID);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.linkage.linked, false);
+    assertEqual(r.linkage.shopifyCustomerId, null);
+    assertEqual(r.linkage.unfollowed, false);
+  });
+
+  it("2 顧客に割れている → fail-closed（推測で棚を選ばない）", async () => {
+    const { client } = makeMockSupabase([
+      { shopify_customer_id: "111", linked_at: "2026-07-01T00:00:00.000Z", unfollowed_at: null },
+      { shopify_customer_id: "222", linked_at: "2026-08-01T00:00:00.000Z", unfollowed_at: null },
+    ]);
+    const r = await getLinkageByLineUser(client, SENTINEL_LINE_ID);
+    assertTrue(r.ok);
+    if (!r.ok) return;
+    assertEqual(r.linkage.linked, false);
+    assertEqual(r.linkage.shopifyCustomerId, null);
+    assertEqual(r.linkage.count, 2);
   });
 });
 
