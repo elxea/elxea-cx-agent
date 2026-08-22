@@ -11,8 +11,13 @@
  *
  * ⚠ 実送信は sender ポート（line-messages.ts の LineSender）にのみ存在する。
  *    2026-08-22 に env の実送信スイッチ（旧 sendEnabled / DELIVERY_SEND_ENABLED）は撤去した。
- *    承認・予定日時・pin 照合・通数台帳の各ガードを通った行は必ず実送信する。
+ *    承認・pin 照合・通数台帳の各ガードを通った行は必ず実送信する。
  *    プレビューしたい場合はテストと同じく noopSender を注入する（runtime 経路には存在しない）。
+ *
+ * ⚠ 2026-08-22（完全オンデマンド化・Setaka 指示）: **配信予定日時は送信条件ではない**。
+ *    この 1 巡は `POST /api/delivery/run` を叩いたときにだけ走る（cron 自動配信は廃止）。
+ *    運用者が明示的に回した以上、Approved の行は予定日時が未来でも空でも送る
+ *    （「承認済み＝送る準備ができている」）。予定日時は記録用メモとして残るだけ。
  *
  * 依存はすべて注入（repo/ledger/consumption/resolveTargets/sender/clock/flags）で、
  * ユニットテストは fake でネットワーク非接触に順序と分岐を検証する。
@@ -29,7 +34,6 @@ import type { DeliveryPage, DeliveryResult } from "./delivery-repository";
 import type { AudienceSpec } from "./delivery-audience";
 import { parseAudience, audienceLabel } from "./delivery-audience";
 import { buildAggregationUnit, isValidAggregationUnit } from "./aggregation-unit";
-import { evaluateScheduledTime } from "./delivery-time";
 import { isApprovalAuthorized } from "./delivery-approval";
 import { computeContentHash, hashesMatch } from "./content-hash";
 import { buildMessages, type LineSender, type LineMessage } from "./line-messages";
@@ -41,7 +45,8 @@ import type { ResolvedTargets } from "./target-resolver";
 
 /** Notion 配信 DB への操作ポート（テストは fake、runtime は delivery-repository を配線）。 */
 export interface DeliveryRepoPort {
-  queryDue(nowIso: string): Promise<DeliveryPage[]>;
+  /** Status=Approved かつ未送信の行。予定日時は条件に含めない（2026-08-22 完全オンデマンド化）。 */
+  queryApproved(): Promise<DeliveryPage[]>;
   querySending(): Promise<DeliveryPage[]>;
   setStatus(pageId: string, status: string): Promise<void>;
   writeResult(pageId: string, result: DeliveryResult): Promise<void>;
@@ -106,8 +111,8 @@ const DEFAULT_REAPER_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * 配信を 1 巡実行する。設計 §5 の順序を厳守:
- *   1. 対象抽出（repo.queryDue: Approved & <=now & 未送信）
- *   2. 各ページ: 入力/日時/自己承認/pinning を検証（fail-closed）
+ *   1. 対象抽出（repo.queryApproved: Approved & 未送信。予定日時は見ない）
+ *   2. 各ページ: 入力/自己承認/pinning を検証（fail-closed）
  *   3. 対象解決 → 見積件数
  *   4. 通数ガード + 台帳 claim（guardAndClaim = 真の排他 + 会計）
  *   5. Sending マーク → 送信 → 結果書戻し
@@ -125,7 +130,7 @@ export async function runDeliveryOnce(
 
   let due: DeliveryPage[] = [];
   try {
-    due = await deps.repo.queryDue(nowIso);
+    due = await deps.repo.queryApproved();
   } catch (err) {
     // 取得できなければ何もしない（fail-closed）。reaper だけ試みる。
     const reaper = await runReaper(deps, now).catch(() => [] as ReaperOutcome[]);
@@ -137,7 +142,7 @@ export async function runDeliveryOnce(
           title: "-",
           audience: null,
           disposition: "failed",
-          reason: `queryDue 失敗: ${err instanceof Error ? err.message : String(err)}`,
+          reason: `queryApproved 失敗: ${err instanceof Error ? err.message : String(err)}`,
           recipients: 0,
         },
       ],
@@ -188,10 +193,11 @@ async function processPage(
   const audience: AudienceSpec | null = parseAudience(page.audienceRaw);
   if (!audience) return skip(page, "配信対象が空/未知（fail-closed）");
 
-  // (b) 日時の厳格化（date-only/空/不正は送信不可。未来は due:false）。
-  const sched = evaluateScheduledTime(page.scheduledStart, now);
-  if (!sched.sendable) return skip(page, `配信予定日時が不正: ${sched.reason}`);
-  if (!sched.due) return skip(page, "配信予定日時がまだ未来");
+  // (b) 【廃止】配信予定日時ゲート（2026-08-22 完全オンデマンド化・Setaka 指示）。
+  //     以前はここで evaluateScheduledTime により「時刻付きで存在し、到来していること」を
+  //     必須にしていた。cron 自動配信を廃止し、運用者が明示的に回したときだけ走るように
+  //     なったため、予定日時は送信条件から外した（Approved なら未来でも空でも送る）。
+  //     page.scheduledStart は運用者の記録用メモとして DeliveryPage に残るが、参照しない。
 
   // (c) 自己承認検知（承認者 != 著者）。独立承認者ゼロは送信不可。
   //     allowSelfApproval=true（test 緩和時のみ）は独立性を免除（承認者の存在は必須）。

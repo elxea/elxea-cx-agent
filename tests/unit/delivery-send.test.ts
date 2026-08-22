@@ -4,7 +4,7 @@
  * 送信は全て mock/stub でネットワーク非接触。実 LINE / 実 Notion / 実 Supabase には触れない。
  * 検証範囲:
  *   - 配信対象の日本語↔enum 変換（parseAudience）
- *   - 配信予定日時の厳格化（missing/date_only/invalid/future/due）
+ *   - 予定日時は送信条件ではないこと（2026-08-22 完全オンデマンド化。未来/空/date-only でも送る）
  *   - コンテンツ pinning ハッシュ（一致/編集で不一致/スナップショット欠如）
  *   - 承認者!=著者（自己承認検知）
  *   - メッセージ組み立て（text 空 / image 非HTTPS・Notion署名URL 拒否）
@@ -47,7 +47,6 @@ function assertFalse(value: boolean, label = "") {
 // 対象
 // ---------------------------------------------------------------------------
 import { parseAudience, audienceLabel } from "../../src/lib/delivery-audience";
-import { evaluateScheduledTime } from "../../src/lib/delivery-time";
 import { computeContentHash, hashesMatch } from "../../src/lib/content-hash";
 import {
   hasIndependentApprover,
@@ -98,10 +97,10 @@ import {
   type R2Config,
 } from "../../src/lib/image-ingest";
 import {
-  pinDueApprovals,
-  runScheduledDeliveryWith,
+  pinApprovedRows,
+  runOnDemandDeliveryWith,
   type PinApprovalResult,
-  type ScheduledDeliveryDeps,
+  type OnDemandDeliveryDeps,
 } from "../../src/lib/delivery-runtime";
 import type { DeliveryPage } from "../../src/lib/delivery-repository";
 import {
@@ -151,42 +150,12 @@ describe("parseAudience（配信対象 日本語↔enum）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// evaluateScheduledTime（TZ 厳格化）
+// 【廃止】evaluateScheduledTime（配信予定日時ゲート）
 // ---------------------------------------------------------------------------
-describe("evaluateScheduledTime（日時厳格化）", () => {
-  const now = new Date("2026-07-10T05:00:00Z");
-  it("空/null は missing（送信不可）", () => {
-    const d = evaluateScheduledTime(null, now);
-    assertTrue(!d.sendable && d.reason === "missing", "missing");
-  });
-  it("date-only（時刻なし）は date_only（送信不可）", () => {
-    const d = evaluateScheduledTime("2026-07-10", now);
-    assertTrue(!d.sendable && d.reason === "date_only", "date_only");
-  });
-  it("パース不能は invalid（送信不可）", () => {
-    const d = evaluateScheduledTime("not-a-date", now);
-    assertTrue(!d.sendable && d.reason === "invalid", "invalid");
-  });
-  it("過去 datetime は sendable && due", () => {
-    const d = evaluateScheduledTime("2026-07-10T04:00:00Z", now);
-    assertTrue(d.sendable, "sendable");
-    if (d.sendable) assertTrue(d.due, "due");
-  });
-  it("未来 datetime は sendable だが due=false（エラーではない）", () => {
-    const d = evaluateScheduledTime("2026-07-10T06:00:00Z", now);
-    assertTrue(d.sendable, "sendable");
-    if (d.sendable) assertFalse(d.due, "not due");
-  });
-  it("JST オフセット付き（06:00+09:00 = 21:00 UTC 前日）を UTC 正規化する", () => {
-    // 2026-07-10T06:00:00+09:00 = 2026-07-09T21:00:00Z（now=07-10 05:00Z より過去 → due）
-    const d = evaluateScheduledTime("2026-07-10T06:00:00+09:00", now);
-    assertTrue(d.sendable, "sendable");
-    if (d.sendable) {
-      assertEqual(d.sendAtUtc, "2026-07-09T21:00:00.000Z", "UTC 正規化");
-      assertTrue(d.due, "due");
-    }
-  });
-});
+// 2026-08-22 完全オンデマンド化（Setaka 指示）に伴い src/lib/delivery-time.ts ごと削除した。
+// 配信予定日時は送信条件ではなくなったため、日時厳格化のテストも存在理由を失っている。
+// 「予定日時に関わらず Approved なら送る」ことの検証は
+// describe("runDeliveryOnce: 予定日時は送信条件ではない（完全オンデマンド化）") に移した。
 
 // ---------------------------------------------------------------------------
 // content-hash（pinning）
@@ -997,7 +966,7 @@ describe("image-ingest: ingestPageImages（fetch 注入・実 R2/LINE 非接触�
 // ---------------------------------------------------------------------------
 import {
   normalizeDeliveryPage,
-  queryDueDeliveries,
+  queryApprovedDeliveries,
   writeDeliveryResult,
   pinApproval,
   resetApproval as repoResetApproval,
@@ -1161,8 +1130,8 @@ describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
   });
 });
 
-describe("queryDueDeliveries（フィルタ組み立て）", () => {
-  it("Approved AND 未送信 AND 予定<=now のフィルタを送る", async () => {
+describe("queryApprovedDeliveries（フィルタ組み立て・完全オンデマンド化）", () => {
+  it("Approved AND 未送信 の 2 条件だけを送る（予定日時は条件に入れない）", async () => {
     let captured: Record<string, unknown> | undefined;
     const req: NotionRequest = async (path, method, body) => {
       captured = body;
@@ -1170,9 +1139,9 @@ describe("queryDueDeliveries（フィルタ組み立て）", () => {
       assertEqual(method, "POST", "POST");
       return { results: [], has_more: false };
     };
-    await queryDueDeliveries(req, "2026-07-10T05:00:00Z", "db-1");
+    await queryApprovedDeliveries(req, "db-1");
     const filter = (captured as { filter: { and: Array<Record<string, unknown>> } }).filter;
-    assertEqual(filter.and.length, 3, "3 条件");
+    assertEqual(filter.and.length, 2, "2 条件");
     // Status は Notion select 型（status 型では 400 になる）。select フィルタであることを固定。
     const statusCond = filter.and.find(
       (c) => (c as { property?: string }).property === DELIVERY_PROPS.status,
@@ -1180,6 +1149,16 @@ describe("queryDueDeliveries（フィルタ組み立て）", () => {
     assertTrue(!!statusCond?.select, "Status は select フィルタ");
     assertEqual(statusCond?.select?.equals, "Approved", "Approved");
     assertTrue(statusCond?.status === undefined, "status 型フィルタは使わない");
+    // 未送信（送信済み != true）は再送防止の要。必ず残っていること。
+    const sentCond = filter.and.find(
+      (c) => (c as { property?: string }).property === DELIVERY_PROPS.sent,
+    ) as { checkbox?: { equals?: boolean } } | undefined;
+    assertTrue(sentCond?.checkbox?.equals === false, "送信済み=false（再送防止）");
+    // 予定日時（date）条件が残っていないこと = オンデマンド化のリグレッションガード。
+    const schedCond = filter.and.find(
+      (c) => (c as { property?: string }).property === DELIVERY_PROPS.scheduled,
+    );
+    assertTrue(schedCond === undefined, "配信予定日時は絞り込み条件に入れない");
   });
 });
 
@@ -1259,8 +1238,8 @@ function makeFakeRepo(pages: DeliveryPage[]): DeliveryRepoPort & {
     statuses,
     results,
     resets,
-    async queryDue() {
-      calls.push("queryDue");
+    async queryApproved() {
+      calls.push("queryApproved");
       return pages;
     },
     async querySending() {
@@ -1441,7 +1420,7 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
     };
     const calls: string[] = [];
     const repo: DeliveryRepoPort = {
-      async queryDue() {
+      async queryApproved() {
         return [];
       },
       async querySending() {
@@ -1495,13 +1474,6 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
     assertEqual(res.processed[0].disposition, "skipped", "skipped");
     assertTrue(res.processed[0].reason.includes("自己承認"), "自己承認理由");
   });
-  it("未来の配信予定日時は送信しない", async () => {
-    const page = await makePage({ scheduledStart: "2026-07-10T06:00:00Z" });
-    const sender = createRecordingSender();
-    const res = await runDeliveryOnce(baseDeps({ repo: makeFakeRepo([page]), sender }));
-    assertEqual(sender.calls.length, 0, "無送信");
-    assertTrue(res.processed[0].reason.includes("未来"), "未来理由");
-  });
   it("配信対象が空は送信しない（fail-closed）", async () => {
     const page = await makePage({ audienceRaw: null });
     const sender = createRecordingSender();
@@ -1514,6 +1486,54 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
     const res = await runDeliveryOnce(baseDeps({ repo: makeFakeRepo([page]), sender }));
     assertEqual(sender.calls.length, 0, "無送信");
     assertEqual(res.processed[0].disposition, "skipped", "skipped");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 完全オンデマンド化（2026-08-22・Setaka 指示）: 予定日時は送信条件ではない
+// ---------------------------------------------------------------------------
+// 意図: 運用者が明示的に「配信して」と回した以上、Approved の行は予定日時の状態に
+//   関わらず送る（「承認済み＝送る準備ができている」）。
+//   旧仕様（未来なら送らない / date-only・空なら送信不可）のリグレッションを防ぐ。
+describe("runDeliveryOnce: 予定日時は送信条件ではない（完全オンデマンド化）", () => {
+  // now = 2026-07-10T05:00:00Z（baseDeps 既定）。以下はいずれも旧仕様では送信不可だった。
+  const notSendableUnderOldRule: Array<[string, string | null]> = [
+    ["未来の予定日時", "2026-07-10T06:00:00Z"],
+    ["予定日時が空（null）", null],
+    ["date-only（時刻なし）", "2026-07-10"],
+    ["パース不能な文字列", "not-a-date"],
+  ];
+
+  for (const [label, scheduledStart] of notSendableUnderOldRule) {
+    it(`${label} でも Approved なら送る`, async () => {
+      const page = await makePage({ scheduledStart });
+      const sender = createRecordingSender();
+      const res = await runDeliveryOnce(
+        baseDeps({ repo: makeFakeRepo([page]), sender }),
+      );
+      assertEqual(res.processed[0].disposition, "sent", `${label}: sent`);
+      assertEqual(sender.calls.length, 1, `${label}: 実送信 1 回`);
+    });
+  }
+
+  it("予定日時が未来でも、送信済みの行は再送しない（冪等は維持）", async () => {
+    const page = await makePage({ scheduledStart: "2026-07-10T06:00:00Z", sent: true });
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(baseDeps({ repo: makeFakeRepo([page]), sender }));
+    assertEqual(sender.calls.length, 0, "無送信");
+    assertEqual(res.processed[0].disposition, "skipped", "skipped");
+  });
+
+  it("予定日時が空でも、承認後に本文が改変されていれば送らず承認リセット", async () => {
+    // pin 済みハッシュは「元の本文」で作り、page.body だけ差し替える（承認後編集の再現）。
+    const page = await makePage({ scheduledStart: null });
+    const tampered: DeliveryPage = { ...page, body: "承認後に書き換えた本文" };
+    const repo = makeFakeRepo([tampered]);
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(baseDeps({ repo, sender }));
+    assertEqual(sender.calls.length, 0, "無送信");
+    assertEqual(res.processed[0].disposition, "reset", "reset");
+    assertEqual(repo.resets.length, 1, "承認リセットが 1 回走る");
   });
 });
 
@@ -1878,9 +1898,9 @@ describe("describeBlockingImages（平易な日本語・画像番号1始まり�
 });
 
 // ---------------------------------------------------------------------------
-// cron ポーリング phase1: pinDueApprovals（承認pin 前処理・fail-closed）
+// cron ポーリング phase1: pinApprovedRows（承認pin 前処理・fail-closed）
 // ---------------------------------------------------------------------------
-describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fail-closed）", () => {
+describe("pinApprovedRows（Approved行を拾って承認pin・冪等・HEIC fail-closed）", () => {
   function makeDeps(
     pages: Array<{ id: string; contentHash: string | null }>,
     pinResults: Record<string, PinApprovalResult>,
@@ -1889,8 +1909,8 @@ describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fai
     const resets: Array<{ id: string; reason: string }> = [];
     const cleared: string[] = [];
     const deps = {
-      queryDue: async (_iso: string) => {
-        log.push("queryDue");
+      queryApproved: async () => {
+        log.push("queryApproved");
         return pages;
       },
       pin: async (id: string): Promise<PinApprovalResult> => {
@@ -1905,7 +1925,6 @@ describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fai
         log.push(`clear:${id}`);
         cleared.push(id);
       },
-      now: () => new Date("2026-07-10T05:00:00Z"),
     };
     return { deps, log, resets, cleared };
   }
@@ -1914,7 +1933,7 @@ describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fai
     const { deps, log, cleared } = makeDeps([{ id: "p1", contentHash: null }], {
       p1: { ok: true, contentHash: "h" },
     });
-    const out = await pinDueApprovals(deps);
+    const out = await pinApprovedRows(deps);
     assertEqual(out[0].action, "pinned", "pinned");
     assertTrue(log.includes("pin:p1"), "pin を呼ぶ");
     assertTrue(cleared.includes("p1"), "成功でエラー詳細クリア");
@@ -1922,7 +1941,7 @@ describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fai
 
   it("既に pin 済み（ハッシュあり）は pin を呼ばない（二重pinしない・冪等）", async () => {
     const { deps, log } = makeDeps([{ id: "p1", contentHash: "already" }], {});
-    const out = await pinDueApprovals(deps);
+    const out = await pinApprovedRows(deps);
     assertEqual(out[0].action, "already_pinned", "skip");
     assertFalse(log.includes("pin:p1"), "pin 未呼び出し");
   });
@@ -1933,32 +1952,31 @@ describe("pinDueApprovals（Approved行を拾って承認pin・冪等・HEIC fai
     const { deps, resets } = makeDeps([{ id: "p1", contentHash: null }], {
       p1: { ok: false, reason },
     });
-    const out = await pinDueApprovals(deps);
+    const out = await pinApprovedRows(deps);
     assertEqual(out[0].action, "reset_failed", "fail-closed");
     assertEqual(resets[0].id, "p1", "reset 対象");
     assertEqual(resets[0].reason, reason, "エラー詳細に平易な理由");
   });
 
-  it("queryDue 失敗は空を返す（fail-closed・本処理側に委ねる）", async () => {
-    const out = await pinDueApprovals({
-      queryDue: async () => {
+  it("queryApproved 失敗は空を返す（fail-closed・本処理側に委ねる）", async () => {
+    const out = await pinApprovedRows({
+      queryApproved: async () => {
         throw new Error("notion down");
       },
       pin: async () => ({ ok: true as const, contentHash: "h" }),
       resetApproval: async () => {},
       clearError: async () => {},
-      now: () => new Date("2026-07-10T05:00:00Z"),
     });
     assertEqual(out.length, 0, "空");
   });
 });
 
-describe("runScheduledDeliveryWith（承認pin前処理 → runDelivery の順・cronポーリング配線）", () => {
+describe("runOnDemandDeliveryWith（承認pin前処理 → runDelivery の順・オンデマンド配線）", () => {
   it("pin フェーズ完了後に run を呼ぶ（pin→run 順）", async () => {
     const log: string[] = [];
-    const deps: ScheduledDeliveryDeps = {
-      queryDue: async () => {
-        log.push("queryDue");
+    const deps: OnDemandDeliveryDeps = {
+      queryApproved: async () => {
+        log.push("queryApproved");
         return [{ id: "p1", contentHash: null }];
       },
       pin: async (id) => {
@@ -1971,13 +1989,12 @@ describe("runScheduledDeliveryWith（承認pin前処理 → runDelivery の順�
       clearError: async (id) => {
         log.push(`clear:${id}`);
       },
-      now: () => new Date("2026-07-10T05:00:00Z"),
       run: async () => {
         log.push("run");
         return { scanned: 1, processed: [], reaper: [] };
       },
     };
-    const res = await runScheduledDeliveryWith(deps);
+    const res = await runOnDemandDeliveryWith(deps);
     assertTrue(
       log.indexOf("pin:p1") >= 0 && log.indexOf("run") > log.indexOf("pin:p1"),
       "pin→run 順",
@@ -1988,8 +2005,8 @@ describe("runScheduledDeliveryWith（承認pin前処理 → runDelivery の順�
 
   it("HEIC で pin 失敗しても run は走る（他行のため）・実送信は run 実装のガードに委ねる", async () => {
     const log: string[] = [];
-    const deps: ScheduledDeliveryDeps = {
-      queryDue: async () => [{ id: "bad", contentHash: null }],
+    const deps: OnDemandDeliveryDeps = {
+      queryApproved: async () => [{ id: "bad", contentHash: null }],
       pin: async () => ({
         ok: false,
         reason: "画像1がLINEで表示できない形式です（image/heic）。JPEG か PNG にしてください。",
@@ -1998,13 +2015,12 @@ describe("runScheduledDeliveryWith（承認pin前処理 → runDelivery の順�
         log.push(`reset:${id}`);
       },
       clearError: async () => {},
-      now: () => new Date("2026-07-10T05:00:00Z"),
       run: async () => {
         log.push("run");
         return { scanned: 0, processed: [], reaper: [] };
       },
     };
-    const res = await runScheduledDeliveryWith(deps);
+    const res = await runOnDemandDeliveryWith(deps);
     assertEqual(res.pinPass[0].action, "reset_failed", "HEIC は承認通さず fail-closed");
     assertTrue(log.includes("reset:bad"), "エラー詳細記録（reset）");
     assertTrue(log.includes("run"), "pin失敗でも run は継続");

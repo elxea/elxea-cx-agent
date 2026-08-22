@@ -139,7 +139,6 @@ const LIB_RULES: Record<string, { layer: Layer; why: string }> = {
   "utils.ts": { layer: "shared", why: "汎用ユーティリティ" },
   "alerts.ts": { layer: "shared", why: "運用アラート通知" },
   "cron-routing.ts": { layer: "shared", why: "定期実行のルーティング" },
-  "delivery-time.ts": { layer: "shared", why: "配信時刻の計算" },
   "delivery-channel.ts": { layer: "shared", why: "配信先環境の判定" },
   "delivery-runtime.ts": { layer: "shared", why: "配信実行の共通ランタイム" },
   "delivery-approval.ts": { layer: "shared", why: "配信承認ゲート（安全装置）" },
