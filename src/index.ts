@@ -36,8 +36,9 @@ import { erasePerson } from "./lib/roji-erasure";
  * 配信用 cron パターン（誤発火防止のため明示分岐で判定）。
  * wrangler.toml [triggers] crons に登録済み（15分毎）。scheduled ハンドラはこの
  * パターンのときだけ runScheduledDelivery（承認 pin 前処理 → 配信）を実行する。
- * ⚠ 実送信は runDelivery 内の DELIVERY_SEND_ENABLED!="true" ガードで既定 dry-run。
- *   cron が回っても DELIVERY_SEND_ENABLED を "true" にしない限り LINE には送らない。
+ * ⚠ 承認済み・予定時刻到来の行は cron が拾って実送信する（env の実送信スイッチは 2026-08-22 に撤去）。
+ *   配信を止めたいときは個別に Status を Draft へ戻すか、この cron トリガ自体を止める
+ *   （docs/deploy-runbook.md「配信を止める」節）。
  */
 // ⚠ 非 export（module-level const）。Workers ランタイムはエントリの named export を
 //   すべてハンドラとして解釈するため、文字列の named export は起動を壊す
@@ -72,8 +73,9 @@ export type Env = {
    *   Account Link は LINE Login チャネル不要のため、本番 OA と LIFF が別プロバイダでも成立する。
    */
   ACCOUNT_LINK_ENTRY_URL?: string;
-  /** 実送信の許可フラグ。"true" のときのみ実送信。既定 false（dry-run）。 */
-  DELIVERY_SEND_ENABLED?: string;
+  // 【廃止】DELIVERY_SEND_ENABLED（LINE 一斉配信の実送信スイッチ）は 2026-08-22 に撤去した。
+  //   承認済み・予定時刻到来の行は staging / 本番のどちらでも常に実送信される。
+  //   ※ Cloudflare 側に残っている同名 secret は無害（コードがどこからも読まない）。
   /**
    * prod 限定の自己承認緩和フラグ（Tier2 一時例外・Setaka 明示承認 2026-07-25）。
    * "true" のときだけ prod でも「承認者!=著者」の独立性を免除する（自己承認を許容）。
@@ -84,7 +86,7 @@ export type Env = {
   /**
    * 休眠一通（ブロック3-B）の実送信許可フラグ。"true" のときのみ実送信。
    * 既定 未設定=false（dry-run: 候補と本文を台帳へ記録するだけで LINE には送らない）。
-   * DELIVERY_SEND_ENABLED とは独立（休眠機能だけを別ゲートで制御する）。
+   * Notion 駆動の一斉配信とは独立（休眠機能だけを別ゲートで制御する。一斉配信側のスイッチは廃止済み）。
    */
   DORMANT_SEND_ENABLED?: string;
   /** 休眠判定のしきい値（日）。未設定・不正は既定 60（dormant-reengagement.DEFAULT_DORMANT_THRESHOLD_DAYS）。 */
@@ -450,7 +452,7 @@ app.post("/api/delivery/approve", async (c) => {
 /**
  * 配信 手動トリガ API（T8）。
  * Bearer(SYNC_API_SECRET) 必須・fail-closed。冪等性は台帳 claim 経路で担保。
- * 実送信は DELIVERY_SEND_ENABLED="true" のときのみ（既定 dry-run）。cron とは独立。
+ * 承認済み・予定時刻到来の行を実送信する（env の実送信スイッチは撤去済み）。cron とは独立。
  */
 app.post("/api/delivery/run", async (c) => {
   const authHeader = c.req.header("Authorization");
@@ -478,9 +480,10 @@ app.post("/api/delivery/run", async (c) => {
     }),
   );
 
+  // 送信先 OA を明示して返す（実送信スイッチ撤去後の「どこへ送るか」の確認点）。
   return c.json({
     status: "delivery_started",
-    sendEnabled: c.env.DELIVERY_SEND_ENABLED === "true",
+    targetEnv: c.env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test",
   });
 });
 
@@ -638,7 +641,7 @@ export default {
     // Notion駆動 LINE配信 cron（誤発火防止のため else の前に明示分岐）。
     // 承認 pin 前処理 → runDelivery の順（runScheduledDelivery）。運用者は Notion で
     // Status=Approved にするだけでよい（承認 pin は cron が代行する）。
-    // ⚠ 実送信は runDelivery 内の DELIVERY_SEND_ENABLED!="true" で dry-run（既定 送らない）。
+    // ⚠ 承認済み・予定時刻到来の行はここで実送信される（実送信スイッチは撤去済み）。
     if (cronKind === "delivery") {
       ctx.waitUntil(
         runScheduledDelivery(env).then((result) => {

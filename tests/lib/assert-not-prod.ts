@@ -54,13 +54,20 @@ export function assertNoProdMarker(
   }
 }
 
-/** 実送信フラグ（DELIVERY/DORMANT_SEND_ENABLED）が立っていないか検査（実送信の芽を摘む）。 */
+/**
+ * 実送信フラグ（DORMANT/MARCHE_SEND_ENABLED）が立っていないか検査（実送信の芽を摘む）。
+ *
+ * ⚠ 2026-08-22: 一斉配信の DELIVERY_SEND_ENABLED は撤去済みのため検査対象から外した。
+ *   一斉配信の実送信は env フラグではなく「実 LINE トークン + 実 Notion 行」が揃わないと
+ *   起きないため、テストでの防波堤は assertNotProdEnv（本番マーカー検出）と
+ *   installHermeticFetch（実ネットワーク遮断）が担う。
+ */
 export function assertSendDisabled(env: Record<string, unknown>): void {
-  if (env.DELIVERY_SEND_ENABLED === "true") {
-    throw new ProdContactError("DELIVERY_SEND_ENABLED=true（実送信フラグ）はテストで禁止。");
-  }
   if (env.DORMANT_SEND_ENABLED === "true") {
     throw new ProdContactError("DORMANT_SEND_ENABLED=true（実送信フラグ）はテストで禁止。");
+  }
+  if (env.MARCHE_SEND_ENABLED === "true") {
+    throw new ProdContactError("MARCHE_SEND_ENABLED=true（実送信フラグ）はテストで禁止。");
   }
 }
 

@@ -15,7 +15,7 @@
  * 既定は **無効（外れている）**。`SALES_SURFACE_ENABLED === "true"` のときだけ有効になる。
  *   → 未設定・空・"false"・"1" などはすべて無効（fail-closed）。本番/検証で明示的に
  *     "true" を置かない限り、購入導線は AI にも顧客にも露出しない。
- *   → 既存の DELIVERY_SEND_ENABLED / ROJI_SURVEY_ENABLED と同じ「明示 opt-in」規約に揃えた。
+ *   → 既存の ROJI_SURVEY_ENABLED と同じ「明示 opt-in」規約に揃えた。
  *
  * 購入導線の受け皿（機能定義 第9節「実装時の確認事項」への回答）:
  *   購入・在庫・カートの話は **EC サイト（https://elxea.com/ja）側に寄せられる**。

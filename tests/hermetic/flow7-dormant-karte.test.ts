@@ -19,7 +19,7 @@
  *       - env に DORMANT_SEND_ENABLED を置かない＝既定 dry-run。台帳に「送るはずだった個別最適本文」を残し、
  *         LINE 送信系 API には一度も触れない（h.line.sends は空）。本番配線でも送信ゲートが握り実送信ゼロ。
  *
- * 安全: 実ネットワーク不使用（グローバルガード下）。実送信ゼロ。DORMANT_SEND_ENABLED / DELIVERY_SEND_ENABLED は
+ * 安全: 実ネットワーク不使用（グローバルガード下）。実送信ゼロ。DORMANT_SEND_ENABLED は
  *   テスト env に無い（assertSendDisabled が throw しないことも明示的に確認する）。
  */
 
@@ -172,7 +172,7 @@ describe("hermetic L1 — 動線7: 休眠再エンゲージの個別最適（監
     ).toBe("以前お好みだった緑茶に近いお茶");
   });
 
-  it("送信フラグ: テスト env は DORMANT_SEND_ENABLED / DELIVERY_SEND_ENABLED を立てない（assertSendDisabled が throw しない）", () => {
+  it("送信フラグ: テスト env は DORMANT_SEND_ENABLED を立てない（assertSendDisabled が throw しない）", () => {
     expect(() => assertSendDisabled(env as unknown as Record<string, unknown>)).not.toThrow();
   });
 

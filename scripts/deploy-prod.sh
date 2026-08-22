@@ -99,7 +99,9 @@ print_cron_warning() {
   warn "本番デプロイは cron トリガ（wrangler.toml [triggers]）を配線する。"
   cat >&2 <<'EOF'
         crons = ["*/15 * * * *", "0 18 * * *"]
-          - "*/15 * * * *": 配信 scheduled（DELIVERY_SEND_ENABLED 未設定=dry-run。実送信ゼロ）。
+          - "*/15 * * * *": 配信 scheduled。⚠ 承認済み(Status=Approved)かつ配信予定日時が
+            到来している行は **実送信される**（2026-08-22 に実送信スイッチを撤去）。
+            デプロイ前に配信 DB の Approved 行と予定日時を必ず確認すること。
           - "0 18 * * *"  : 日次同期（runBatchMetafieldSync 含む・毎日 AM3:00 JST）。
         ⚠ 初回の本番デプロイは、この日次同期を「初めて」活性化する（それまで登録 cron から
           一度も発火していなかった同期が回り始める）。同期自体は非破壊（ナレッジ同期 + metafield 書込）

@@ -10,8 +10,9 @@
  *   → pinning 照合 → 送信(stub 可) → 結果書戻し → reaper(Sending タイムアウト回収)。
  *
  * ⚠ 実送信は sender ポート（line-messages.ts の LineSender）にのみ存在する。
- *    sendEnabled=false（既定）では noopSender を注入し、実送信を発火させない。
- *    さらに書戻し/claim も readOnly ラッパで no-op にでき、prod 状態を汚さず preview 可能。
+ *    2026-08-22 に env の実送信スイッチ（旧 sendEnabled / DELIVERY_SEND_ENABLED）は撤去した。
+ *    承認・予定日時・pin 照合・通数台帳の各ガードを通った行は必ず実送信する。
+ *    プレビューしたい場合はテストと同じく noopSender を注入する（runtime 経路には存在しない）。
  *
  * 依存はすべて注入（repo/ledger/consumption/resolveTargets/sender/clock/flags）で、
  * ユニットテストは fake でネットワーク非接触に順序と分岐を検証する。
@@ -79,8 +80,6 @@ export interface OrchestratorDeps {
   resolveTargets(audience: AudienceSpec): Promise<ResolvedTargets>;
   sender: LineSender;
   now(): Date;
-  /** true のときのみ実 sender を発火。false は dry-run（sender=noop 前提）。 */
-  sendEnabled: boolean;
   /**
    * テスト環境限定の自己承認緩和（既定 false）。
    * true のとき「承認者!=著者」の独立性チェックを免除する（承認者の存在は必須のまま）。
@@ -111,7 +110,7 @@ const DEFAULT_REAPER_TIMEOUT_MS = 15 * 60 * 1000;
  *   2. 各ページ: 入力/日時/自己承認/pinning を検証（fail-closed）
  *   3. 対象解決 → 見積件数
  *   4. 通数ガード + 台帳 claim（guardAndClaim = 真の排他 + 会計）
- *   5. Sending マーク → 送信（sendEnabled のときのみ）→ 結果書戻し
+ *   5. Sending マーク → 送信 → 結果書戻し
  *   6. reaper（Sending タイムアウト回収）
  *
  * 直列処理（走行合計の前提）。1 件でも例外は握って failed に落とし、続行する。
@@ -216,7 +215,7 @@ async function processPage(
   //   2) page.imageUrls が空のときのみ、旧 env 供給ブリッジ（DELIVERY_TEST_IMAGE_URLS）に
   //      フォールバックする。ブリッジは社内テスト(allowlist)・全員(all) 限定・ペルソナには注入しない。
   //      ブリッジ画像は「送信」には使うがハッシュには含めない（従来挙動の後方互換）。
-  // 安全ガード（承認・日時・通数・DELIVERY_SEND_ENABLED）はこの経路の前後で従来どおり維持される
+  // 安全ガード（承認・日時・pin 照合・通数台帳）はこの経路の前後で従来どおり維持される
   // （buildMessages 側で合計 LINE_MAX_MESSAGES=5 以内・恒久HTTPS のみを fail-closed 検証）。
   const notionImages = page.imageUrls ?? [];
   const extraImageUrls =
@@ -277,25 +276,9 @@ async function processPage(
   }
   const estimated = targets.estimatedRecipients;
 
-  // ── dry-run（sendEnabled=false）は「非破壊プレビュー」で早期 return（QA Finding 1 修正）──
-  // ⚠ 台帳 claim / setStatus(Sending) / writeResult より **前** で返し、副作用をゼロにする。
-  //   ここより後（step g 以降）で claim・Notion 状態変更が起きるため、dry-run でそれらを
-  //   通してはならない（通すと台帳を汚し、reaper が Failed 化し、後の本番実送信を弾く）。
-  //   プレビューは「対象種別・通数見積」だけを返す（送信も予約も状態遷移もしない）。
-  if (!deps.sendEnabled) {
-    return {
-      pageId: page.id,
-      title: page.title,
-      audience: page.audienceRaw,
-      disposition: "sent",
-      reason:
-        `dry-run preview（sendEnabled=false・非破壊）: ${audienceLabel(audience)}・` +
-        `見積${estimated}・claim/Sending/送信すべて未実行`,
-      recipients: estimated,
-    };
-  }
-
-  // ==== 以降は sendEnabled=true（実送信モード）のみ到達する ====
+  // ==== 以降は実送信経路（env の実送信スイッチは 2026-08-22 に撤去） ====
+  // ここまでのガード（承認者独立性・予定日時・コンテンツ pin 照合・宛先解決）を通った行だけが
+  // 到達する。以降は台帳 claim → Sending マーク → 送信 → 結果書戻しの順で副作用が発生する。
 
   // P0-7a: 配信計測の集計単位（後付け不可）。送信時に付与しないと unit 別統計が永久に取れない。
   //   ⚠ LINE 仕様: customAggregationUnits は push / multicast のみ対応で **broadcast は非対応**。
@@ -410,10 +393,6 @@ async function runReaper(
   deps: OrchestratorDeps,
   now: Date,
 ): Promise<ReaperOutcome[]> {
-  // dry-run（sendEnabled=false）は非破壊プレビュー。reaper は Notion 状態を書き換える
-  // 回収処理（Failed 化 / Approved 戻し）なので dry-run では実行しない（QA Finding 1 の一貫性）。
-  if (!deps.sendEnabled) return [];
-
   const timeoutMs = deps.reaperTimeoutMs ?? DEFAULT_REAPER_TIMEOUT_MS;
   const month = currentLineMonth(now);
   const sending = await deps.repo.querySending();

@@ -19,7 +19,7 @@
  *       - env に MARCHE_SEND_ENABLED を置かない＝既定 dry-run。台帳に「送るはずだった本文」を残し、
  *         LINE 送信系 API には一度も触れない（h.line.sends は空）。本番配線でも送信ゲートが握り実送信ゼロ。
  *
- * 安全: 実ネットワーク不使用（グローバルガード下）。実送信ゼロ。MARCHE_SEND_ENABLED / DELIVERY_SEND_ENABLED は
+ * 安全: 実ネットワーク不使用（グローバルガード下）。実送信ゼロ。MARCHE_SEND_ENABLED は
  *   テスト env に無い（assertSendDisabled が throw しないことも明示的に確認する）。
  */
 
@@ -206,7 +206,7 @@ describe("hermetic L1 — 動線10: マルシェ活性化ナッジ（spec drift 
     expect(capped.map((x) => x.lineUserId)).toEqual([a]);
   });
 
-  it("送信フラグ: テスト env は MARCHE_SEND_ENABLED / DELIVERY_SEND_ENABLED を立てない（assertSendDisabled が throw しない）", () => {
+  it("送信フラグ: テスト env は MARCHE_SEND_ENABLED を立てない（assertSendDisabled が throw しない）", () => {
     expect(() => assertSendDisabled(env as unknown as Record<string, unknown>)).not.toThrow();
     // 活性化ゲートも OFF であることを明示（実送信の芽を摘む）。
     expect((env as unknown as Record<string, unknown>).MARCHE_SEND_ENABLED).not.toBe("true");
