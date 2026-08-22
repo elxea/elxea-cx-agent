@@ -374,18 +374,21 @@ describe("getLinkageByLineUser / 判定", () => {
     }
   });
 
-  it("解除済み・友だち解除済みを除外する条件がクエリに載っている（解除が即座に効く）", async () => {
+  it("解除済みだけを除外する条件がクエリに載っている（解除が即座に効く / P4 で友だち解除は除外しない）", async () => {
     const { client, calls } = makeMockSupabase([]);
     await getLinkageByLineUser(client, LINE_A);
     const call = calls[0];
     assertEqual(call.table, "customer_linkages");
     assertTrue(
-      call.is.some(([col, val]) => col === "unfollowed_at" && val === null),
-      "unfollowed_at IS NULL",
-    );
-    assertTrue(
       call.not.some(([col, op]) => col === "shopify_customer_id" && op === "is"),
       "shopify_customer_id IS NOT NULL（clearCustomerLinkage 後はヒットしない）",
+    );
+    /* P4（2026-08-22）: 友だち解除（ブロック）は連携の取り消しではない。ここに
+       unfollowed_at IS NULL が入っていたせいで、ブロックしただけのお客さまが
+       未連携と判定され、Web の人格が空の line: 棚に落ちていた。 */
+    assertTrue(
+      !call.is.some(([col]) => col === "unfollowed_at"),
+      "unfollowed_at では絞らない（連携可否と配信可否の分離）",
     );
   });
 

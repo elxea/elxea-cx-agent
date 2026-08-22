@@ -221,21 +221,53 @@ export async function clearCustomerLinkage(
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * 連携可否と配信可否は別の問い（2026-08-22 / P4）
+ * -------------------------------------------------------------------------
+ *
+ * この 2 つを 1 つの条件に混ぜていたのが P4 の欠陥だった。
+ *
+ *   - **連携可否** … この LINE とこの顧客は結び付いているか。
+ *     決めるのは `shopify_customer_id IS NOT NULL` **だけ**。
+ *   - **配信可否** … いまこの LINE にメッセージを送れるか。
+ *     決めるのは `unfollowed_at`（友だち解除・ブロック）と `broadcast_opted_out`（配信停止）。
+ *
+ * 以前は連携の判定にも `unfollowed_at IS NULL` を入れていたため、
+ * **お客さまが LINE 公式アカウントをブロックしただけで連携が消えた扱い**になった。
+ * その結果 web-app の逆引き（`resolveIdentity`）が「未連携」を受け取り、
+ * ログイン中の人格が `line:` の空の棚に落ちて、お気に入りも行動ログも見えなくなる。
+ * ブロックは「もう送らないで」という配信の意思表示であって、
+ * 「この人は私ではありません」という連携の取り消しではない。解除は解除の操作
+ * （`clearCustomerLinkage`）でしか起きない。
+ *
+ * 配信側は元から別条件で絞っている（`delivery-runtime.ts` が `unfollowed_at` /
+ * `broadcast_opted_out` を読み、`target-resolver.ts` が除外する）ので、
+ * ここで連携条件を緩めても **ブロック中の人に送ってしまうことはない**。
+ *
+ * 読み取り結果には `unfollowed` を添えて返す。連携はあるが届かない、という状態を
+ * 呼び出し側が言葉にできるようにするため（連携の有無に混ぜない）。
+ */
+
 /**
  * 連携状態（読み取り側の戻り値）。
  *
  * ⚠ line_user_id を **含めない**（型の上で持てない）。web-app には「連携しているか」と
  *   「いつからか」だけを渡す約束（P1 QA 要件 3）で、LINE の生 ID を Web 側に流出させない。
- *   下の getLinkageStatus は select も `linked_at` のみに絞ってあり、うっかり足しても
+ *   下の getLinkageStatus は select も `linked_at, unfollowed_at` に絞ってあり、うっかり足しても
  *   型と クエリ の両方を直さない限り漏れない構造にしている。
  */
 export type CustomerLinkageStatus = {
-  /** 有効な連携行が 1 件以上あるか。 */
+  /** 連携行が 1 件以上あるか（＝ shopify_customer_id が立っているか）。 */
   linked: boolean;
-  /** 現在有効な連携のうち最も古い linked_at（＝いつから連携しているか）。無ければ null。 */
+  /** 連携のうち最も古い linked_at（＝いつから連携しているか）。無ければ null。 */
   linkedAt: string | null;
-  /** 有効な連携行の件数（N:1 = 世帯共有で 2 以上になりうる）。 */
+  /** 連携行の件数（N:1 = 世帯共有で 2 以上になりうる）。 */
   count: number;
+  /**
+   * 連携はあるが **どの LINE にも今は届かない**（全行が unfollowed）か。
+   * 連携が無いとき（count=0）は false。連携の有無とは独立した事実。
+   */
+  unfollowed: boolean;
 };
 
 export type CustomerLinkageStatusResult =
@@ -249,19 +281,17 @@ export type CustomerLinkageStatusResult =
  * 無かった**。そのため連携が成立してもマイページの表示は何も変わらず、お客さまが
  * 「連携できたのか分からない」状態に置かれていた。本関数がその読み取り口の中身。
  *
- * ## 「連携済み」の定義（P1 で確定・QA 要件 5）
- *   `shopify_customer_id = 指定顧客` かつ `unfollowed_at IS NULL` の行が **1 件以上**あれば連携済み。
+ * ## 「連携済み」の定義（P4 で訂正・2026-08-22）
+ *   `shopify_customer_id = 指定顧客` の行が **1 件以上**あれば連携済み。
  *   - migration 027 で同一 Shopify 顧客に複数 LINE を許す（N:1・世帯共有）ため、件数は 1 とは限らない。
  *     UI は有無だけを出すが、判断材料として count も返す。
- *   - `unfollowed_at`（migration 020）は LINE 友だち解除（ブロック/退会相当）の検知時刻。
- *     入っている行は「LINE 側で切れている」ので連携済みに数えない。配信対象解決
- *     （020 の部分インデックス）と同じ条件に揃えてあり、「マイページは連携済みと言うのに
- *     配信は届かない」というズレが起きないようにしている。
+ *   - **`unfollowed_at` は条件に入れない**（上の「連携可否と配信可否は別の問い」を読むこと）。
+ *     以前はここに `unfollowed_at IS NULL` があったため、LINE 公式アカウントをブロックした
+ *     お客さまが「連携解除」扱いになり、Web の人格が空の `line:` 棚へ落ちていた。
+ *     届くかどうかは `unfollowed` として**別のフィールドで**返す。
  *   - clearCustomerLinkage による解除は shopify_customer_id を null にするので、
  *     この検索条件では最初からヒットしない（行削除ではないが未連携として扱われる）。
- *
- * ⚠ 解除の状態遷移（行削除か旗立てか・粒度）は P1 では確定していない。本関数は
- *   **現状の書き込み実装が作るデータをそのまま読むだけ**で、新しい状態遷移を定義しない。
+ *     連携が消える経路は**解除だけ**、が P4 後の不変条件。
  *
  * never throw（呼び出し側のマイページ描画を落とさない）。失敗は ok:false で返す。
  */
@@ -277,20 +307,27 @@ export async function getLinkageStatus(
     const { data, error } = await supabase
       .from("customer_linkages")
       // ⚠ line_user_id を select しない（生値を持ち出さない・QA 要件 3 の構造的担保）。
-      .select("linked_at")
+      //   unfollowed_at は時刻であって識別子ではないので、最小開示を崩さない。
+      .select("linked_at, unfollowed_at")
       .eq("shopify_customer_id", shopifyCustomerId)
-      .is("unfollowed_at", null)
       // 最古を先頭に（linked_at が null の行は末尾に寄せる）。
       .order("linked_at", { ascending: true, nullsFirst: false });
 
     if (error) return { ok: false, error: error.message };
 
-    const rows = (data ?? []) as Array<{ linked_at?: string | null }>;
+    const rows = (data ?? []) as Array<{
+      linked_at?: string | null;
+      unfollowed_at?: string | null;
+    }>;
     const linkedAt = rows.find((row) => !!row.linked_at)?.linked_at ?? null;
+    /* 1 件でも生きている行があれば「届く」。全滅のときだけ unfollowed=true。
+       連携が 0 件のときは false（届かないのではなく、そもそも相手がいない）。 */
+    const unfollowed =
+      rows.length > 0 && rows.every((row) => row.unfollowed_at != null);
 
     return {
       ok: true,
-      status: { linked: rows.length > 0, linkedAt, count: rows.length },
+      status: { linked: rows.length > 0, linkedAt, count: rows.length, unfollowed },
     };
   } catch (err) {
     return {
@@ -311,14 +348,19 @@ export async function getLinkageStatus(
  *   信頼境界は順引きと同一（X-API-Key を持つサーバのみ）。
  */
 export type LineUserLinkage = {
-  /** 有効な連携行があるか。 */
+  /** 連携行があるか。 */
   linked: boolean;
   /** 連携先の Shopify 顧客 ID（数値文字列）。未連携・曖昧なら null。 */
   shopifyCustomerId: string | null;
   /** 連携日時（ISO 8601）。無ければ null。 */
   linkedAt: string | null;
-  /** ヒットした有効行の件数。0 / 1 が正常。2 以上は台帳の異常（下記）。 */
+  /** ヒットした行の件数。0 / 1 が正常。2 以上は台帳の異常（下記）。 */
   count: number;
+  /**
+   * この LINE には今メッセージが届かない（friend 解除 / ブロック）か。
+   * **連携の有無とは独立**（上の「連携可否と配信可否は別の問い」）。未連携なら false。
+   */
+  unfollowed: boolean;
 };
 
 export type LineUserLinkageResult =
@@ -335,11 +377,13 @@ export type LineUserLinkageResult =
  *   欠陥を塞ぐための読み取り口で、**新しい台帳は作らず既存 customer_linkages を逆から引く**。
  *
  * ## 「連携済み」の定義（順引き getLinkageStatus と同一に揃える）
- *   `line_user_id = 指定 ID` かつ `unfollowed_at IS NULL` かつ `shopify_customer_id IS NOT NULL`。
+ *   `line_user_id = 指定 ID` かつ `shopify_customer_id IS NOT NULL`。
  *   - `clearCustomerLinkage`（解除）は `shopify_customer_id` を null にするので、解除後は
  *     ここで自動的にヒットしなくなる（＝解除が本人解決に即座に効く）。
- *   - `unfollowed_at` を除外条件に含めるのは順引きと同じ。「マイページは連携済みと言うのに
- *     配信は届かない」というズレを作らない。
+ *   - **`unfollowed_at` は条件に入れない**（P4・2026-08-22）。ここが本番で実際に人を落として
+ *     いた場所で、LINE 公式アカウントをブロックしただけの人が「未連携」と判定され、
+ *     web-app の `resolveIdentity` が空の `line:` 棚を返していた。届くかどうかは
+ *     `unfollowed` として別に返す。
  *
  * ## ⚠ `.single()` を使わない（罠 G-3）
  *   `customer_linkages` は既に N:1（世帯共有）が成立しており、`.single()` は複数行で
@@ -362,9 +406,8 @@ export async function getLinkageByLineUser(
   try {
     const { data, error } = await supabase
       .from("customer_linkages")
-      .select("shopify_customer_id, linked_at")
+      .select("shopify_customer_id, linked_at, unfollowed_at")
       .eq("line_user_id", lineUserId)
-      .is("unfollowed_at", null)
       .not("shopify_customer_id", "is", null)
       .order("linked_at", { ascending: true, nullsFirst: false });
 
@@ -373,12 +416,19 @@ export async function getLinkageByLineUser(
     const rows = (data ?? []) as Array<{
       shopify_customer_id?: string | null;
       linked_at?: string | null;
+      unfollowed_at?: string | null;
     }>;
 
     if (rows.length === 0) {
       return {
         ok: true,
-        linkage: { linked: false, shopifyCustomerId: null, linkedAt: null, count: 0 },
+        linkage: {
+          linked: false,
+          shopifyCustomerId: null,
+          linkedAt: null,
+          count: 0,
+          unfollowed: false,
+        },
       };
     }
 
@@ -396,6 +446,7 @@ export async function getLinkageByLineUser(
           shopifyCustomerId: null,
           linkedAt: null,
           count: rows.length,
+          unfollowed: false,
         },
       };
     }
@@ -407,6 +458,8 @@ export async function getLinkageByLineUser(
         shopifyCustomerId: String(rows[0].shopify_customer_id),
         linkedAt: rows.find((r) => !!r.linked_at)?.linked_at ?? null,
         count: rows.length,
+        /* line_user_id には UNIQUE があるので通常 1 行。全行が切れているときだけ true。 */
+        unfollowed: rows.every((r) => r.unfollowed_at != null),
       },
     };
   } catch (err) {
