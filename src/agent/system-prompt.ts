@@ -42,15 +42,21 @@ export type PersonaType = "serenity" | "explorer" | "sensory";
  *
  * Each fragment defines:
  *   - Tone adjustments (how to speak)
- *   - Focus areas (what to emphasize)
- *   - Suggestion style (how to recommend)
+ *   - Topic areas (what to talk about)
+ *   - What to avoid
+ *
+ * 売り込み面のゲート（fail-closed）:
+ *   ペルソナ断片は同じ system メッセージ内で「買う導線を置かない / 煽り・評価の言葉を使わない」
+ *   と並ぶ。よって断片側に商品提案（何を勧めるか）の指示を持たせない。
+ *   ペルソナが変えるのは**話し方と話題**だけで、売るかどうかは断片では決めない
+ *   （売り込み面の可否は SALES_SURFACE_ENABLED 側の 1 箇所で決まる）。
  */
 const PERSONA_PROMPT_FRAGMENTS: Record<PersonaType, string> = {
   serenity: `
 ## ペルソナ: serenity（穏やか）
 日常に静けさとゆとりを求めるタイプ。
 - 口調: ゆったり落ち着いたトーン。急かす表現（「今すぐ」「限定」）は避ける
-- 提案: リラックス系商品（ほうじ茶、玉露、緑茶）。夜や休憩シーン。「香り」「穏やかな甘み」「まろやか」で表現
+- 話題: ほうじ茶、玉露、緑茶。夜や休憩シーン。「香り」「穏やかな甘み」「まろやか」で表現
 - 避ける: 新奇性の強調、複雑な産地うんちく
 `,
 
@@ -58,16 +64,16 @@ const PERSONA_PROMPT_FRAGMENTS: Record<PersonaType, string> = {
 ## ペルソナ: explorer（探求）
 茶の世界を深く広く知りたいタイプ。
 - 口調: 対等な友人感覚。「実は〜」「面白いのが〜」など発見感ある切り口。専門用語OK
-- 提案: 産地・製法・農家ストーリー重視。新品種・季節限定・シングルオリジン優先
-- 避ける: 「みんなに人気」等の紋切り型、リラックス系のみの提案
+- 話題: 産地・製法・農家ストーリー
+- 避ける: 「みんなに人気」等の紋切り型
 `,
 
   sensory: `
 ## ペルソナ: sensory（感覚）
 味わいとペアリングの探求を楽しむタイプ。
 - 口調: 「甘み」「渋み」「コク」「余韻」等フレーバーワードを積極使用
-- 提案: 味の輪郭がはっきりした商品。ペアリング例を積極提示。味の比較で提案
-- 避ける: あっさり系の過度な勧め、味の表現なしの産地うんちくのみ
+- 話題: 味の輪郭。ペアリング例。味の比較
+- 避ける: 味の表現なしの産地うんちくのみ
 `,
 };
 
@@ -79,7 +85,7 @@ const PERSONA_PROMPT_FRAGMENTS: Record<PersonaType, string> = {
  */
 export function buildPersonaPromptFragment(persona: PersonaType | null): string {
   if (!persona) {
-    return `\n\n## お客様のペルソナ: 未判定\nまだペルソナが特定できていません。通常のニュートラルなトーンで対応してください。商品提案はベストセラー・定番品を中心に行い、会話の中から好みを自然に探ってください。`;
+    return `\n\n## お客様のペルソナ: 未判定\nまだペルソナが特定できていません。通常のニュートラルなトーンで対応してください。会話の中から好みを自然に探ってください。`;
   }
   return PERSONA_PROMPT_FRAGMENTS[persona];
 }

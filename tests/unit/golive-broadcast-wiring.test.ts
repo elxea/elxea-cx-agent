@@ -1,25 +1,26 @@
 /**
- * Unit Tests -- 全員(broadcast) go-live 経路の dry-run 実証（実送信ゼロ）
+ * Unit Tests -- 全員(broadcast) 経路の配線実証（実送信ゼロ）
  *
  * 目的:
- *   本番 go-live 対象行「【本番】上賀茂手作り市 全員配信」(page 3a870c9d-064c-8085-...) の
- *   全員(broadcast) 経路を、実 LINE / 実 Notion / 実 Supabase / 実 R2 に一切触れず
+ *   全員(broadcast) 配信経路を、実 LINE / 実 Notion / 実 Supabase / 実 R2 に一切触れず
  *   純粋関数レベルで実証する。検証項目:
  *     - 配信対象「全員」→ kind=all（broadcast パス）
  *     - kind=all の target 解決 = LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD(=48)
  *     - 自己承認 pin 受理: prod 専用フラグで独立性免除・承認者ゼロは常に fail-closed
  *     - 画像 2 枚の恒久 R2 公開 URL を決定的に再構成（broadcast/<pageId>/<i>.jpg）
- *     - 送信ゲート: sendEnabled = DELIVERY_SEND_ENABLED === "true"。本番未設定 → false（dry-run）
+ *     - 実送信スイッチ非復活ガード: 送信経路のソースに env 送信フラグが再導入されていない
  *
- *   ※ 実送信を発生させる runDeliveryOnce(sendEnabled=true) 経路はここでは一切呼ばない。
- *      dry-run(sendEnabled=false) の「非破壊・無送信」早期 return の実証は
- *      tests/unit/delivery-send.test.ts の
- *      「runDeliveryOnce: 送信が起きない条件（安全性）」を正とする。
+ *   ※ 本ファイルは実送信を発生させる経路を一切呼ばない（純粋関数のみ）。
+ *      送信そのものの分岐実証は tests/unit/delivery-send.test.ts を正とする。
+ *
+ * 2026-08-22: 実送信スイッチ（DELIVERY_SEND_ENABLED）撤去に伴い、旧
+ *   golive-broadcast-dryrun.test.ts から改称。dry-run モードは存在しない。
  *
  * 使用方法:
- *   npx tsx tests/unit/golive-broadcast-dryrun.test.ts
+ *   npx tsx tests/unit/golive-broadcast-wiring.test.ts
  */
 
+import { readFileSync } from "node:fs";
 import { parseAudience } from "../../src/lib/delivery-audience";
 import { resolveTargets, type TargetResolverDeps } from "../../src/lib/target-resolver";
 import { selfApprovalRelaxed, isApprovalAuthorized } from "../../src/lib/delivery-approval";
@@ -142,21 +143,38 @@ async function main(): Promise<void> {
   });
   check("pin/送信で同一枚数なら content hash 一致（凍結）", hashPin === hashSend);
 
-  // 5. 送信ゲート: sendEnabled は DELIVERY_SEND_ENABLED === "true" の純粋等価
-  //    本番は当該 secret 未設定/非 "true" → false（dry-run・実送信ゼロ）
-  const gate = (env: { DELIVERY_SEND_ENABLED?: string }) =>
-    env.DELIVERY_SEND_ENABLED === "true";
-  check("DELIVERY_SEND_ENABLED 未設定 → sendEnabled=false（dry-run）", gate({}) === false);
-  check(
-    "DELIVERY_SEND_ENABLED='false' → sendEnabled=false（dry-run）",
-    gate({ DELIVERY_SEND_ENABLED: "false" }) === false,
-  );
-  check(
-    "DELIVERY_SEND_ENABLED='true' のときのみ true（go-live 時のみ）",
-    gate({ DELIVERY_SEND_ENABLED: "true" }) === true,
-  );
+  // 5. 実送信スイッチ非復活ガード（2026-08-22 の撤去を機械で固定する）
+  //    「承認したら送られる」を壊す env フラグが送信経路に再導入されていないことを、
+  //    ソースの実コード行（コメント行を除く）に対して検査する。
+  //    ⚠ ここでコメント行を除くのは、撤去の経緯コメントに旧フラグ名が残るため。
+  const sendPathSources = [
+    "src/lib/delivery-runtime.ts",
+    "src/lib/delivery-orchestrator.ts",
+    "src/index.ts",
+  ];
+  const codeLinesOf = (relPath: string): string[] =>
+    readFileSync(new URL(`../../${relPath}`, import.meta.url), "utf8")
+      .split("\n")
+      .filter((line) => {
+        const t = line.trim();
+        return t.length > 0 && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*");
+      });
+  for (const rel of sendPathSources) {
+    check(
+      `${rel}: 実コードに DELIVERY_SEND_ENABLED を参照していない`,
+      !codeLinesOf(rel).some((l) => l.includes("DELIVERY_SEND_ENABLED")),
+    );
+  }
+  // 一斉配信の送信経路そのものには sendEnabled ゲートを一切持たない
+  // （休眠 DORMANT / マルシェ MARCHE は別機能の別ゲートなので index.ts は対象外）。
+  for (const rel of ["src/lib/delivery-runtime.ts", "src/lib/delivery-orchestrator.ts"]) {
+    check(
+      `${rel}: 実コードに sendEnabled ゲートが存在しない`,
+      !codeLinesOf(rel).some((l) => /\bsendEnabled\b/.test(l)),
+    );
+  }
 
-  console.log(`\n=== go-live broadcast dry-run: ${pass} passed / ${fail} failed ===`);
+  console.log(`\n=== go-live broadcast wiring: ${pass} passed / ${fail} failed ===`);
   if (fail > 0) {
     console.log(`FAILURES:\n- ${failures.join("\n- ")}`);
     process.exit(1);

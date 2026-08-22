@@ -469,7 +469,7 @@ export async function runAgent(
         }).catch(console.error);
       }
 
-      const quickReplies = generateQuickReplies(usedTools, escalated);
+      const quickReplies = generateQuickReplies(usedTools, escalated, isSalesSurfaceEnabled(env));
 
       return {
         response: finalText || "申し訳ありません、お返事の生成に失敗しました。",
@@ -871,7 +871,7 @@ export async function runAgentStreaming(
     if (isLowKnowledge) {
       logUnansweredQuery(supabase, { userId, channel, queryText: userMessage, maxSimilarity, resultCount: knowledgeResults.length, escalated }).catch(console.error);
     }
-    const quickReplies = generateQuickReplies(usedTools, escalated);
+    const quickReplies = generateQuickReplies(usedTools, escalated, isSalesSurfaceEnabled(env));
     if (quickReplies.length > 0) callbacks.onQuickReplies(quickReplies);
     // ツール使用ターンで蓄積されたテキストと最終テキストを結合
     // egress brand-fact ガード: 保存・最終確定に使う全文を送信直前に是正する（冪等）。
@@ -1135,10 +1135,18 @@ async function buildPersonalizationBlock(params: {
 /**
  * 使用ツール・状況に応じた Quick Reply を生成（MS5 5.5）。
  * LINE の Quick Reply は最大13個まで。
+ *
+ * 売り込み面のゲート（fail-closed）:
+ *   `usedTools` は実行可否と無関係に積まれる（モデルが呼んだ事実がそのまま入る）ため、
+ *   executeTool 側で実行を拒否しても、ここを素通りさせると
+ *   「購入したい」「おすすめを見る」等の**買う導線だけが Quick Reply として顧客に出る**。
+ *   よって executeTool の fail-closed guard と同じ想定（＝モデルが呼びうる前提）で、
+ *   `salesEnabled` が false のときは売り込みツール由来の分岐を丸ごとスキップする。
  */
-function generateQuickReplies(
+export function generateQuickReplies(
   usedTools: string[],
   escalated: boolean,
+  salesEnabled: boolean,
 ): Array<{ label: string; text: string }> {
   if (escalated) {
     return [
@@ -1146,14 +1154,14 @@ function generateQuickReplies(
     ];
   }
 
-  if (usedTools.includes("create_cart_link")) {
+  if (salesEnabled && usedTools.includes("create_cart_link")) {
     return [
       { label: "他の商品も追加", text: "他の商品もカートに追加したいです" },
       { label: "おすすめを見る", text: "他のおすすめ商品も教えてください" },
     ];
   }
 
-  if (usedTools.includes("recommend_product")) {
+  if (salesEnabled && usedTools.includes("recommend_product")) {
     return [
       { label: "詳しく教えて", text: "この商品についてもっと詳しく教えてください" },
       { label: "他の商品も見たい", text: "他のおすすめ商品も教えてください" },

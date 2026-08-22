@@ -16,7 +16,7 @@
  *   lineUsers ドキュメント ID は webhook 由来の Messaging API userId なので、そのまま multicast 可能
  *   （2種類の LINE ID 橋渡し問題を踏まない）。重複は lineUserId で一意化する。
  *   これにより customer_linkages が 0 行でもペルソナ配信の宛先が成立する。
- *   500件バッチ・通数台帳・DELIVERY_SEND_ENABLED ゲート・承認フローは一切変更しない。
+ *   500件バッチ・通数台帳・承認フローは一切変更しない。
  */
 
 import type { PersonaType } from "./firestore";

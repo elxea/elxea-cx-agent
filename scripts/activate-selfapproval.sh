@@ -18,11 +18,12 @@
 #   - 各 step を ">>> [n/8] START" / "<<< [n/8] OK" で可視化。冒頭で環境情報を表示。
 #   - 失敗時は最後の START 行が停止点。tee でログ保存推奨。
 #
-# 実送信は発生しない:
-#   本スクリプトは DELIVERY_SEND_ENABLED を「一切変更しない」。
-#   実送信スイッチ（DELIVERY_SEND_ENABLED=true）は dry-run 検証 + Setaka 最終 GO の
-#   後に別ステップで行う。よって本スクリプト実行後も全経路 dry-run のまま
-#   （顧客への LINE 送信は起きない）。
+# ⚠ 2026-08-22 追記（実送信スイッチ撤去後の注意）:
+#   かつては「実送信スイッチ DELIVERY_SEND_ENABLED が OFF なので本スクリプトを実行しても
+#   顧客への LINE 送信は起きない」という前提だったが、**そのスイッチは撤去済み**である。
+#   現在は承認済み（Status=Approved）かつ配信予定日時が到来した行が cron で実送信される。
+#   本スクリプト自体は配信 DB を触らないが、「実行しても絶対に送信は起きない」とは言えない。
+#   実行前に配信 DB の Approved 行を確認すること。
 #
 # 可逆手順（ロールバック）:
 #   - 自己承認を即無効化: `npx wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD`
@@ -30,7 +31,8 @@
 #   - 画像 R2 を無効化:   `npx wrangler secret delete R2_API_TOKEN`
 #       → 画像付き pin が fail-closed（テキストのみ配信は影響なし）。
 #   - コードを戻す:       `git revert <このスクリプトが作った commit>`（フラグ実装を撤去）。
-#   - いずれも DELIVERY_SEND_ENABLED には触れない（送信は別レイヤで常時ガード）。
+#   - いずれも配信 DB の行・cron トリガには触れない。配信そのものを止めたいときは
+#     docs/deploy-runbook.md「配信を止める（緊急停止）」節を参照する。
 #
 # 冪等性:
 #   - commit: 対象 3 ファイルに HEAD との差分が無ければ skip。
@@ -178,17 +180,15 @@ echo ">>> [7/8] START: DELIVERY_ALLOW_SELF_APPROVAL_PROD=true"
 printf 'true' | npx wrangler secret put DELIVERY_ALLOW_SELF_APPROVAL_PROD
 echo "<<< [7/8] OK: 自己承認フラグ有効化（フラグ削除で即 fail-closed へ戻せる・可逆）"
 
-# !!! DELIVERY_SEND_ENABLED は絶対に触らない（送信スイッチは後の別ステップ）!!!
 echo ""
-echo "[GUARD] DELIVERY_SEND_ENABLED は本スクリプトでは一切変更していない＝dry-run 継続。"
+echo "[GUARD] 本スクリプトは配信 DB の行にも cron トリガにも触れていない。"
 
 # --- 8. read-back（secret 名で存在確認・値は表示不可）----------------------------
 echo ""
 echo ">>> [8/8] START: read-back（secret list）"
-echo "[info] 期待: R2_API_TOKEN と DELIVERY_ALLOW_SELF_APPROVAL_PROD が存在し、"
-echo "       DELIVERY_SEND_ENABLED は従来どおり存在（値は未変更・list は名前のみ表示）。"
+echo "[info] 期待: R2_API_TOKEN と DELIVERY_ALLOW_SELF_APPROVAL_PROD が存在（list は名前のみ表示）。"
 SECRETS="$(npx wrangler secret list 2>/dev/null)"
-for KEY in R2_API_TOKEN DELIVERY_ALLOW_SELF_APPROVAL_PROD DELIVERY_SEND_ENABLED \
+for KEY in R2_API_TOKEN DELIVERY_ALLOW_SELF_APPROVAL_PROD \
            LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD R2_ACCOUNT_ID R2_BUCKET_NAME R2_PUBLIC_BASE; do
   if printf '%s' "$SECRETS" | grep -q "\"$KEY\""; then
     echo "  [OK]   $KEY : present"
@@ -200,7 +200,6 @@ echo "<<< [8/8] OK: read-back 表示完了"
 
 echo ""
 echo "=============================================================="
-echo "[DONE] 有効化チェーン完了。実送信は未発生（DELIVERY_SEND_ENABLED 未変更＝dry-run）。"
-echo "  次: dry-run 検証（承認pin受理 / 画像R2host / 全員target解決 / dry-run到達）→"
-echo "      QA 検証 + Setaka 最終 GO の後に DELIVERY_SEND_ENABLED=true を別途実行。"
+echo "[DONE] 有効化チェーン完了（配信 DB・cron トリガは未変更）。"
+echo "  次: 検証環境（staging / テスト OA）の配信 DB で承認 → 実送信を確認する。"
 echo "=============================================================="

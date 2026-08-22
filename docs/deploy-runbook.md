@@ -16,10 +16,9 @@ staging（`elxea-agent-staging`）を「テスト OA（@426vlcyb）」に載せ�
 > - `wrangler.toml [env.staging.vars]` に `DELIVERY_TARGET_ENV = "test"` を固定済み。
 >   staging は常にテスト OA を対象にする（`src/lib/delivery-channel.ts` が
 >   `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択）。
-> - stagingの `DELIVERY_SEND_ENABLED` は **未設定のまま**（= dry-run）。
->   （**本番は事情が違う**: 本番はこの値を読み取る手段が無く、ON/OFFを断定できない。
->   さらに2026-08-05に本番からの実配信の実績がある。詳細は「LINE配信の運用ゲート」節の
->   「本番の送信スイッチの値を断定しない」を参照）
+> - ⚠ **実送信スイッチは存在しない**（2026-08-22撤去）。stagingでも「Status=Approvedかつ
+>   配信予定日時が到来した行」はテストOA（@426vlcyb）へ**実際に送信される**。
+>   詳細は「LINE配信の運用」節を参照。
 
 ### 1. secret を staging に投入（値はコミットしない）
 
@@ -78,12 +77,12 @@ pnpm setup-rich-menu
 ### 5. スタッフがテスト OA を友だち追加して確認
 
 テスト OA（@426vlcyb）を友だち追加し、リッチメニュー表示・各ボタンの挙動・
-CX エージェントとの会話を実機確認する。この段階は `DELIVERY_SEND_ENABLED` 未設定のため
-配信（broadcast）は dry-run のまま。
+CXエージェントとの会話を実機確認する。この段階では配信DBにApprovedの行が無いため
+配信（broadcast）は起きない（行を承認した時点で送信される。2026-08-22〜）。
 
-> 更新（2026-07-27）: staging での**実送信検証は実施済み**（写真2枚つき 4/4 成功・証跡行
-> <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af>）。staging で実配信を再現する手順・
-> 必要 secret・OFF 復帰は「LINE 配信の運用ゲート」節を参照する（この節は初回ブリングアップの記録）。
+> 更新（2026-07-27）: stagingでの**実送信検証は実施済み**（写真2枚つき4/4成功・証跡行
+> <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af>）。stagingで実配信を再現する手順・
+> 必要secretは「LINE配信の運用」節を参照する（この節は初回ブリングアップの記録）。
 
 > ⚠ 取り違え注意（最重要）: 手順 1・3・4 は **すべてテストチャネル（@426vlcyb）**。
 > 本番 OA（@307tzhkw / 友だち約 48 人）のトークン・Webhook・リッチメニューには一切触れない。
@@ -275,85 +274,66 @@ wrangler rollback
 curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 ```
 
-## LINE 配信の運用ゲート（送信スイッチ / env 分離 / テスト配信）
+## LINE配信の運用（送信条件 / env分離 / テスト配信）
 
-> **この節はコマンドの正本**。運用者向けの平易な手順は `docs/line-delivery-guide.md`（および Notion 版
-> <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>）を SoT とし、本節は「エンジニア作業の実行手順」を持つ。
+> **この節はコマンドの正本**。運用者向けの平易な手順は `docs/line-delivery-guide.md`（およびNotion版
+> <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>）をSoTとし、本節は「エンジニア作業の実行手順」を持つ。
 > 片方だけを直さない（配信まわりのコード変更時は両方を更新する）。
 
-### 現状（2026-08-08更新 / それ以外の行は2026-07-27時点）
+### 現状（2026-08-22更新 / それ以外の行は2026-07-27時点）
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
-| 本番 `DELIVERY_SEND_ENABLED` | **不明（値は読み取れない）。ON/OFFを断定しない**。実績としては **2026-08-05に本番から実配信が発生**している（Setaka確認済み・意図した配信） | Cloudflareのsecretは **名前しか一覧できず値を読み出せない**（`wrangler secret list`）。挙動の根拠は `delivery-orchestrator.ts`（`sendEnabled=false` ならstep(g) 前に非破壊early-return）。実配信の実測は下記「2026-08-05の実配信」参照 |
+| 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。承認済み・予定時刻到来の行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
 | prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
 
-#### ⚠ 最重要の運用ルール: 本番の送信スイッチの値を**断定しない**。確認してから動く
+#### ⚠ 最重要の運用ルール: 承認 = 送信。envを確認して安心しない
 
-**Cloudflareの仕様上、本番 `DELIVERY_SEND_ENABLED` の値はどこからも読み取れない。**
-`wrangler secret list` は **名前の一覧だけ**を返し、値はAPI/CLIのいずれでも取得できない。
-したがって「本番は今OFF（値 `"false"`）である」と**文書側で断定することはできない**
-（かつて本runbookはそう書いていたが、根拠は `wrangler.toml` のコメント＝**意図の記録**であって、
-本番Workerに実際に入っている値の**観測ではなかった**。2026-08-08是正）。
+**2026-08-22に実送信スイッチ（`DELIVERY_SEND_ENABLED`）を撤去した。**
+以後、送信の可否を決めるのはenvではなく **配信DBの行の状態**だけである。
 
-- `secret list` に名前が**出る**  → ONの証拠にもOFFの証拠にも**ならない**（値が分からないため）
-- `secret list` に名前が**出ない** → 未設定 = OFF（**stagingはこの運用**。本番には当てはめない）
-- 送信ゲート自体は `sendEnabled = env.DELIVERY_SEND_ENABLED === "true"` の**文字列完全一致**
-  （`src/lib/delivery-runtime.ts` / `tests/unit/golive-broadcast-dryrun.test.ts`）。
-  ONになるのは値が文字列 `"true"` のときだけで、`"false"` / 空 / 未設定はすべてOFF。
+送信されるのは次を **すべて** 満たす行（`queryDueDeliveries()` + `processPage()`）:
 
-> **運用ルール（守ること）**: 「スイッチはOFFだから何も送られない」という前提で作業を始めない。
-> 送信有無に影響する作業（Approved行の作成・日時変更・再承認など）の前に、下記のいずれかで**状態を確認してから動く**。
-> 確認できていないときは「ONかもしれない」側に倒して扱う（＝実際に届く前提で内容と宛先を見る）。
+1. `Status=Approved` かつ `送信済み=false`
+2. `配信予定日時` が時刻付きで存在し、**すでに到来している**（date-only・空・不正はfail-closed）
+3. **承認者が存在する**（`承認者` 空は常に拒否。単独運用モードでも空は不可）
+4. **コンテンツハッシュが承認時と一致**（承認後に本文・画像を編集すると承認が自動リセットされる）
+5. 宛先が解決できる（`社内`=allowlist未設定、ペルソナ0件などはfail-closedでskip）
+6. **通数台帳claimに成功**（同一 `notion_page_id` × 月の二重送信を排他）+ 無料枠ガード内
 
-##### 2026-08-05の実配信（記録・Setaka確認済み）
+> **運用ルール（守ること）**: 配信DBを触る作業（Approved行の作成・日時変更・再承認）は、
+> **その操作が最大15分後に実顧客へ届く操作である**という前提で行う。
+> 「envがまだOFFだから練習できる」という逃げ道は存在しない。
+> 練習は必ず **staging + テスト用DB + テストOA（@426vlcyb）** で行う（後述「テスト配信の手順」）。
 
-**2026-08-05 12:00（JST）に本番から48人へ実配信が発生している。** これは**意図した配信であり問題ない**
-（Setaka確認済み・2026-08-08）。事実として次が観測されている。
+##### 実際に送られたかを確認する方法（すべて読み取りのみ）
 
-- 配信DB（本番）の当該行が **Status=Sent / 送信済み=true**
-- 通数台帳 `line_message_ledger` に **month=2026-08 / recipients=48 / created_at 2026-08-05T03:00:31Z（UTC）**
-
-この記録の意味は2つある。(1) **本番は実際に送れる状態になった実績がある**（＝「常にOFF」という前提は捨てる）。
-(2) 送信の有無はsecretの値を推測するのではなく、**下記の観測**で判断する。
-
-##### 危険ゼロで状態を推定する方法（すべて読み取りのみ・本番を一切変更しない）
-
-**⚠ どの手順でも `DELIVERY_SEND_ENABLED` に `secret put` / `secret delete` をしない**（状態を変えずに調べる）。
-
-1. **配信DBを見る（いちばん手軽・Notionだけで完結）**
-   - `Status=Approved` かつ `送信済み=false` の行が、**配信予定日時を過ぎても消化されず溜まっている** → **OFFの可能性が高い**。
-     OFFの間、orchestratorはNotionを一切書き換えず非破壊early-returnするため、承認済み行は滞留する（後述「ステップ0」）。
-   - 逆に、**予定日時を過ぎた行が `Sent` / `送信済み=true` に変わっている** → **その時点ではONだった**（実送信が起きている）。
-2. **通数台帳を見る**: `line_message_ledger` の当月行の `recipients` が増えていれば実送信が起きている（＝ONだった）。
-3. **確定させたいときだけログを読む**（読み取り専用・15分ごとのcron tickを待つ）: 下記 `wrangler tail` の `sendEnabled=` を読む。
-   これが**唯一の直接確認**だが、tickを待つ必要があるため、まず1. 2. で当たりを付けてから使う。
-
-**確定的な判定方法** = cron実行ログの `sendEnabled=` を読む:
+1. **配信DBを見る**: 予定日時を過ぎた行が `Sent` / `送信済み=true` になっていれば送信済み。
+   `Failed` / `PartialFail` ならエラー詳細を読む。`Approved` のまま残っている場合は上の3〜6の
+   いずれかで止まっている（`エラー詳細` 欄かcronログを見る）。
+2. **通数台帳を見る**: `line_message_ledger` の当月行の `recipients` の増分が実送信通数。
+3. **cronログを読む**（読み取り専用・15分ごとのtickを待つ）:
 
 ```bash
 # 本番 Worker のログを追う（--env を付けない = 本番 elxea-agent）。読み取り専用。
 pnpm exec wrangler tail --format pretty
 # 15 分ごとの cron tick で次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
-#   [delivery] env=prod(@307tzhkw) sendEnabled=false month=... scanned=... processed=... reaper=...
-# sendEnabled=false → OFF（実送信なし）/ sendEnabled=true → ON（実送信する）
+#   [delivery] env=prod(@307tzhkw) month=2026-08 scanned=1 processed=1 sent=1 recipients=48 \
+#     skipped=0 reset=0 failed=0 reaper=0
+# sent / recipients が実送信の実績。skipped / reset / failed は理由が後続行に出る:
+#   [delivery] sent page=<id> audience=全員 recipients=48 reason=Sent: 実送信 48/48
 ```
 
-出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] env=... sendEnabled=...")`、
+出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] ...")`、
 ラベル `prod(@307tzhkw)` / `test(@426vlcyb)` は `src/lib/delivery-channel.ts` が組み立てる。
 
-> **stagingとは確認方法が違う（混同禁止）**: staging（`elxea-agent-staging`）は「**未設定＝OFF**」で運用しており、
-> 後述のテスト配信手順では `secret list --env staging | grep DELIVERY_SEND_ENABLED` が **出ないのが正**。
-> この「出ないのが正」は **staging限定のローカル規約**であって、**本番には当てはまらない**
-> （本番は名前が存在していても値が読めないため、名前の有無からON/OFFを導けない）。
-
-> **本番secretを調査目的で触らない**: 本番secretへの `put` / `delete` は事故（誤削除・誤投入・意図しないON/OFF切替）
+> **本番secretを調査目的で触らない**: 本番secretへの `put` / `delete` は事故（誤削除・誤投入）
 > そのものを生む。状態を知りたいだけのときは**必ず上記の読み取りのみの方法**を使う。
-> 値を変えるのは「実送信スイッチONの手順」または「緊急停止」として**意図して切り替えるときだけ**であり、
-> そのときはSetakaのGO（Tier 2）が要る。
+> なおCloudflare側に残っている旧 `DELIVERY_SEND_ENABLED` secretは**無害**（コードが読まない）。
+> 掃除したい場合のみ `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED`（挙動は変わらない）。
 
 ### ⚠ 禁止事項: 本番 Worker に `NOTION_DELIVERY_DB_ID` を設定しない
 
@@ -372,74 +352,40 @@ pnpm exec wrangler tail --format pretty
   pnpm exec wrangler secret delete NOTION_DELIVERY_DB_ID        # 誤って入っていた場合のみ
   ```
 
-### 実送信スイッチ ON の手順（Setaka の GO 後・Tier 2）
+### 配信を止める
 
-#### ⚠ ステップ0（省略禁止）: Approved 行の全量監査
+| 目的 | 操作 |
+|---|---|
+| **1件を止める** | Notion配信DBの該当行の **StatusをApproved → Draftに戻す**（予定時刻前なら止まる） |
 
-**なぜ必須か**: `DELIVERY_SEND_ENABLED` が OFF の間、orchestrator は **Notion を一切書き換えない**
-（非破壊プレビューで early-return し、`setStatus(Sending)` も `writeDeliveryResult` も走らない）。
-このため承認済みの行は **Status=Approved・送信済み=false のまま無期限に滞留**する。
-一方 `queryDueDeliveries()` の filter は `Status=Approved AND 送信済み=false AND 配信予定日時 <= now` であり、
-**過去日時の Approved 行は「送信待ち」として常に該当する**。
-よってスイッチを ON にすると、**次の cron tick（最大15分後）に滞留分が一斉に実送信される**。
+- 予定時刻を過ぎている、またはcron実行中の行は**間に合わない可能性がある**。
+- **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
+- 複数件を止めたいときは、対象の行を1件ずつDraftに戻す
+  （Approvedの行だけが送信対象なので、Approvedをゼロにすれば新規の送信は起きない）。
 
-手順（ON の直前に毎回実施）:
+### 本番デプロイ前の確認（配信コードを変更したとき）
 
-1. 本番「配信コンテンツ」（`f95bb981-3c1a-4b6e-abd2-8b39551f6492`）を **Status=Approved で絞り込み、全件列挙**する。
-2. 各行について次を確認する。
-   - 配信予定日時が**過去でないか**（過去 = ON 直後に発火）。
-   - **いま送ってよい内容か**（検証目的・下書き・古い告知の混入がないか）。
-   - `送信済み` が false か（true なら再送されない）。
-3. 送らない行は **Status を Draft に戻す**（削除しない）。
-4. Approved に**意図した行だけ**が残った状態を確認してから ON に進む。
+配信まわりを変更して本番へ出す前に、**本番配信DBのApproved行を必ず確認する**
+（`f95bb981-3c1a-4b6e-abd2-8b39551f6492` をStatus=Approvedで絞り込む）。
 
-#### ON / OFF
-
-```bash
-# ON（本番の実送信を有効化。確認フラグ必須・deploy はしない）
-bash scripts/go-live-enable-send.sh --confirm-i-really-want-to-send-real-line
-
-# OFF（即座に dry-run 復帰・実送信を再封鎖）— 次の 2 通りはどちらも等価に OFF
-pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED                 # (a) secret ごと削除（未設定=OFF）
-printf 'false' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED   # (b) 値を "false" にする（GA 前の既定状態）
-```
-
-**OFFの判定は「secretの有無」ではなく「値が `"true"` でないこと」**（`=== "true"` の完全一致）。
-(a) と (b) は機能的に同じOFFである（どちらを使ってもよい）。
-**どちらを実行したかは後から確認できない**（値は読み出せない）ので、
-OFFに戻したこと自体を作業記録に残し、次項のログで実際にOFFになったことを確認する。
-実際にOFFへ戻ったことは `pnpm exec wrangler tail` の
-`[delivery] env=prod(@307tzhkw) sendEnabled=false` で確認する
-（`secret list` では判定できない — 前掲「本番の送信スイッチの値を断定しない」節）。
-
-ON 後は **最初の1本を実機受信で確認**してから後続を承認する。
+- Approvedかつ配信予定日時が**過去**の行があれば、デプロイ後の次のcron tick（最大15分後）に**送信される**。
+- 送るつもりのない行は **Draftに戻してから**デプロイする。
+- 参照ビューは **「Default view」**（「かんたん配信（運用者用）」は `送信済み` を表示しない）。
 
 ### テスト配信の手順（検証環境・お客さまに届かない）
 
 > **`--env staging` を必ず付ける。付け忘れたコマンドは本番 Worker（実顧客 OA）への操作になる。**
 
-1. **テスト用 DB に行を作る**: 「[TEST] 配信コンテンツ (staging/@426vlcyb)」
-   （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作成し Approved にする。
+> **⚠ stagingも「承認したら実送信」になった（2026-08-22）。** 届く先がテストOA（@426vlcyb）なだけで、
+> 送信そのものは本番と同じに起きる。「stagingはスイッチ未設定だから送られない」は**もう成り立たない**。
+
+1. **テスト用DBに行を作る**: 「[TEST] 配信コンテンツ (staging/@426vlcyb)」
+   （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作成しApprovedにする。
    本番「配信コンテンツ」には**作らない**。
-2. **staging の送信スイッチを一時 ON**:
-
-   ```bash
-   printf 'true' | pnpm exec wrangler secret put DELIVERY_SEND_ENABLED --env staging
-   ```
-
-3. **配信を待って実機確認**（テスト OA @426vlcyb・最大15分 + 配信予定日時）。写真の順序・改行・文字化けを目視する。
-   Notion 側の書き戻し（Status=Sent / 送信結果 / 消費実績 / sent_at）も確認する。
-4. **必ず OFF に戻す**（戻し忘れると以降のテスト承認が送信され続ける）:
-
-   ```bash
-   pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging
-   pnpm exec wrangler secret list --env staging | grep DELIVERY_SEND_ENABLED   # 出ないのが正
-   ```
-
-   > ⚠ **この「出ないのが正」は staging 限定**（staging は「未設定＝OFF」で運用しているため）。
-   > **本番に同じ確認法を当てない** — 本番は値 `"false"` で secret が存在するのが正常状態であり、
-   > `secret list` にヒットしても ON ではない。本番の判定は cron ログの
-   > `[delivery] env=prod(@307tzhkw) sendEnabled=false`（前掲節）で行う。
+2. **配信を待って実機確認**（テストOA @426vlcyb・最大15分 + 配信予定日時）。写真の順序・改行・文字化けを目視する。
+   Notion側の書き戻し（Status=Sent / 送信結果 / 消費実績 / sent_at）も確認する。
+3. **検証が終わったら、テスト用DBにApprovedの行を残さない**（残すと予定日時到来のたびに送信される）。
+   使い終わった行はDraftに戻すか、送信済み（Sent）まで完走させる。
 
 ### staging に必要な設定（テスト配信の前提）
 
@@ -473,9 +419,8 @@ pnpm exec wrangler secret list --env staging
 
 | 目的 | 操作 | 効果 |
 |---|---|---|
-| 特定1件を止める | Notion で Status を **Approved → Draft** | 予定時刻前なら送信対象から外れる。時刻到来後・cron 実行中は間に合わない可能性あり |
-| 本番の配信を全部止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put DELIVERY_SEND_ENABLED`） | 以降の全経路が dry-run（非破壊プレビュー）へ復帰。**削除と `"false"` 投入は等価**（OFF 判定は「値が `"true"` でない」）。Approved 行は滞留する（再 ON 時はステップ0 を再実施）。復帰確認は `wrangler tail` の `sendEnabled=false` |
-| staging の配信を止める | `pnpm exec wrangler secret delete DELIVERY_SEND_ENABLED --env staging` | 検証環境のみ停止 |
+| 特定1件を止める | NotionでStatusを **Approved → Draft** | 予定時刻前なら送信対象から外れる。時刻到来後・cron実行中は間に合わない可能性あり |
+| 配信を止める（本番・staging共通） | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | Approvedの行だけが送信対象。Approvedがゼロなら新規の送信は起きない |
 | 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
@@ -488,8 +433,9 @@ pnpm exec wrangler secret list --env staging
 - **per-配信の人間ゲートが1点に縮退している**。従来の「著者 != 承認者」による二人目の確認は
   `DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"` の間は働かず、配信ごとの人的チェックは
   **「Notion に行を作り Status=Approved にする」その一操作**のみになる。
-  残る自動ゲートは形式検査（承認者の存在・日時到来・画像形式/サイズ・コンテンツハッシュ照合・無料枠台帳・
-  `DELIVERY_SEND_ENABLED`）であり、**内容の妥当性・宛先の妥当性は検査されない**。
+  さらに2026-08-22に実送信スイッチ（送信直前のTier 2ゲート）も撤去したため、人的ゲートは承認のみ。
+  残る自動ゲートは形式検査（承認者の存在・日時到来・画像形式/サイズ・コンテンツハッシュ照合・無料枠台帳）
+  であり、**内容の妥当性・宛先の妥当性は検査されない**。
 - したがって **Notion「配信コンテンツ」の書き込み権限が、実質的な配信統制そのもの**になる。
   当該 DB の編集権限を持つ人を増やすことは「本番配信を単独で実行できる人を増やす」ことと等価として扱う。
 - 緩和は可逆。運用体制に二人目を置ける段階でフラグを削除し、独立承認者必須へ戻す。
@@ -497,7 +443,7 @@ pnpm exec wrangler secret list --env staging
 ## roji最初のアンケートの停止スイッチ（`ROJI_SURVEY_ENABLED`）
 
 roji最初のアンケート（6問・全部1タップ）を、**巻き戻し（rollback）なしで止められる**ようにするスイッチ。
-配信の送信スイッチ（`DELIVERY_SEND_ENABLED` 等）とは**完全に独立**（アンケートは返信のみで、
+配信（Notion駆動の一斉配信）とは**完全に独立**（アンケートは返信のみで、
 push / broadcast / multicastを一切呼ばない）。
 
 | 項目 | 内容 |
@@ -525,7 +471,7 @@ push / broadcast / multicastを一切呼ばない）。
 
 ### 値の確認について
 
-`DELIVERY_SEND_ENABLED` と同じ制約があり、**本番の値は読み出せない**（`wrangler secret list` は名前のみ）。
+Cloudflareのsecretは**本番の値を読み出せない**（`wrangler secret list` は名前のみ）。
 「今ONかOFFか」を文書側で断定しない。挙動で確かめる（OFFなら合言葉に無反応）。
 
 > このスイッチを追加した工程（2026-08-08）では、**本番にもstagingにもsecretを登録していない**
@@ -826,7 +772,8 @@ CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE SUPABASE_DB_PASSWORD=*** ./scripts/deploy-
 ```
 
 > ⚠ `ROJI_SURVEY_ENABLED` は **登録しない**（未設定＝OFF）。メニュー未差し替えとの二重の安全を維持する。
-> ⚠ `DELIVERY_SEND_ENABLED` / `DORMANT_SEND_ENABLED` / `MARCHE_SEND_ENABLED` には触れない。
+> ⚠ `DORMANT_SEND_ENABLED` / `MARCHE_SEND_ENABLED` には触れない（配信の実送信スイッチは
+> 2026-08-22に撤去済みで、そもそも存在しない）。
 
 **消去の実動作確認（stagingで実施・本番は未確認）**
 

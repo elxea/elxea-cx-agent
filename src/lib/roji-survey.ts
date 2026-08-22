@@ -280,6 +280,23 @@ export function buildSurveyState(rows: SurveyEventRow[], now: number = Date.now(
         awaitingContext = null;
         wordsWritten = true;
         break;
+      case "survey.finished":
+        // 終わりの画面まで行った ＝ **この導線はもう閉じている**。ひとこと待ちを必ず解く。
+        //
+        // ここが無いと〔書かない〕（skipWords）が抜け落ちる: skipWords は survey.finished
+        // しか残さないので、直前の survey.words_prompt が立てた「待ち」が解けず、以後
+        // AWAIT_WORDS_WINDOW_MS（24時間）のあいだ **その人の自由文がすべて**
+        // 「ひとこと」として言葉の置き場に入り、AI の会話の代わりに終わりの画面が返る。
+        // 「書かない」と言った人の言葉を黙って保存するのは、この機能でいちばんやってはいけないこと。
+        //
+        // 状態は出来事の履歴から組み直すので、**過去のログからでも同じように解ける**
+        // （skipWords の分は words_prompt より後ろに並ぶ。同時刻で並ぶことは無い:
+        //   words_prompt を出す回と finished を出す回は必ず別のリクエスト）。
+        // 終わったあとに〔ひとこと〕へ戻る道はある（もう一度合言葉 → 続き → 確認 → 呼びかけ）。
+        // そのときは新しい survey.words_prompt が後ろに並ぶので、待ちは正しく立ち直る。
+        awaitingWords = false;
+        awaitingContext = null;
+        break;
       case "survey.quote_consent":
         quoteAsked = true;
         break;

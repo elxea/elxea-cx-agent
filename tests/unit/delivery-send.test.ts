@@ -1320,7 +1320,6 @@ function baseDeps(over: Partial<OrchestratorDeps>): OrchestratorDeps {
     resolveTargets: async () => ({ kind: "broadcast", estimatedRecipients: 4 }),
     sender: createRecordingSender(),
     now: () => new Date("2026-07-10T05:00:00Z"),
-    sendEnabled: true,
     ...over,
   };
 }
@@ -1387,43 +1386,43 @@ describe("runDeliveryOnce: 正常系（順序 claim→ガード→送信）", ()
 });
 
 describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
-  it("dry-run（sendEnabled=false）は送信も書戻しもしない", async () => {
+  it("【スイッチ撤去】承認済み & due なら env 由来の抑止なしに必ず実送信する", async () => {
+    // 2026-08-22: 実送信スイッチ（DELIVERY_SEND_ENABLED）撤去の中核不変条件。
+    // deps に送信可否フラグは存在せず、ガードを通った行は必ず sender を叩く。
     const page = await makePage({});
     const repo = makeFakeRepo([page]);
-    const sender = createRecordingSender();
-    const res = await runDeliveryOnce(baseDeps({ repo, sender, sendEnabled: false }));
-    assertEqual(sender.calls.length, 0, "無送信");
-    assertFalse(repo.calls.includes("writeResult:Sent"), "書戻しなし");
-    assertEqual(res.processed[0].disposition, "sent", "dry-run 完走扱い");
-    assertTrue(res.processed[0].reason.includes("dry-run"), "dry-run 明記");
-  });
-  it("【QA Finding 1】dry-run は台帳 claim を挿入しない（非破壊）", async () => {
-    const page = await makePage({});
     const ledger = makeFakeLedger();
-    const repo = makeFakeRepo([page]);
     const sender = createRecordingSender();
-    const res = await runDeliveryOnce(
-      baseDeps({ repo, ledger, sender, sendEnabled: false }),
-    );
-    // 台帳に 1 行も claim されていない（=後の本番実送信を弾かない）。
-    assertEqual(ledger.rows.length, 0, "台帳 claim ゼロ");
-    // プレビュー結果（対象・見積）は返る。
-    assertEqual(res.processed[0].recipients, 4, "見積プレビュー返却");
-    assertTrue(res.processed[0].reason.includes("非破壊"), "非破壊プレビュー明記");
+    const res = await runDeliveryOnce(baseDeps({ repo, ledger, sender }));
+    assertEqual(sender.calls.length, 1, "実送信 1 回");
+    assertEqual(ledger.rows.length, 1, "台帳 claim 1 行");
+    assertTrue(repo.calls.includes("setStatus:Sending"), "Sending 遷移あり");
+    assertTrue(repo.calls.includes("writeResult:Sent"), "Sent 書戻しあり");
+    assertEqual(res.processed[0].disposition, "sent", "sent");
+    assertFalse(res.processed[0].reason.includes("dry-run"), "dry-run 文言は消えている");
   });
-  it("【QA Finding 1】dry-run は Notion を Sending に遷移させない", async () => {
-    const page = await makePage({});
-    const repo = makeFakeRepo([page]);
-    const res = await runDeliveryOnce(
-      baseDeps({ repo, sender: createRecordingSender(), sendEnabled: false }),
+  it("【スイッチ撤去】due が複数あっても各行が 1 回ずつ送信・claim される（一斉発火の会計）", async () => {
+    // 撤去により「過去日時の Approved が溜まっていると次の tick で一斉に飛ぶ」ため、
+    // 各行が独立に claim され、通数が積み上がることを固定する（取りこぼし・二重送信なし）。
+    const pages = [
+      await makePage({ id: "p1", title: "1" }),
+      await makePage({ id: "p2", title: "2" }),
+      await makePage({ id: "p3", title: "3" }),
+    ];
+    const repo = makeFakeRepo(pages);
+    const ledger = makeFakeLedger();
+    const sender = createRecordingSender();
+    const res = await runDeliveryOnce(baseDeps({ repo, ledger, sender }));
+    assertEqual(res.processed.length, 3, "3 行処理");
+    assertEqual(sender.calls.length, 3, "3 回送信（各行 1 回）");
+    assertEqual(ledger.rows.length, 3, "台帳 claim 3 行（各行 1 行）");
+    assertEqual(
+      res.processed.filter((p) => p.disposition === "sent").length,
+      3,
+      "全行 sent",
     );
-    // setStatus / writeResult / resetApproval を一切呼ばない（queryDue と reaper の querySending のみ）。
-    assertFalse(repo.calls.includes("setStatus:Sending"), "Sending 遷移なし");
-    assertFalse(repo.calls.some((c) => c.startsWith("writeResult")), "書戻しなし");
-    assertFalse(repo.calls.includes("resetApproval"), "reset なし");
-    assertEqual(repo.statuses[page.id], undefined, "status 未変更");
   });
-  it("【QA Finding 1】dry-run は reaper も走らせない（Sending 滞留を書き換えない）", async () => {
+  it("【スイッチ撤去】reaper は常に走る（Sending 滞留を必ず回収する）", async () => {
     // 15 分超の滞留 Sending ページを querySending が返す repo。
     const stale: DeliveryPage = {
       id: "stale-1",
@@ -1460,30 +1459,13 @@ describe("runDeliveryOnce: 送信が起きない条件（安全性）", () => {
       },
     };
     const res = await runDeliveryOnce(
-      baseDeps({ repo, ledgerHasClaim: async () => true, sendEnabled: false }),
+      baseDeps({ repo, ledgerHasClaim: async () => true }),
     );
-    // dry-run では reaper 自体を起動しない → querySending も回収書換も無し。
-    assertFalse(calls.includes("querySending"), "reaper 未起動");
-    assertFalse(calls.some((c) => c.startsWith("writeResult")), "回収書換なし");
-    assertEqual(res.reaper.length, 0, "reaper 結果ゼロ");
-  });
-  it("【QA Finding 1】dry-run 後に本番実送信すると claim も送信も正常に通る", async () => {
-    // dry-run が台帳を汚さないことの結合的確認: 同一 ledger で dry-run → 本番の順に実行。
-    const page = await makePage({});
-    const ledger = makeFakeLedger();
-    const sender = createRecordingSender();
-    // 1) dry-run（副作用ゼロ）
-    await runDeliveryOnce(
-      baseDeps({ repo: makeFakeRepo([page]), ledger, sender: createRecordingSender(), sendEnabled: false }),
-    );
-    assertEqual(ledger.rows.length, 0, "dry-run 後も台帳空");
-    // 2) 本番実送信（同一 ledger）→ claim 1 行 + 送信 1 回
-    const res = await runDeliveryOnce(
-      baseDeps({ repo: makeFakeRepo([page]), ledger, sender, sendEnabled: true }),
-    );
-    assertEqual(ledger.rows.length, 1, "本番で claim 1 行");
-    assertEqual(sender.calls.length, 1, "本番で送信 1 回");
-    assertEqual(res.processed[0].disposition, "sent", "Sent");
+    // スイッチ撤去後は reaper が常に走る（台帳 claim ありの滞留は Failed 化して二重送信を防ぐ）。
+    assertTrue(calls.includes("querySending"), "reaper 起動");
+    assertTrue(calls.includes("writeResult:Failed"), "滞留を Failed 化");
+    assertEqual(res.reaper.length, 1, "reaper 結果 1 件");
+    assertEqual(res.reaper[0].action, "recover_failed", "claim ありは recover_failed");
   });
   it("通数ガード超過なら送信しない（claim 前に弾く）", async () => {
     const page = await makePage({});
@@ -1543,7 +1525,7 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
     loadAllowlistUserIds: async () => ids,
   });
 
-  it("社内: dry-run（sendEnabled=false）は allowlist 人数を見積り・送信noop・claim ゼロ", async () => {
+  it("社内: allowlist の人数だけに multicast し claim も 1 行だけ立つ", async () => {
     const page = await makePage({ audienceRaw: "社内" });
     const repo = makeFakeRepo([page]);
     const ledger = makeFakeLedger();
@@ -1553,14 +1535,14 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
         repo,
         ledger,
         sender,
-        sendEnabled: false,
         resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Ua", "Ub"])),
       }),
     );
-    assertEqual(sender.calls.length, 0, "無送信（noop）");
-    assertEqual(ledger.rows.length, 0, "claim ゼロ（非破壊）");
+    assertEqual(sender.calls.length, 1, "multicast 1 回");
+    assertEqual(sender.calls[0].kind, "multicast", "社内は multicast 経路");
+    assertEqual(ledger.rows.length, 1, "claim 1 行");
     assertEqual(res.processed[0].recipients, 2, "allowlist 2 人と一致");
-    assertTrue(res.processed[0].reason.includes("社内"), "社内ラベル");
+    assertTrue(res.processed[0].reason.includes("実送信"), "実送信の実績が理由に出る");
   });
 
   it("社内: env 未設定は fail-closed（skip・送信なし）", async () => {
@@ -1570,7 +1552,6 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
       baseDeps({
         repo: makeFakeRepo([page]),
         sender,
-        sendEnabled: false,
         resolveTargets: (a) => resolveTargets(a, allowlistDeps([])),
       }),
     );
@@ -1602,7 +1583,6 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
       baseDeps({
         repo: makeFakeRepo([page]),
         sender: capSender,
-        sendEnabled: true,
         testImageUrls: imgs,
         resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Uonly"])),
       }),
@@ -1640,7 +1620,6 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
       baseDeps({
         repo: makeFakeRepo([page]),
         sender: capSender,
-        sendEnabled: true,
         testImageUrls: imgs,
         resolveTargets: async () => ({ kind: "broadcast", estimatedRecipients: 38 }),
       }),
@@ -1671,7 +1650,6 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
       baseDeps({
         repo: makeFakeRepo([page]),
         sender: capSender,
-        sendEnabled: true,
         testImageUrls: ["https://cdn.example.com/x.jpg"],
         resolveTargets: async () => ({
           kind: "multicast",
@@ -1686,7 +1664,7 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
     assertEqual(msgs[0].type, "text", "text");
   });
 
-  it("社内: sendEnabled=true でも multicast 経路（指定IDのみ・実送信数一致）", async () => {
+  it("社内: 実送信でも multicast 経路（指定IDのみ・実送信数一致）", async () => {
     const page = await makePage({ audienceRaw: "社内" });
     const repo = makeFakeRepo([page]);
     const sender = createRecordingSender();
@@ -1694,7 +1672,6 @@ describe("runDeliveryOnce: 社内 allowlist 経路（実 resolveTargets 結線�
       baseDeps({
         repo,
         sender,
-        sendEnabled: true,
         resolveTargets: (a) => resolveTargets(a, allowlistDeps(["Ua", "Ub", "Uc"])),
       }),
     );
@@ -1760,7 +1737,6 @@ describe("runDeliveryOnce: Notion files 画像（R2 恒久URL・全 audience 適
       baseDeps({
         repo: makeFakeRepo([page]),
         sender: capSender,
-        sendEnabled: true,
         // env ブリッジは渡さない（Notion files 経路のみで画像が乗ることを確認）。
         resolveTargets: async () => ({
           kind: "multicast",

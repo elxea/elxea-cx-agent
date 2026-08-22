@@ -4,12 +4,18 @@
  * 実アダプタ（Notion / Supabase / Firestore / LINE チャネル）を構築し、
  * オーケストレータ（delivery-orchestrator.ts）を駆動する `runDelivery` を提供する。
  *
- * ⚠ 実送信の絶対制約:
- *   - sendEnabled = (DELIVERY_SEND_ENABLED === "true")。既定 false。
- *   - false のときは orchestrator が step(g) の前で「非破壊プレビュー」early-return し、
- *     台帳 claim も setStatus(Sending) も writeResult も送信も一切行わない（QA Finding 1 修正）。
- *     sender=noopSender も併せて注入するが、そもそも送信点に到達しない。
- *   - cron からの自動発火は wrangler.toml crons=[] のため発生しない（本タスクでは実発火ゼロ）。
+ * ⚠ 実送信の前提（2026-08-22 変更: 実送信スイッチ撤去）:
+ *   - 以前あった env フラグ DELIVERY_SEND_ENABLED は **廃止した**。承認済み・予定時刻到来の行は
+ *     staging / 本番のどちらでも常に実送信される（「承認したら送られる」が唯一の判断点）。
+ *   - 送信可否を握る安全弁は次の多層ガードのみ:
+ *       (1) Notion Status=Approved かつ独立した承認者がいる（自己承認は fail-closed）
+ *       (2) 配信予定日時が存在し時刻付きで、かつ到来している
+ *       (3) 承認時コンテンツハッシュ（pin）と現在値が一致する（承認後の編集は自動リセット）
+ *       (4) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
+ *       (5) 宛先解決（allowlist 未設定・ペルソナ 0 件などは fail-closed）
+ *   - 送信先 OA は DELIVERY_TARGET_ENV で決まる（本番 Worker=prod OA / staging Worker=test OA）。
+ *   - 緊急停止は docs/deploy-runbook.md「配信を止める」節を参照（個別=Approved→Draft /
+ *     全体=15分 cron トリガの停止）。
  */
 
 import type { Env } from "../index";
@@ -53,7 +59,7 @@ import {
 } from "./image-ingest";
 import { isApprovalAuthorized, selfApprovalRelaxed } from "./delivery-approval";
 import { resolveDeliveryChannel } from "./delivery-channel";
-import { createLineSender, noopSender } from "./line-messages";
+import { createLineSender } from "./line-messages";
 import {
   resolveTargets,
   collectAllPages,
@@ -313,7 +319,11 @@ export async function pinDeliveryApproval(
   return { ok: true, contentHash };
 }
 
-/** 配信を 1 巡実行する（runtime 配線）。実送信は sendEnabled のときのみ。 */
+/**
+ * 配信を 1 巡実行する（runtime 配線）。
+ * 承認済み・予定時刻到来・pin 一致・通数ガード通過の行を実送信する
+ * （env の実送信スイッチは 2026-08-22 に廃止済み）。
+ */
 export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
   const supabase = createSupabaseClient(env);
 
@@ -337,7 +347,6 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
   }
 
   const channel = resolveDeliveryChannel(env); // token 未設定は throw（fail-closed）
-  const sendEnabled = env.DELIVERY_SEND_ENABLED === "true";
   // env 分離: prod ワーカーは prod DB、test/staging ワーカーは専用 test DB のみ読む。
   // 誤配線（共有 DB / cross-env）は送信前に fail-closed で塞ぐ（preflight 失敗として返す）。
   let dbId: string;
@@ -421,9 +430,11 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
       return (data?.length ?? 0) > 0;
     },
     resolveTargets: (audience: AudienceSpec) => resolveTargets(audience, targetDeps),
-    sender: sendEnabled ? createLineSender(channel) : noopSender,
+    // 実送信スイッチ撤去（2026-08-22）: 常に実 sender を配線する。
+    // 送信先 OA は resolveDeliveryChannel が env（DELIVERY_TARGET_ENV）から決める
+    // （本番 Worker=本番 OA / staging Worker=テスト OA）。
+    sender: createLineSender(channel),
     now: () => new Date(),
-    sendEnabled,
     // テスト環境限定の自己承認緩和（prod では selfApprovalRelaxed が常に false）。
     allowSelfApproval: selfApprovalRelaxed(env),
     // 順序付き画像URL群（恒久HTTPS・env が唯一の供給元）。orchestrator は audience が
@@ -433,10 +444,29 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
   };
 
   const result = await runDeliveryOnce(deps);
+  // 可観測性（実送信スイッチ撤去後の唯一の実績ログ）: 「実送信したか / 何通 / どの行が何故落ちたか」を
+  // 1 行で追えるようにする。以前は sendEnabled= を見て dry-run/実送信を判別していたため、
+  // 撤去に伴い disposition 別内訳と実送信通数（recipients 合計）をログに載せる。
+  const count = (d: string) =>
+    result.processed.filter((p) => p.disposition === d).length;
+  const delivered = result.processed
+    .filter((p) => p.disposition === "sent")
+    .reduce((sum, p) => sum + p.recipients, 0);
   console.log(
-    `[delivery] env=${channel.label} sendEnabled=${sendEnabled} month=${currentLineMonth()} ` +
-      `scanned=${result.scanned} processed=${result.processed.length} reaper=${result.reaper.length}`,
+    `[delivery] env=${channel.label} month=${currentLineMonth()} ` +
+      `scanned=${result.scanned} processed=${result.processed.length} ` +
+      `sent=${count("sent")} recipients=${delivered} skipped=${count("skipped")} ` +
+      `reset=${count("reset")} failed=${count("failed")} reaper=${result.reaper.length}`,
   );
+  // 実送信した行は個別にも残す（PII 非記載: pageId / タイトル / 対象種別 / 通数のみ）。
+  for (const p of result.processed) {
+    if (p.disposition === "sent" || p.disposition === "failed") {
+      console.log(
+        `[delivery] ${p.disposition} page=${p.pageId} audience=${p.audience ?? "-"} ` +
+          `recipients=${p.recipients} reason=${p.reason}`,
+      );
+    }
+  }
   return result;
 }
 
@@ -457,8 +487,8 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
 //   - pin 失敗（HEIC 等の LINE 非対応形式 / R2 未設定 / 自己承認）は fail-closed で
 //     resetApproval（Status を Draft に戻し、平易な日本語をエラー詳細へ）。
 //     → 承認を通さないので runDelivery の対象からも外れる（壊れた配信を出さない）。
-//   - 実送信は runDelivery 側の DELIVERY_SEND_ENABLED ガードのみが握る。
-//     本 poll は「拾って承認 pin まで」を担い、送信可否は一切変えない。
+//   - 本 poll は「拾って承認 pin まで」を担い、送信可否は一切変えない。
+//     送信可否は runDelivery 側の多層ガード（承認者独立性・予定日時・ハッシュ照合・通数台帳）が握る。
 
 /** 承認 pin 前処理（phase 1）の注入依存（テストは fake、runtime は実 I/O を配線）。 */
 export interface ScheduledPinDeps {
@@ -546,8 +576,8 @@ export async function runScheduledDeliveryWith(
 
 /**
  * cron ポーリング 1 巡（runtime 配線）。
- * scheduled ハンドラ（15分毎 cron）と手動 run API から呼ぶ。実送信は runDelivery の
- * DELIVERY_SEND_ENABLED ガードのみが握る（本関数は送信可否を変えない）。
+ * scheduled ハンドラ（15分毎 cron）と手動 run API から呼ぶ。本関数は送信可否を変えない
+ * （送信可否は runDelivery の多層ガードが握る）。
  */
 export async function runScheduledDelivery(
   env: Env,

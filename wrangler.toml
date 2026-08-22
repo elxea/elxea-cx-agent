@@ -18,9 +18,10 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 # 配信対象 OA の固定（本番）。未設定だと delivery-channel.ts が fail-closed で "test" に倒れ、
 # 本番に test トークンが無いため 15分毎 cron が毎 tick resolveDeliveryChannel で例外を投げていた
 # （誤送信ゼロの安全な故障だが監視ノイズ）。本番は本番 OA（@307tzhkw）に明示固定する。
-#   ⚠ 実送信ガードは別レイヤ: DELIVERY_SEND_ENABLED（secret）を "true" にしない限り送らない。
-#     GA まではこの secret を "false" に固定してある（`wrangler secret put DELIVERY_SEND_ENABLED`）。
-#     TARGET_ENV=prod は「dry-run の対象を本番 OA に向ける」だけで、送信可否は変えない。
+#   ⚠ 2026-08-22: 実送信スイッチ（旧 secret DELIVERY_SEND_ENABLED）は撤去した。
+#     承認済み（Status=Approved）かつ配信予定日時が到来した行は **実送信される**。
+#     DELIVERY_TARGET_ENV="prod" は送信先 OA を本番（@307tzhkw / 実顧客）に固定する指定であり、
+#     ここが "prod" の Worker は本番の友だち全員に届く。テストは staging 側で行うこと。
 DELIVERY_TARGET_ENV = "prod"
 
 [ai]
@@ -34,11 +35,14 @@ enabled = true
 #   - "*/15 * * * *": 15分毎に scheduled ハンドラ（DELIVERY_CRON_PATTERN 分岐）が
 #       runScheduledDelivery を実行する。運用者は Notion で Status=Approved にするだけで、
 #       cron が承認 pin（画像R2化・ハッシュ凍結）→ runDelivery まで代行する。
-#   ⚠ 実送信ガード（多層）:
-#       (1) runDelivery は DELIVERY_SEND_ENABLED="true" のときだけ実送信。既定 未設定=false で
-#           dry-run（非破壊プレビュー・LINE api.line.me 非接触）。cron が回っても送らない。
-#       (2) 本ブランチでは DELIVERY_SEND_ENABLED を "true" にしない（[vars] に置かない）。
-#       → 「cron 発火 × dry-run」で、承認 pin までは進むが実送信ゼロ（GA 時にフラグ ON）。
+#   ⚠ この cron は実送信を行う（2026-08-22 に env の実送信スイッチを撤去）。
+#     送信可否を握る安全弁は次の多層ガードのみ:
+#       (1) Status=Approved かつ独立した承認者がいる（自己承認は fail-closed）
+#       (2) 配信予定日時が時刻付きで存在し、到来している
+#       (3) 承認時コンテンツハッシュと現在値が一致（承認後に編集されたら自動で承認リセット）
+#       (4) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
+#     緊急停止（配信を全部止める）はこの crons から "*/15 * * * *" を外して
+#     `pnpm exec wrangler triggers deploy` する。docs/deploy-runbook.md「配信を止める」節参照。
 #   - 日次同期（毎日 AM3:00 JST = PM6:00 UTC）: "0 18 * * *"。
 #       T3 修正: 以前は配信パターン（*/15）しか crons に無く、scheduled の配信分岐が return
 #       するため同期（runBatchMetafieldSync 含む）が「登録 cron から一度も発火しない」死蔵
@@ -67,8 +71,9 @@ name = "elxea-agent-staging"
 #   DELIVERY_TARGET_ENV = "test": staging は必ず「テスト OA（@426vlcyb）」に固定する。
 #     src/lib/delivery-channel.ts が targetEnv=test のとき LINE_CHANNEL_ACCESS_TOKEN_TEST を選ぶ。
 #     → staging から本番 OA（@307tzhkw / 友だち 38）へ誤送信しないための固定。
-#   DELIVERY_SEND_ENABLED は「置かない」。未設定=dry-run 維持（runDelivery が実送信しない）。
-#     実送信は GA 時に `wrangler secret put`/vars で "true" を手動投入する（本ブランチでは入れない）。
+#   ⚠ 2026-08-22: staging も「承認したら実送信」になった（実送信スイッチ撤去）。
+#     staging で Status=Approved にした行は、テスト OA（@426vlcyb）の友だちに実際に届く。
+#     「未設定だから送られない」という前提はもう成立しない。テスト用 LINE を必ず使うこと。
 # ⚠ 秘密（値はコミットしない・[vars] に書かない）は全て secret として別途投入する:
 #     wrangler secret put LINE_CHANNEL_ACCESS_TOKEN_TEST --env staging
 #     wrangler secret put LINE_CHANNEL_SECRET_TEST       --env staging
