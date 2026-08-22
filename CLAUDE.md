@@ -31,8 +31,12 @@ pnpm typecheck        # TypeScript 型チェック
 
 ## 環境変数
 
-`.dev.vars` (ローカル) または Cloudflare Workers Secrets (本番) に設定。
+`.dev.vars` (ローカル) またはCloudflare Workers Secrets (本番) に設定。
 `.env.example` を参照。
+
+ローカル検証の前に、`.dev.vars` の値が本番と乖離していないかを確認する。
+特に `SYNC_API_SECRET` は2026-08-22に本番をローテートしたため、
+手元の値が古いと同期系APIが401で落ちる。取得元は `.env.example` の同項目のコメントを参照 (値はここに書かない)。
 
 ## アーキテクチャ
 
