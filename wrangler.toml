@@ -18,10 +18,11 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 # 配信対象 OA の固定（本番）。未設定だと delivery-channel.ts が fail-closed で "test" に倒れ、
 # 本番に test トークンが無いため 15分毎 cron が毎 tick resolveDeliveryChannel で例外を投げていた
 # （誤送信ゼロの安全な故障だが監視ノイズ）。本番は本番 OA（@307tzhkw）に明示固定する。
-#   ⚠ 2026-08-22: 実送信スイッチ（旧 secret DELIVERY_SEND_ENABLED）は撤去した。
-#     承認済み（Status=Approved）かつ配信予定日時が到来した行は **実送信される**。
+#   ⚠ 2026-08-22: 実送信スイッチ（旧 secret DELIVERY_SEND_ENABLED）は撤去した。さらに同日、
+#     一斉配信は **完全オンデマンド** になった（cron からの自動配信を廃止）。承認済み
+#     （Status=Approved）の行は、`POST /api/delivery/run` を叩いたときにだけ実送信される。
 #     DELIVERY_TARGET_ENV="prod" は送信先 OA を本番（@307tzhkw / 実顧客）に固定する指定であり、
-#     ここが "prod" の Worker は本番の友だち全員に届く。テストは staging 側で行うこと。
+#     ここが "prod" の Worker で run を叩くと本番の友だち全員に届く。テストは staging 側で行うこと。
 DELIVERY_TARGET_ENV = "prod"
 
 [ai]
@@ -31,26 +32,21 @@ binding = "AI"
 enabled = true
 
 # ── Cron Triggers ──
-# Notion駆動 LINE配信の「承認→自動配信トリガー」配線（QA 指摘① の配線欠落を解消）。
-#   - "*/15 * * * *": 15分毎に scheduled ハンドラ（DELIVERY_CRON_PATTERN 分岐）が
-#       runScheduledDelivery を実行する。運用者は Notion で Status=Approved にするだけで、
-#       cron が承認 pin（画像R2化・ハッシュ凍結）→ runDelivery まで代行する。
-#   ⚠ この cron は実送信を行う（2026-08-22 に env の実送信スイッチを撤去）。
-#     送信可否を握る安全弁は次の多層ガードのみ:
-#       (1) Status=Approved かつ独立した承認者がいる（自己承認は fail-closed）
-#       (2) 配信予定日時が時刻付きで存在し、到来している
-#       (3) 承認時コンテンツハッシュと現在値が一致（承認後に編集されたら自動で承認リセット）
-#       (4) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
-#     緊急停止（配信を全部止める）はこの crons から "*/15 * * * *" を外して
-#     `pnpm exec wrangler triggers deploy` する。docs/deploy-runbook.md「配信を止める」節参照。
+# ⚠ 2026-08-22（Setaka 指示・完全オンデマンド化）: **一斉配信の cron は登録しない**。
+#   旧 "*/15 * * * *"（15分毎の自動配信）は撤去した。承認済み行が時刻到来で自動送信される経路は
+#   もう存在しない。配信は `POST /api/delivery/run` を明示的に叩いたときにだけ走る
+#   （docs/deploy-runbook.md「LINE 配信の運用ゲート」/ docs/line-delivery-guide.md 参照）。
+#   多層防御: 万一この crons に "*/15 * * * *" が復活しても、src/index.ts の scheduled ハンドラは
+#   cronKind==="delivery" を **no-op** で握りつぶす（配信は発火しない）。cron を復活させるだけでは
+#   自動配信に戻らない = 意図しない自動化の再混入を構造的に防ぐ。
+#
+#   ここに残す cron は「配信以外の定期処理」だけ:
 #   - 日次同期（毎日 AM3:00 JST = PM6:00 UTC）: "0 18 * * *"。
-#       T3 修正: 以前は配信パターン（*/15）しか crons に無く、scheduled の配信分岐が return
-#       するため同期（runBatchMetafieldSync 含む）が「登録 cron から一度も発火しない」死蔵
-#       だった。同期パターンを登録し、SYNC_CRON_PATTERN 明示分岐で配信 cron と両立させる。
-#       同期は非破壊（ナレッジ同期 + metafield 書き込み）。実発火は本番デプロイ後。
+#       classifyCron → "sync" → ナレッジ同期 + karte 照合 + Shopify Metafield バッチ同期。
+#       非破壊（LINE 送信系 API に触れない）。配信オンデマンド化の影響を受けない。
 #   - 旧・セグメント配信（T10 退役）"0 21 1,15 * *" は再登録しない。
 [triggers]
-crons = ["*/15 * * * *", "0 18 * * *"]
+crons = ["0 18 * * *"]
 
 # ── R2（配信画像ホスティング）──
 # Notion files「画像」→ R2 → 恒久公開URL で LINE 送信する（画像 put は承認 pin 時のみ）。
@@ -101,15 +97,18 @@ binding = "AI"
 
 # ── Staging 限定 Cron Triggers（P0-7b 配信計測 fetch + ブロック3-B 休眠検知）──
 # Cloudflare の triggers は継承キー（vars と違い env に継承される）。ここで env 上書きすると
-# top-level [triggers] を「置換」するため、既存の 2 本（配信 15分毎 / 同期 03:00 JST）を
-# 再掲したうえで stats（04:00 JST）を足す。これで staging = 配信+同期+計測、本番 = 配信+同期。
+# top-level [triggers] を「置換」するため、top-level に残る 1 本（同期 03:00 JST）を再掲した
+# うえで stats（04:00 JST）を足す。これで staging = 同期+計測、本番 = 同期のみ。
+#   ⚠ 2026-08-22 完全オンデマンド化: staging からも配信 cron "*/15 * * * *" を外した。
+#     staging の配信検証は `POST /api/delivery/run`（テスト OA 宛て）で明示的に叩いて行う。
 #   ⚠ 本番 [triggers] には stats を入れない（本番配信計測の有効化は GA/昇格ゲートで別途判断）。
 #   - "0 19 * * *"（04:00 JST）: classifyCron → "stats" → runBroadcastStatsFetch。
 #       読み取り専用（LINE Insight GET + Supabase）。LINE 送信系 API は呼ばない（実配信ゼロ）。
 #       broadcast_stats（migration 024）未適用時は fail-soft（ok:false 理由ログ・例外を投げない）。
 #
 # ── ブロック3-B 休眠検知の cron（専用トリガは付けられないため stats tick に同居）──
-#   Cloudflare の cron trigger はアカウント上限 5 本（本番 2 + staging 3 = 5 で既に上限）。
+#   Cloudflare の cron trigger はアカウント上限 5 本（配信 cron 撤去後は 本番 1 + staging 2 = 3 で
+#   枠に余裕はあるが、休眠専用トリガの新設は別途 GA 判断とし、同居のまま据え置く）。
 #   6 本目（"0 20 * * *"）は 10072「exceeded the limit of 5 cron triggers」で登録拒否される（実測 2026-07-16）。
 #   よって専用トリガを新設せず、staging 限定の stats tick（0 19・本番 triggers に無い）に休眠スキャンを同居させる
 #   （index.ts の "stats" 分岐が runBroadcastStatsFetch と runDormantReengagement を両方 waitUntil する）。
@@ -128,4 +127,4 @@ binding = "AI"
 #     手動疎通は /api/marche-activation/run で起動可能（dry-run・対象0でも正常終了）。
 #   しきい値/窓/上限は env で調整可（MARCHE_ACTIVATION_THRESHOLD_DAYS=1 / _WINDOW_DAYS=14 / _PER_RUN_CAP=20 が既定）。
 [env.staging.triggers]
-crons = ["*/15 * * * *", "0 18 * * *", "0 19 * * *"]
+crons = ["0 18 * * *", "0 19 * * *"]

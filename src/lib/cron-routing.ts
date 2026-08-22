@@ -6,7 +6,18 @@
  * テスト可能にする（entry に関数を足すと Workers が誤ってハンドラ解釈する懸念を避ける）。
  */
 
-/** 配信 cron（15分毎）。runScheduledDelivery を回す。 */
+/**
+ * 旧・配信 cron（15分毎）。**2026-08-22 に自動配信を廃止したため、この定数はもう
+ * 「配信を回すパターン」ではない**（wrangler.toml の crons からも削除済み）。
+ *
+ * 定数と "delivery" 分岐を残す理由（削除しないこと）:
+ *   classifyCron は未知パターンを "sync"（安全網）に倒す設計なので、この定数を消すと
+ *   万一 15分毎パターンが cron に復活したときに **15分毎に日次同期が走る** 誤爆になる。
+ *   明示的に "delivery" へ分類し、index.ts 側で **no-op**（何もしないで return）に倒すことで、
+ *   「復活しても配信もしないし同期も誤爆しない」状態を保つ。
+ *
+ * 配信の起動経路は `POST /api/delivery/run` のみ（オンデマンド）。
+ */
 export const DELIVERY_CRON_PATTERN = "*/15 * * * *";
 
 /** 同期 cron（毎日 18:00 UTC = 03:00 JST）。ナレッジ同期 + Shopify Metafield 同期を回す。 */
@@ -30,15 +41,21 @@ export const STATS_CRON_PATTERN = "0 19 * * *";
  */
 export const DORMANT_CRON_PATTERN = "0 20 * * *";
 
-/** cron パターンの分類結果。 */
+/**
+ * cron パターンの分類結果。
+ * "delivery" は **退役済みの分類**（index.ts は no-op で握りつぶす）。誤爆防止のため型からは消さない。
+ */
 export type CronKind = "delivery" | "sync" | "stats" | "dormant";
 
 /**
  * cron パターンを処理種別に分類する（純粋）。
  *
- * T3 の要点: 配信パターンだけを配信に振り、それ以外（同期パターン + 想定外）はすべて
+ * T3 の要点: 配信パターンだけを "delivery" に振り、それ以外（同期パターン + 想定外）はすべて
  * 同期に倒す。これにより「配信分岐の return で同期が死蔵する」問題を構造的に解消する
  * （配信パターン以外は必ず同期へ到達する）。
+ *
+ * 2026-08-22（完全オンデマンド化）: "delivery" は **退役分類** になった。index.ts の該当分岐は
+ * 何もせず return する。この関数の役割は「15分毎パターンを sync に落とさない」誤爆防止に変わった。
  *
  * P0-7b 追加: 配信計測 fetch を 3 種目として明示分岐する（STATS_CRON_PATTERN）。
  * 明示パターンに一致しないものは従来どおり sync（安全網）に倒れる。

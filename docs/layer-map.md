@@ -8,7 +8,7 @@
 npx tsx scripts/layer-map.ts --out docs/layer-map.md
 ```
 
-生成日時: 2026-08-11 13:46 UTC
+生成日時: 2026-08-22 08:10 UTC
 
 ## 層の定義
 
@@ -24,8 +24,8 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 |---|---|
 | CDP | 35 |
 | CX | 42 |
-| shared | 12 |
-| **合計** | **89** |
+| shared | 11 |
+| **合計** | **88** |
 
 ## 境界が曖昧なファイル（明示宣言あり）
 
@@ -141,14 +141,13 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 
 | ファイル | 根拠 | 概要 |
 |---|---|---|
-| `src/index.ts` | パス規則: アプリの起動点（層に属さない配線） | 配信用 cron パターン（誤発火防止のため明示分岐で判定）。 |
+| `src/index.ts` | パス規則: アプリの起動点（層に属さない配線） | 配信の起動経路（2026-08-22 完全オンデマンド化・Setaka 指示）。 |
 | `src/lib/alerts.ts` | パス規則: 運用アラート通知 | Alert Monitoring -- 異常検知アラート |
 | `src/lib/content-hash.ts` | パス規則: 内容ハッシュ（重複判定の道具） | コンテンツ pinning（TOCTOU 対策）のハッシュ計算。 |
 | `src/lib/cron-routing.ts` | パス規則: 定期実行のルーティング | Cron ルーティング（純粋・I/O なし・ユニットテスト可能）。 |
 | `src/lib/delivery-approval.ts` | パス規則: 配信承認ゲート（安全装置） | 承認ガード（純粋・I/O なし）。 |
 | `src/lib/delivery-channel.ts` | パス規則: 配信先環境の判定 | 2 環境（本番 / テスト）の LINE チャネル切替（設計 確定要件 1）。 |
 | `src/lib/delivery-runtime.ts` | パス規則: 配信実行の共通ランタイム | 配信 runtime 配線（T8/T9 の実 I/O 束ね）。 |
-| `src/lib/delivery-time.ts` | パス規則: 配信時刻の計算 | 配信予定日時の厳格化（純粋・I/O なし）。 |
 | `src/lib/env.ts` | パス規則: 環境変数 | 型安全に環境変数を取得するヘルパー。 |
 | `src/lib/sync-auth.ts` | パス規則: 同期処理の認証 | Sync API 認証 -- 共通ヘルパー（X-API-Key / SYNC_API_SECRET） |
 | `src/lib/utils.ts` | パス規則: 汎用ユーティリティ | 共通ユーティリティ関数 |

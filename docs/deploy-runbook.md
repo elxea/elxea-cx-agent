@@ -16,9 +16,9 @@ staging（`elxea-agent-staging`）を「テスト OA（@426vlcyb）」に載せ�
 > - `wrangler.toml [env.staging.vars]` に `DELIVERY_TARGET_ENV = "test"` を固定済み。
 >   staging は常にテスト OA を対象にする（`src/lib/delivery-channel.ts` が
 >   `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択）。
-> - ⚠ **実送信スイッチは存在しない**（2026-08-22撤去）。stagingでも「Status=Approvedかつ
->   配信予定日時が到来した行」はテストOA（@426vlcyb）へ**実際に送信される**。
->   詳細は「LINE配信の運用」節を参照。
+> - ⚠ **実送信スイッチは存在しない**（2026-08-22撤去）。stagingでも `POST /api/delivery/run` を
+>   叩けば「Status=Approvedの行」はテストOA（@426vlcyb）へ**実際に送信される**（予定日時は無関係）。
+>   逆に、cronの自動配信は無いので**放っておいても送られない**。詳細は「LINE配信の運用」節を参照。
 
 ### 1. secret を staging に投入（値はコミットしない）
 
@@ -284,47 +284,96 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
-| 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。承認済み・予定時刻到来の行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
+| **配信の起動方法** | **完全オンデマンド（2026-08-22）**。cronの自動配信は**廃止**。`POST /api/delivery/run` を叩いたときにだけ配信が走る | Setaka指示（「承認済みが勝手に飛ぶより、回したときに送るほうが安全」）。`wrangler.toml` のcronsに配信パターンなし + `src/index.ts` のdelivery分岐はno-op（`tests/unit/cron-routing.test.ts` が両方を機械検知） |
+| **配信予定日時** | **送信条件ではない**。Approvedなら未来でも空でも送られる。記録用のメモとして残るだけ | `queryApprovedDeliveries()` のフィルタからdate条件を削除 / `processPage()` の日時ゲートを廃止（`delivery-time.ts` ごと削除） |
+| 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。オンデマンド実行で拾われた行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
 | prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
 
-#### ⚠ 最重要の運用ルール: 承認 = 送信。envを確認して安心しない
+#### ⚠ 最重要の運用ルール: 承認しただけでは送られない。「回した瞬間」に送られる
 
-**2026-08-22に実送信スイッチ（`DELIVERY_SEND_ENABLED`）を撤去した。**
-以後、送信の可否を決めるのはenvではなく **配信DBの行の状態**だけである。
+**2026-08-22に (1) 実送信スイッチ `DELIVERY_SEND_ENABLED` を撤去し、(2) cronの自動配信を廃止した。**
+以後、配信が走るのは **`POST /api/delivery/run` を叩いた瞬間だけ**である。
+時刻が来ても、承認しただけでも、何も起きない。
 
-送信されるのは次を **すべて** 満たす行（`queryDueDeliveries()` + `processPage()`）:
+オンデマンド実行時に送信されるのは次を **すべて** 満たす行（`queryApprovedDeliveries()` + `processPage()`）:
 
 1. `Status=Approved` かつ `送信済み=false`
-2. `配信予定日時` が時刻付きで存在し、**すでに到来している**（date-only・空・不正はfail-closed）
-3. **承認者が存在する**（`承認者` 空は常に拒否。単独運用モードでも空は不可）
-4. **コンテンツハッシュが承認時と一致**（承認後に本文・画像を編集すると承認が自動リセットされる）
-5. 宛先が解決できる（`社内`=allowlist未設定、ペルソナ0件などはfail-closedでskip）
-6. **通数台帳claimに成功**（同一 `notion_page_id` × 月の二重送信を排他）+ 無料枠ガード内
+2. **承認者が存在する**（`承認者` 空は常に拒否。単独運用モードでも空は不可）
+3. **コンテンツハッシュが承認時と一致**（承認後に本文・画像を編集すると承認が自動リセットされる）
+4. 宛先が解決できる（`社内`=allowlist未設定、ペルソナ0件などはfail-closedでskip）
+5. **通数台帳claimに成功**（同一 `notion_page_id` × 月の二重送信を排他）+ 無料枠ガード内
 
-> **運用ルール（守ること）**: 配信DBを触る作業（Approved行の作成・日時変更・再承認）は、
-> **その操作が最大15分後に実顧客へ届く操作である**という前提で行う。
-> 「envがまだOFFだから練習できる」という逃げ道は存在しない。
+**`配信予定日時` は上のリストに入っていない。** これは意図的な仕様変更である（2026-08-22）。
+運用者が明示的に「配信して」と回した以上、Approvedの行は予定日時が未来でも空でも送る
+（「承認済み＝送る準備ができている」という意味付け）。予定日時プロパティ自体は
+**運用者の記録用メモとして残す**（いつ出す予定だったかの記録・空でも構わない）。
+コード上、送信判定はこの値を一切参照しない。
+
+> **運用ルール（守ること）**: `POST /api/delivery/run` を叩く前に、**配信DBの `Status=Approved` の行を
+> 必ず一覧で確認する**。そこに写っている行は「予定日時に関わらず全部その場で飛ぶ」。
+> 出したくない行が混じっていたら、先にDraftに戻してから回す。
 > 練習は必ず **staging + テスト用DB + テストOA（@426vlcyb）** で行う（後述「テスト配信の手順」）。
+
+#### オンデマンド実行のしかた（唯一の配信起動経路）
+
+`SYNC_API_SECRET` によるBearer認証必須（未設定・不一致は401でfail-closed）。
+**結果は同期で返る**（旧実装は投げっぱなしで結果が分からなかった）。
+
+```bash
+# --- staging（テストOA @426vlcyb 宛て・練習はこちら）---
+curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/run \
+  -H "Authorization: Bearer $SYNC_API_SECRET_STAGING" | jq .
+
+# --- 本番（実顧客OA @307tzhkw 宛て・Tier 2 = Setaka承認が必要）---
+curl -sS -X POST https://elxea-agent.setaka-on.workers.dev/api/delivery/run \
+  -H "Authorization: Bearer $SYNC_API_SECRET" | jq .
+```
+
+レスポンス例（`targetEnv` で送信先OAを、`summary` で実績を確認する）:
+
+```json
+{
+  "status": "delivery_completed",
+  "targetEnv": "test",
+  "summary": {
+    "pinned": 1, "alreadyPinned": 0, "resetFailed": 0,
+    "scanned": 1, "sent": 1, "recipients": 4,
+    "skipped": 0, "reset": 0, "failed": 0, "reaper": 0
+  },
+  "processed": [ { "pageId": "...", "disposition": "sent", "reason": "Sent: 実送信 4/4", "recipients": 4 } ]
+}
+```
+
+- `sent` / `recipients` が実送信の実績。`0` なら1通も出ていない。
+- `skipped` / `reset` / `failed` の理由は `processed[]` の `reason` に平易な日本語で入る。
+- **`targetEnv` が `prod` のレスポンスは実顧客に届いたことを意味する。** 練習時は必ず `test` を確認する。
+- 対象0件でも正常終了する（`scanned: 0` / HTTP 200）。疎通確認はこれで安全にできる。
 
 ##### 実際に送られたかを確認する方法（すべて読み取りのみ）
 
-1. **配信DBを見る**: 予定日時を過ぎた行が `Sent` / `送信済み=true` になっていれば送信済み。
-   `Failed` / `PartialFail` ならエラー詳細を読む。`Approved` のまま残っている場合は上の3〜6の
-   いずれかで止まっている（`エラー詳細` 欄かcronログを見る）。
+0. **実行時のレスポンスを読む**（いちばん速い）: 上の `POST /api/delivery/run` は結果を同期で返す。
+   `summary.sent` / `summary.recipients` がその実行で実際に送った件数・通数。
+1. **配信DBを見る**: 実行後に `Sent` / `送信済み=true` になっていれば送信済み。
+   `Failed` / `PartialFail` ならエラー詳細を読む。`Approved` のまま残っている場合は上の2〜5の
+   いずれかで止まっている（`エラー詳細` 欄かログを見る）。
 2. **通数台帳を見る**: `line_message_ledger` の当月行の `recipients` の増分が実送信通数。
-3. **cronログを読む**（読み取り専用・15分ごとのtickを待つ）:
+3. **Workerログを読む**（読み取り専用・実行と並行して流す）:
 
 ```bash
 # 本番 Worker のログを追う（--env を付けない = 本番 elxea-agent）。読み取り専用。
 pnpm exec wrangler tail --format pretty
-# 15 分ごとの cron tick で次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
+# run を叩いたときだけ次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
 #   [delivery] env=prod(@307tzhkw) month=2026-08 scanned=1 processed=1 sent=1 recipients=48 \
 #     skipped=0 reset=0 failed=0 reaper=0
 # sent / recipients が実送信の実績。skipped / reset / failed は理由が後続行に出る:
 #   [delivery] sent page=<id> audience=全員 recipients=48 reason=Sent: 実送信 48/48
+#
+# ⚠ もし run を叩いていないのに [delivery] 行が出たら異常（自動配信が復活している）。
+#   併せて次の警告が出ていないか確認する（cron に配信パターンが残っている印）:
+#   [delivery] cron tick ignored: 一斉配信はオンデマンド専用（POST /api/delivery/run）。
 ```
 
 出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] ...")`、
@@ -354,37 +403,47 @@ pnpm exec wrangler tail --format pretty
 
 ### 配信を止める
 
+**大前提: `POST /api/delivery/run` を叩かなければ何も送られない。** 完全オンデマンド化により、
+「放っておいたら飛ぶ」経路は存在しない。以下は「回すつもりだが、この行だけは出したくない」ときの操作。
+
 | 目的 | 操作 |
 |---|---|
-| **1件を止める** | Notion配信DBの該当行の **StatusをApproved → Draftに戻す**（予定時刻前なら止まる） |
+| **1件を止める** | Notion配信DBの該当行の **StatusをApproved → Draftに戻す**（runを叩く前なら確実に止まる） |
+| **全部止める** | 何もしない（runを叩かない）。念のためならApprovedの行をすべてDraftに戻す |
 
-- 予定時刻を過ぎている、またはcron実行中の行は**間に合わない可能性がある**。
-- **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
+- **run実行中の行は間に合わない**。実行は数秒で終わるため、走り出したら止められない。
+- **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認 → runで行う。
 - 複数件を止めたいときは、対象の行を1件ずつDraftに戻す
-  （Approvedの行だけが送信対象なので、Approvedをゼロにすれば新規の送信は起きない）。
+  （Approvedの行だけが送信対象なので、Approvedをゼロにすればrunを叩いても何も出ない）。
 
 ### 本番デプロイ前の確認（配信コードを変更したとき）
 
-配信まわりを変更して本番へ出す前に、**本番配信DBのApproved行を必ず確認する**
+**デプロイそのものでは配信は起きない**（cronの自動配信が無いため）。デプロイ直後に勝手に飛ぶ心配はない。
+ただし「次にrunを叩いたときに何が飛ぶか」は変わりうるので、**本番配信DBのApproved行を必ず確認する**
 （`f95bb981-3c1a-4b6e-abd2-8b39551f6492` をStatus=Approvedで絞り込む）。
 
-- Approvedかつ配信予定日時が**過去**の行があれば、デプロイ後の次のcron tick（最大15分後）に**送信される**。
-- 送るつもりのない行は **Draftに戻してから**デプロイする。
+- **⚠ 完全オンデマンド化に伴う注意（2026-08-22）**: 予定日時が**未来**のApproved行も、
+  次のrunで**送信対象になる**（旧仕様では時刻前だったので送られなかった）。
+  「予約のつもりで先にApprovedにしておいた行」が残っていないか、初回のrun前に必ず点検する。
+- 送るつもりのない行は **Draftに戻してから** runを叩く。
 - 参照ビューは **「Default view」**（「かんたん配信（運用者用）」は `送信済み` を表示しない）。
 
 ### テスト配信の手順（検証環境・お客さまに届かない）
 
 > **`--env staging` を必ず付ける。付け忘れたコマンドは本番 Worker（実顧客 OA）への操作になる。**
 
-> **⚠ stagingも「承認したら実送信」になった（2026-08-22）。** 届く先がテストOA（@426vlcyb）なだけで、
+> **⚠ stagingも「runを叩いたら実送信」になった（2026-08-22）。** 届く先がテストOA（@426vlcyb）なだけで、
 > 送信そのものは本番と同じに起きる。「stagingはスイッチ未設定だから送られない」は**もう成り立たない**。
+> 逆に、**待っていても送られない**（cronの自動配信は無い）。必ず自分でrunを叩く。
 
 1. **テスト用DBに行を作る**: 「[TEST] 配信コンテンツ (staging/@426vlcyb)」
    （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作成しApprovedにする。
-   本番「配信コンテンツ」には**作らない**。
-2. **配信を待って実機確認**（テストOA @426vlcyb・最大15分 + 配信予定日時）。写真の順序・改行・文字化けを目視する。
+   本番「配信コンテンツ」には**作らない**。配信予定日時は空でも過去でも未来でも構わない（送信条件ではない）。
+2. **runを叩く**（上の「オンデマンド実行のしかた」のstaging側コマンド）。レスポンスの
+   `targetEnv` が `test` であることを必ず確認する。`summary.sent` / `recipients` が実績。
+3. **実機確認**（テストOA @426vlcyb）。写真の順序・改行・文字化けを目視する。
    Notion側の書き戻し（Status=Sent / 送信結果 / 消費実績 / sent_at）も確認する。
-3. **検証が終わったら、テスト用DBにApprovedの行を残さない**（残すと予定日時到来のたびに送信される）。
+4. **検証が終わったら、テスト用DBにApprovedの行を残さない**（残すと次にrunを叩いた人が送ってしまう）。
    使い終わった行はDraftに戻すか、送信済み（Sent）まで完走させる。
 
 ### staging に必要な設定（テスト配信の前提）
@@ -419,8 +478,9 @@ pnpm exec wrangler secret list --env staging
 
 | 目的 | 操作 | 効果 |
 |---|---|---|
-| 特定1件を止める | NotionでStatusを **Approved → Draft** | 予定時刻前なら送信対象から外れる。時刻到来後・cron実行中は間に合わない可能性あり |
-| 配信を止める（本番・staging共通） | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | Approvedの行だけが送信対象。Approvedがゼロなら新規の送信は起きない |
+| すべて止める（本番・staging共通） | **`POST /api/delivery/run` を叩かない** | 完全オンデマンド化（2026-08-22）により、これだけで新規送信はゼロ。cronの自動配信は存在しない |
+| 特定1件を止める | NotionでStatusを **Approved → Draft** | run を叩く前なら確実に送信対象から外れる。run 実行中は間に合わない可能性あり |
+| 念のため全行を無効化 | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | Approvedの行だけが送信対象。Approvedがゼロなら run を叩いても何も出ない |
 | 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
@@ -693,8 +753,8 @@ git push origin main
 架空の人1件（接頭辞 `ZZTESTERASE-`）を本番に作り、`POST /api/erase` で消して検算した。
 
 - **送信の引き金にしない形で作った**（多層防御・すべてコードで裏取り）:
-  1. 本番 `[triggers]` は配信(15分毎)と同期(`0 18`)のみ。休眠ナッジ・マルシェ活性化のcronは
-     **staging限定**で本番には無い（`cron-routing.ts` / `wrangler.toml`）
+  1. 本番 `[triggers]` は同期(`0 18`)のみ（配信cronは2026-08-22に撤去＝完全オンデマンド）。
+     休眠ナッジ・マルシェ活性化のcronは**staging限定**で本番には無い（`cron-routing.ts` / `wrangler.toml`）
   2. `customer_linkages.unfollowed_at` を非NULLで作成 → `filterEligible` が除外し、
      さらに `excludeLineUserIds` に入ってFirestore直読み経路（`unionEligible`）でも除外される
   3. `shopify_customer_id` はNULL → 日次同期のShopify metafield書込に載らない

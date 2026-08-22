@@ -265,12 +265,16 @@ export function normalizeDeliveryPage(page: {
 // ---------------------------------------------------------------------------
 
 /**
- * 送信候補を取得する: Status=Approved AND 配信予定日時 <= now AND 送信済み != true。
- * on_or_before は Notion 側で時刻比較する（date-only の厳格化は delivery-time.ts で二重化）。
+ * 送信候補を取得する: Status=Approved AND 送信済み != true。
+ *
+ * ⚠ 2026-08-22（完全オンデマンド化・Setaka 指示）: **配信予定日時の条件を外した**。
+ *   以前は `配信予定日時 <= now` を AND していたが、配信は cron の自動発火ではなく
+ *   `POST /api/delivery/run` を明示的に叩いたときにだけ走るようになったため、
+ *   「承認済み＝送る準備ができている」を送信条件にする。予定日時が未来でも空でも拾う。
+ *   予定日時（P.scheduled）は運用者の記録用メモとして残るだけで、送信判定には使わない。
  */
-export async function queryDueDeliveries(
+export async function queryApprovedDeliveries(
   request: NotionRequest,
-  nowIso: string,
   dbId: string = DEFAULT_DELIVERY_DB_ID,
 ): Promise<DeliveryPage[]> {
   const P = DELIVERY_PROPS;
@@ -284,7 +288,6 @@ export async function queryDueDeliveries(
         and: [
           { property: P.status, select: { equals: "Approved" } },
           { property: P.sent, checkbox: { equals: false } },
-          { property: P.scheduled, date: { on_or_before: nowIso } },
         ],
       },
     };

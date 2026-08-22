@@ -4,18 +4,21 @@
  * 実アダプタ（Notion / Supabase / Firestore / LINE チャネル）を構築し、
  * オーケストレータ（delivery-orchestrator.ts）を駆動する `runDelivery` を提供する。
  *
- * ⚠ 実送信の前提（2026-08-22 変更: 実送信スイッチ撤去）:
- *   - 以前あった env フラグ DELIVERY_SEND_ENABLED は **廃止した**。承認済み・予定時刻到来の行は
- *     staging / 本番のどちらでも常に実送信される（「承認したら送られる」が唯一の判断点）。
+ * ⚠ 実送信の前提（2026-08-22 変更: 実送信スイッチ撤去 → さらに完全オンデマンド化）:
+ *   - 以前あった env フラグ DELIVERY_SEND_ENABLED は **廃止した**。
+ *   - **cron による自動配信も廃止した**。配信が走るのは `POST /api/delivery/run` を
+ *     明示的に叩いたときだけ（「承認しただけでは送られない・回したら送られる」）。
+ *   - **配信予定日時は送信条件ではなくなった**（Approved なら予定日時が未来でも空でも送る）。
+ *     予定日時は運用者の記録用メモとして残るだけ。
  *   - 送信可否を握る安全弁は次の多層ガードのみ:
  *       (1) Notion Status=Approved かつ独立した承認者がいる（自己承認は fail-closed）
- *       (2) 配信予定日時が存在し時刻付きで、かつ到来している
- *       (3) 承認時コンテンツハッシュ（pin）と現在値が一致する（承認後の編集は自動リセット）
- *       (4) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
- *       (5) 宛先解決（allowlist 未設定・ペルソナ 0 件などは fail-closed）
+ *       (2) 承認時コンテンツハッシュ（pin）と現在値が一致する（承認後の編集は自動リセット）
+ *       (3) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
+ *       (4) 宛先解決（allowlist 未設定・ペルソナ 0 件などは fail-closed）
+ *       (5) 送信済み（送信済みチェックボックス）の行は対象外
  *   - 送信先 OA は DELIVERY_TARGET_ENV で決まる（本番 Worker=prod OA / staging Worker=test OA）。
- *   - 緊急停止は docs/deploy-runbook.md「配信を止める」節を参照（個別=Approved→Draft /
- *     全体=15分 cron トリガの停止）。
+ *   - 止め方は docs/deploy-runbook.md「配信を止める」節を参照（送りたくない行は Approved→Draft。
+ *     そもそも run を叩かなければ何も送られない）。
  */
 
 import type { Env } from "../index";
@@ -38,7 +41,7 @@ import {
 } from "./message-ledger";
 import {
   createNotionRequest,
-  queryDueDeliveries,
+  queryApprovedDeliveries,
   querySendingDeliveries,
   setStatus,
   writeDeliveryResult,
@@ -321,8 +324,8 @@ export async function pinDeliveryApproval(
 
 /**
  * 配信を 1 巡実行する（runtime 配線）。
- * 承認済み・予定時刻到来・pin 一致・通数ガード通過の行を実送信する
- * （env の実送信スイッチは 2026-08-22 に廃止済み）。
+ * 承認済み（Approved）・未送信・pin 一致・通数ガード通過の行を実送信する。
+ * 予定時刻の到来は条件に含めない（2026-08-22 完全オンデマンド化）。
  */
 export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
   const supabase = createSupabaseClient(env);
@@ -409,8 +412,8 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
 
   const deps: OrchestratorDeps = {
     repo: {
-      queryDue: async (nowIso) =>
-        (await queryDueDeliveries(request, nowIso, dbId)).map(withR2Urls),
+      queryApproved: async () =>
+        (await queryApprovedDeliveries(request, dbId)).map(withR2Urls),
       querySending: async () =>
         (await querySendingDeliveries(request, dbId)).map(withR2Urls),
       setStatus: (pageId, status) => setStatus(request, pageId, status),
@@ -471,36 +474,40 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
 }
 
 // ---------------------------------------------------------------------------
-// 承認 → 自動配信 の配線（cron ポーリング方式）
+// 承認 → オンデマンド配信 の配線（POST /api/delivery/run が唯一の起動経路）
 // ---------------------------------------------------------------------------
 //
 // QA 指摘①: 運用者が Notion で Status=Approved にしても、承認 pin（画像R2化・
 //   ハッシュ凍結）は別 API（POST /api/delivery/approve）を叩かないと起きず、
-//   ハッシュ未設定のまま runDelivery に載ると承認リセットされ「自動で始まらない」。
+//   ハッシュ未設定のまま runDelivery に載ると承認リセットされ「送られない」。
 //
-// 対処: cron（15分毎）が Approved & 予定日時<=now & 未送信 の行を拾い、
-//   まだ pin されていなければ pinDeliveryApproval で凍結してから runDelivery に渡す。
-//   → 運用者は「Notion で Status を Approved にするだけ」で完結する（手動 API 不要）。
+// 対処: オンデマンド実行が Approved & 未送信 の行を拾い、まだ pin されていなければ
+//   pinDeliveryApproval で凍結してから runDelivery に渡す。
+//   → 運用者は「Notion で Status を Approved にして、配信を実行してもらう」だけで完結する。
+//
+// 2026-08-22（完全オンデマンド化）: 旧 cron ポーリング（15分毎）は廃止した。
+//   拾う条件から「予定日時 <= now」を外し、**Approved であれば拾う**ようにした
+//   （承認済み＝送る準備ができている、という意味付け）。
 //
 // 冪等・安全:
 //   - 既に pin 済み（コンテンツハッシュあり）の行は pin を skip（二重 pin しない）。
 //   - pin 失敗（HEIC 等の LINE 非対応形式 / R2 未設定 / 自己承認）は fail-closed で
 //     resetApproval（Status を Draft に戻し、平易な日本語をエラー詳細へ）。
 //     → 承認を通さないので runDelivery の対象からも外れる（壊れた配信を出さない）。
-//   - 本 poll は「拾って承認 pin まで」を担い、送信可否は一切変えない。
-//     送信可否は runDelivery 側の多層ガード（承認者独立性・予定日時・ハッシュ照合・通数台帳）が握る。
+//   - 本 pin 前処理は「拾って承認 pin まで」を担い、送信可否は一切変えない。
+//     送信可否は runDelivery 側の多層ガード（承認者独立性・ハッシュ照合・通数台帳）が握る。
 
 /** 承認 pin 前処理（phase 1）の注入依存（テストは fake、runtime は実 I/O を配線）。 */
-export interface ScheduledPinDeps {
-  /** Approved & 予定日時<=nowIso & 未送信 の行（id と contentHash だけ見る）。 */
-  queryDue(nowIso: string): Promise<Array<{ id: string; contentHash: string | null }>>;
+export interface OnDemandPinDeps {
+  /** Approved & 未送信 の行（id と contentHash だけ見る）。予定日時は条件に含めない。 */
+  queryApproved(): Promise<Array<{ id: string; contentHash: string | null }>>;
   /** 承認 pin（画像R2化・ハッシュ凍結）。既存 pinDeliveryApproval を配線。 */
   pin(pageId: string): Promise<PinApprovalResult>;
   /** pin 失敗時の fail-closed（Draft 戻し + エラー詳細書込）。 */
   resetApproval(pageId: string, reason: string): Promise<void>;
   /** pin 成功時の後始末（過去の失敗メッセージを消す）。 */
   clearError(pageId: string): Promise<void>;
-  now(): Date;
+  // ⚠ now() は廃止（2026-08-22）。予定日時が拾う条件でなくなり、pin 前処理は時刻を使わない。
 }
 
 /** phase 1（pin 前処理）の 1 行あたり結果。 */
@@ -510,34 +517,33 @@ export interface PinPassOutcome {
   reason?: string;
 }
 
-/** cron ポーリング 1 巡の結果（pin 前処理 + 本処理）。 */
-export interface ScheduledDeliveryResult {
+/** オンデマンド実行 1 巡の結果（pin 前処理 + 本処理）。 */
+export interface OnDemandDeliveryResult {
   pinPass: PinPassOutcome[];
   run: DeliveryRunResult;
 }
 
 /** phase 1（pin 前処理）の全注入依存 + 本処理ランナー。 */
-export interface ScheduledDeliveryDeps extends ScheduledPinDeps {
+export interface OnDemandDeliveryDeps extends OnDemandPinDeps {
   run(): Promise<DeliveryRunResult>;
 }
 
 /**
- * phase 1: Approved & due & 未送信 のうち未 pin 行を承認 pin する（純粋・注入依存）。
- * queryDue が失敗したら空を返し、本処理（runDelivery）側の fail-closed に委ねる。
+ * phase 1: Approved & 未送信 のうち未 pin 行を承認 pin する（純粋・注入依存）。
+ * queryApproved が失敗したら空を返し、本処理（runDelivery）側の fail-closed に委ねる。
  */
-export async function pinDueApprovals(
-  deps: ScheduledPinDeps,
+export async function pinApprovedRows(
+  deps: OnDemandPinDeps,
 ): Promise<PinPassOutcome[]> {
-  const nowIso = deps.now().toISOString();
-  let due: Array<{ id: string; contentHash: string | null }>;
+  let approved: Array<{ id: string; contentHash: string | null }>;
   try {
-    due = await deps.queryDue(nowIso);
+    approved = await deps.queryApproved();
   } catch {
     return [];
   }
 
   const out: PinPassOutcome[] = [];
-  for (const page of due) {
+  for (const page of approved) {
     // 既に pin 済み（ハッシュあり）は skip（二重 pin 回避）。
     if (page.contentHash) {
       out.push({ pageId: page.id, action: "already_pinned" });
@@ -563,28 +569,28 @@ export async function pinDueApprovals(
 }
 
 /**
- * cron ポーリング 1 巡（注入版）。phase 1（pin 前処理）→ phase 2（runDelivery）を
+ * オンデマンド配信 1 巡（注入版）。phase 1（pin 前処理）→ phase 2（runDelivery）を
  * この順で直列実行する。テストは fake deps で pin→run 順・fail-closed を検証する。
  */
-export async function runScheduledDeliveryWith(
-  deps: ScheduledDeliveryDeps,
-): Promise<ScheduledDeliveryResult> {
-  const pinPass = await pinDueApprovals(deps);
+export async function runOnDemandDeliveryWith(
+  deps: OnDemandDeliveryDeps,
+): Promise<OnDemandDeliveryResult> {
+  const pinPass = await pinApprovedRows(deps);
   const run = await deps.run();
   return { pinPass, run };
 }
 
 /**
- * cron ポーリング 1 巡（runtime 配線）。
- * scheduled ハンドラ（15分毎 cron）と手動 run API から呼ぶ。本関数は送信可否を変えない
- * （送信可否は runDelivery の多層ガードが握る）。
+ * オンデマンド配信 1 巡（runtime 配線）。
+ * `POST /api/delivery/run` からのみ呼ばれる（cron 経路は 2026-08-22 に廃止）。
+ * 本関数は送信可否を変えない（送信可否は runDelivery の多層ガードが握る）。
  */
-export async function runScheduledDelivery(
+export async function runOnDemandDelivery(
   env: Env,
-): Promise<ScheduledDeliveryResult> {
+): Promise<OnDemandDeliveryResult> {
   const request = createNotionRequest(env);
   // env 分離 + fail-closed。解決不能な env（例: 専用 test DB 未設定の staging）では
-  // due 取得を空にし pin/送信を一切行わない（run() 側の runDelivery も同じく fail-closed）。
+  // 対象取得を空にし pin/送信を一切行わない（run() 側の runDelivery も同じく fail-closed）。
   let dbId: string | null;
   try {
     dbId = resolveDeliveryDbId(env);
@@ -592,16 +598,15 @@ export async function runScheduledDelivery(
     if (!(e instanceof DeliveryDbConfigError)) throw e;
     dbId = null;
   }
-  return runScheduledDeliveryWith({
-    queryDue: async (nowIso) => {
+  return runOnDemandDeliveryWith({
+    queryApproved: async () => {
       if (dbId === null) return [];
-      const pages = await queryDueDeliveries(request, nowIso, dbId);
+      const pages = await queryApprovedDeliveries(request, dbId);
       return pages.map((p) => ({ id: p.id, contentHash: p.contentHash }));
     },
     pin: (pageId) => pinDeliveryApproval(env, pageId),
     resetApproval: (pageId, reason) => resetApproval(request, pageId, reason),
     clearError: (pageId) => clearDeliveryError(request, pageId),
-    now: () => new Date(),
     run: () => runDelivery(env),
   });
 }

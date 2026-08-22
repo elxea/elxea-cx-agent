@@ -25,7 +25,7 @@ import { runBatchMetafieldSync } from "./sync/shopify-metafield";
 import { runKarteReconcile } from "./lib/karte-reconcile";
 import {
   runDelivery,
-  runScheduledDelivery,
+  runOnDemandDelivery,
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
@@ -35,12 +35,15 @@ import { getAlertStatus } from "./lib/alerts";
 import { erasePerson } from "./lib/roji-erasure";
 
 /**
- * 配信用 cron パターン（誤発火防止のため明示分岐で判定）。
- * wrangler.toml [triggers] crons に登録済み（15分毎）。scheduled ハンドラはこの
- * パターンのときだけ runScheduledDelivery（承認 pin 前処理 → 配信）を実行する。
- * ⚠ 承認済み・予定時刻到来の行は cron が拾って実送信する（env の実送信スイッチは 2026-08-22 に撤去）。
- *   配信を止めたいときは個別に Status を Draft へ戻すか、この cron トリガ自体を止める
- *   （docs/deploy-runbook.md「配信を止める」節）。
+ * 配信の起動経路（2026-08-22 完全オンデマンド化・Setaka 指示）。
+ *
+ * 一斉配信は **cron から発火しない**。`POST /api/delivery/run` を明示的に叩いたときだけ、
+ * 承認 pin 前処理 → runDelivery が走る（runOnDemandDelivery）。
+ * 旧「15分毎 cron が承認済み・予定時刻到来の行を拾って自動送信」は廃止した
+ * （wrangler.toml の crons からも削除済み。scheduled 側にも no-op ガードを残してある）。
+ *
+ * 送りたくない行は Notion で Status を Draft に戻す。そもそも run を叩かなければ何も送られない
+ * （docs/deploy-runbook.md「配信を止める」節）。
  */
 // ⚠ 非 export（module-level const）。Workers ランタイムはエントリの named export を
 //   すべてハンドラとして解釈するため、文字列の named export は起動を壊す
@@ -462,9 +465,17 @@ app.post("/api/delivery/approve", async (c) => {
 });
 
 /**
- * 配信 手動トリガ API（T8）。
+ * 配信 オンデマンド実行 API（T8 → 2026-08-22 に **唯一の配信起動経路** になった）。
  * Bearer(SYNC_API_SECRET) 必須・fail-closed。冪等性は台帳 claim 経路で担保。
- * 承認済み・予定時刻到来の行を実送信する（env の実送信スイッチは撤去済み）。cron とは独立。
+ *
+ * これを叩いたときにだけ配信が走る（cron の自動配信は廃止）。処理内容:
+ *   phase 1: Status=Approved かつ未送信の行を承認 pin（画像R2化・ハッシュ凍結）
+ *   phase 2: runDelivery（承認者独立性・ハッシュ照合・通数台帳 claim・宛先解決の各ガードを通した行を実送信）
+ * ⚠ 配信予定日時は送信条件ではない（Approved なら未来でも空でも送る）。
+ *
+ * 結果は **同期で返す**（旧実装は waitUntil で投げっぱなしだったため「回したのに送られたか
+ * 分からない」状態だった）。オンデマンドが唯一の経路になった以上、実行者がその場で
+ * 「何行スキャンし・何行送り・何行落ちたか」を確認できることを配線の要件とする。
  */
 app.post("/api/delivery/run", async (c) => {
   const authHeader = c.req.header("Authorization");
@@ -475,27 +486,40 @@ app.post("/api/delivery/run", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // 手動トリガも scheduled と同じ配線（承認 pin 前処理 → runDelivery）を通す。
-  // 運用者が Notion で Approved にした行を、手動でも「pin して拾う」ところまで再現する。
-  c.executionCtx.waitUntil(
-    runScheduledDelivery(c.env).then((result) => {
-      console.log(
-        "Manual LINE delivery completed:",
-        JSON.stringify({
-          pinned: result.pinPass.filter((p) => p.action === "pinned").length,
-          resetFailed: result.pinPass.filter((p) => p.action === "reset_failed").length,
-          scanned: result.run.scanned,
-          processed: result.run.processed.length,
-          reaper: result.run.reaper.length,
-        }),
-      );
-    }),
-  );
+  const result = await runOnDemandDelivery(c.env).catch((err) => ({
+    error: err instanceof Error ? err.message : String(err),
+  }));
 
-  // 送信先 OA を明示して返す（実送信スイッチ撤去後の「どこへ送るか」の確認点）。
+  if ("error" in result) {
+    console.error("On-demand LINE delivery threw:", result.error);
+    return c.json({ status: "delivery_failed", reason: result.error }, 500);
+  }
+
+  const summary = {
+    pinned: result.pinPass.filter((p) => p.action === "pinned").length,
+    alreadyPinned: result.pinPass.filter((p) => p.action === "already_pinned").length,
+    resetFailed: result.pinPass.filter((p) => p.action === "reset_failed").length,
+    scanned: result.run.scanned,
+    sent: result.run.processed.filter((p) => p.disposition === "sent").length,
+    recipients: result.run.processed
+      .filter((p) => p.disposition === "sent")
+      .reduce((sum, p) => sum + p.recipients, 0),
+    skipped: result.run.processed.filter((p) => p.disposition === "skipped").length,
+    reset: result.run.processed.filter((p) => p.disposition === "reset").length,
+    failed: result.run.processed.filter((p) => p.disposition === "failed").length,
+    reaper: result.run.reaper.length,
+  };
+  console.log("On-demand LINE delivery completed:", JSON.stringify(summary));
+
+  // 送信先 OA を明示して返す（「どこへ送ったか」の確認点）。
   return c.json({
-    status: "delivery_started",
+    status: "delivery_completed",
     targetEnv: c.env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test",
+    summary,
+    // 行単位の内訳（PII 非記載: pageId / タイトル / 対象種別 / 通数 / 理由のみ）。
+    processed: result.run.processed,
+    pinPass: result.pinPass,
+    reaper: result.run.reaper,
   });
 });
 
@@ -638,8 +662,9 @@ app.post("/api/marche-activation/run", async (c) => {
  * Workers エクスポート。
  * - fetch: Hono HTTP ハンドラ
  * - scheduled: Cron Trigger による定期処理
- *   - 毎日 18:00 UTC (03:00 JST): ナレッジ同期 + Shopify Metafield 同期
- *   - 1日・15日 21:00 UTC (06:00 JST): セグメント別自動配信（月2回）
+ *   - 毎日 18:00 UTC (03:00 JST): ナレッジ同期 + karte 照合 + Shopify Metafield 同期
+ *   - 毎日 19:00 UTC (04:00 JST・staging 限定): 配信計測 fetch + 休眠検知 + マルシェ活性化
+ *   ⚠ 一斉配信は cron に **無い**（2026-08-22 完全オンデマンド化）。POST /api/delivery/run のみ。
  */
 export default {
   fetch: app.fetch,
@@ -650,25 +675,17 @@ export default {
   ) => {
     const cronKind = classifyCron(event.cron);
 
-    // Notion駆動 LINE配信 cron（誤発火防止のため else の前に明示分岐）。
-    // 承認 pin 前処理 → runDelivery の順（runScheduledDelivery）。運用者は Notion で
-    // Status=Approved にするだけでよい（承認 pin は cron が代行する）。
-    // ⚠ 承認済み・予定時刻到来の行はここで実送信される（実送信スイッチは撤去済み）。
+    // ── 一斉配信は cron から発火しない（2026-08-22 完全オンデマンド化・Setaka 指示）──
+    // 旧 "*/15 * * * *" の自動配信は廃止した。wrangler.toml の crons からも削除済みなので、
+    // 通常この分岐には到達しない。ここを残すのは **二重防御** のため:
+    //   (1) crons に "*/15 * * * *" が誤って復活しても、配信は発火しない（no-op で return）
+    //   (2) classifyCron が "delivery" を返すことで、日次同期（sync 安全網）への誤爆も防ぐ
+    //       ＝「15分毎にナレッジ同期が走る」事故を起こさない
+    // 配信の唯一の起動経路は `POST /api/delivery/run`（オンデマンド）。
     if (cronKind === "delivery") {
-      ctx.waitUntil(
-        runScheduledDelivery(env).then((result) => {
-          console.log(
-            "Scheduled LINE delivery completed:",
-            JSON.stringify({
-              pinned: result.pinPass.filter((p) => p.action === "pinned").length,
-              resetFailed: result.pinPass.filter((p) => p.action === "reset_failed")
-                .length,
-              scanned: result.run.scanned,
-              processed: result.run.processed.length,
-              reaper: result.run.reaper.length,
-            }),
-          );
-        }),
+      console.warn(
+        "[delivery] cron tick ignored: 一斉配信はオンデマンド専用（POST /api/delivery/run）。" +
+          `pattern=${event.cron} — この警告が出る場合は wrangler.toml の crons に配信パターンが残っている。`,
       );
       return;
     }
