@@ -111,8 +111,15 @@ fi
     printf '  %-28s : %s commit\n' "ahead（HEAD にだけある）" "$(printf '%s' "${counts}" | awk '{print $1}')"
     printf '  %-28s : %s commit\n' "behind（最新にだけある）" "$(printf '%s' "${counts}" | awk '{print $2}')"
   fi
-  printf '  本番に載らなくなるコミット（%s/%s にあって HEAD に無い）:\n' "${REMOTE}" "${DEFAULT_BRANCH}"
-  git --no-pager log --oneline --max-count=20 "${HEAD_SHA}..${REMOTE_SHA}" 2>/dev/null | sed 's/^/    - /' || true
+  # 「巻き戻るコミット」= 最新にあって HEAD に無いもの。事故（本番の修正を消す）の実体はこれ。
+  behind_log="$(git --no-pager log --oneline --max-count=20 "${HEAD_SHA}..${REMOTE_SHA}" 2>/dev/null || true)"
+  if [[ -n "${behind_log}" ]]; then
+    printf '  ⚠ 本番から巻き戻るコミット（%s/%s にあって HEAD に無い）:\n' "${REMOTE}" "${DEFAULT_BRANCH}"
+    printf '%s\n' "${behind_log}" | sed 's/^/    - /'
+  else
+    printf '  巻き戻るコミットは無い（HEAD は最新を含むが、まだ %s/%s に入っていない変更を載せようとしている）\n' \
+      "${REMOTE}" "${DEFAULT_BRANCH}"
+  fi
 } >&2
 
 handle_mismatch "HEAD が ${REMOTE}/${DEFAULT_BRANCH} の最新と一致しない。古い（または分岐した）コミットを本番に載せようとしている。"
