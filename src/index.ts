@@ -23,6 +23,7 @@ import { classifyCron } from "./lib/cron-routing";
 import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
 import { runKarteReconcile } from "./lib/karte-reconcile";
+import { runLinkageReconcile } from "./lib/linkage-reconcile";
 import {
   runDelivery,
   runOnDemandDelivery,
@@ -882,6 +883,22 @@ export default {
             // 二重の安全網（runKarteReconcile は基本 throw しないが、未処理 reject を残さない）。
             console.warn(
               "[karte-reconcile] scheduled run failed:",
+              err instanceof Error ? err.message : err,
+            );
+          }),
+        // 毎日の照合その 2（サイト側の棚・M-2 / J-2）: 台帳に行が立っているのに
+        //   web-app 側の合体が走っていない人を拾い直す。合体イベントは連携を止めない
+        //   よう fire-and-forget で送るので、1 度落ちるとその人の合体は二度と起きない
+        //   （karte-reconcile が「穴4・範囲外」と明記していた穴）。
+        //   イベントが速さを、この照合が確実さを担当する。
+        //   読み取りのみ・外部送信ゼロ・never throw。1 件の失敗で全体を止めない。
+        runLinkageReconcile(env)
+          .then((result) => {
+            console.log("Scheduled linkage reconcile completed:", JSON.stringify(result));
+          })
+          .catch((err) => {
+            console.warn(
+              "[linkage-reconcile] scheduled run failed:",
               err instanceof Error ? err.message : err,
             );
           }),
