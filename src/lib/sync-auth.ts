@@ -40,7 +40,21 @@ export function isValidSyncApiKey(
  *   const unauthorized = requireSyncApiKey(c);
  *   if (unauthorized) return unauthorized;
  *
- * @returns 認証失敗なら 401 Response。成功なら null。
+ * ## 拒否したことを必ずログに残す（沈黙させない）
+ *
+ * この 401 は**両側から見えない失敗**だった。web-app 側は
+ * `[line-linkage-status] reverse lookup returned 401` としか書けず（応答本文は
+ * `{"error":"Unauthorized"}` だけなので理由が分からない）、cx-agent 側は何も
+ * 出していなかった。結果、鍵がずれたときに残る痕跡はどこにも無く、症状だけが
+ * 「連携済みのお客さまのマイページが未連携に見える」という形で表に出た。
+ *
+ * ローテートで鍵が片側だけ更新される・末尾に改行が紛れる、といった壊れ方は
+ * 実際に起きている（2026-08-22 の LINE Channel Secret 障害と同型）。理由まで
+ * 書き分けておけば `wrangler tail` で即座に切り分けられる。
+ *
+ * ⚠ **鍵の値・長さ・先頭数文字は出さない**。出るのは「なぜ弾いたか」の分類だけ。
+ *   応答は従来どおり `{"error":"Unauthorized"}` のまま変えない（呼び出し元に
+ *   理由を返すと、鍵の有無を外から探れる）。
  */
 export function requireSyncApiKey<E extends HonoEnv>(
   c: Context<E>,
@@ -48,6 +62,19 @@ export function requireSyncApiKey<E extends HonoEnv>(
   const apiKey = c.req.header("X-API-Key");
   const secret = (c.env as { SYNC_API_SECRET?: string }).SYNC_API_SECRET;
   if (!isValidSyncApiKey(apiKey, secret)) {
+    /* 3 つの壊れ方は原因も対処も違う:
+     *   secret-unset  … この Worker に SYNC_API_SECRET が無い（デプロイ/環境の事故）
+     *   key-absent    … 呼び出し側がヘッダーを付けていない（配線の事故）
+     *   key-mismatch  … 両側に鍵はあるが違う（ローテートの片側漏れ・改行混入） */
+    const reason = !secret
+      ? "secret-unset"
+      : !apiKey
+        ? "key-absent"
+        : "key-mismatch";
+
+    console.warn(
+      `[sync-auth] rejected server-to-server request: reason=${reason} path=${c.req.path ?? "(unknown)"}`,
+    );
     return c.json({ error: "Unauthorized" }, 401);
   }
   return null;
