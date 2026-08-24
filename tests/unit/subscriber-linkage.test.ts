@@ -39,7 +39,10 @@ import {
   SITE_URL_JA,
 } from "../../src/lib/brand-copy";
 
-const LIFF_URL = "https://liff.line.me/2009473839-ubrqGbMF";
+/* 入力として渡すだけの URL（この test は「出た文面にこの URL が載るか」しか見ない）。
+   それでもテストチャネル側に揃えておく — 退役した旧本番チャネル 2009473839 が
+   fixture に残っていると、grep で「まだどこかで使っている」と読めてしまう（M-0 / F3）。 */
+const LIFF_URL = "https://liff.line.me/2011239440-0wahaqmd";
 
 /** 送信を記録する mock responder（flex/text の呼び出しを観測する）。 */
 function mockResponder(): {
