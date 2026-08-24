@@ -47,21 +47,14 @@ create table conversations (
 create index idx_conversations_user_channel
   on conversations (user_id, channel, created_at desc);
 
--- 顧客プロフィール（CDP）
-create table customer_profiles (
-  id uuid primary key default gen_random_uuid(),
-  line_user_id text unique,
-  shopify_customer_id text unique,
-  email text,
-  display_name text,
-  preferences jsonb default '{}',
-  metadata jsonb default '{}',
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
-create index customer_profiles_line_idx
-  on customer_profiles (line_user_id);
+-- 顧客プロフィール（CDP）— **廃止（migration 039）**
+--
+-- ランタイム参照ゼロ（`from("customer_profiles")` が src/ に 0 件）の死蔵表で、
+-- 消去 RPC だけが「別名表」として参照していた。「この LINE はどの顧客か」を持つ表が
+-- 3 つある状態そのものが、書く側と読む側が別の表を見る事故の温床だった（再設計 F11）。
+--
+-- 正本は customer_linkages。user_identity_map は会話履歴の名寄せ用の従属ビュー。
+-- 新しいコードはこの表を復活させないこと。
 
 -- 処理済みイベント（べき等性担保）
 create table processed_events (

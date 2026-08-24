@@ -301,6 +301,16 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "rls", table: "tea_delivery_ledger" },
     ],
   },
+  /* 039: 連携台帳の正本を customer_linkages に確定し、死蔵表 customer_profiles を落とす。
+   *
+   * specs が空なのは **sentinel が「不在」だから**。この version が作るオブジェクトは無く、
+   * 判定材料は「customer_profiles が消えていること」しかない。実在確認の仕組みは
+   * 正の存在でしか語れないので、no-sentinel（台帳登録せず --apply が冪等に再適用）に倒す。
+   *
+   * 冪等: CREATE OR REPLACE FUNCTION と、to_regclass で存在を見てから落とす DO ブロックのみ。
+   * ⚠ DROP TABLE を含む。本番の customer_profiles は 0 行と実測済みだが、
+   *   migration 自身も適用時に 0 行を再確認し、行があれば例外で止まる。 */
+  "039_customer_linkages_sot": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------
