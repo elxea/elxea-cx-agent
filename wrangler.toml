@@ -83,7 +83,18 @@ DELIVERY_TARGET_ENV = "test"
 # 「便益1行 + 連携ボタン（この URL を開く URI アクション）」を出す。
 # ⚠ 本番 [vars] には絶対に置かない（未設定=fail-safe: ボタンを出さず従来テキスト elxea.com/ja に倒す）。
 #   本番での有効化は GA/昇格ゲートで別途判断（そのとき本番 [vars] か secret で明示投入する）。
-LIFF_LINKAGE_URL = "https://liff.line.me/2009473839-ubrqGbMF"
+#
+# ⚠ 2026-08-25 (M-0 / 再設計 Wave 2): チャネルを **テストチャネル 2011239440** へ切り替えた。
+#   旧値は 2009473839-ubrqGbMF で、これは **旧本番 Login チャネル 2009473839** の LIFF である。
+#   その 2009473839 は本番 OA @307tzhkw (Messaging 2008324925) と**別プロバイダ**にあり、
+#   「同じ人でも userId の番号体系が違う」という、今回の再設計の最深部の原因そのものだった
+#   (設計書 §0 / Issue https://app.notion.com/p/3a470c9d064c81f28f8cce60db8ff8be)。
+#   M-0 で本番 OA と同一プロバイダに Login チャネルを新設し、本番 = 2011239425 /
+#   テスト = 2011239440 に揃えた。staging は必ずテスト OA (@426vlcyb) 側を向くので、
+#   ここもテストチャネルの LIFF を指す。
+#   ⚠ ここに本番 (2011239425) の LIFF を書かないこと。staging から本番 OA 文脈の連携を
+#     踏ませることになり、DELIVERY_TARGET_ENV="test" で作った隔離が崩れる。
+LIFF_LINKAGE_URL = "https://liff.line.me/2011239440-0wahaqmd"
 # 【staging 限定・ブロック4 テスト連携キット】定期便扱いにする合成 LINE userId（U+32hex・非実在）。
 # subscriber-linkage.ts は DELIVERY_TARGET_ENV="test" のときだけこの allowlist を見る（本番 "prod" では常に無効）。
 # 実在ユーザーの ID は絶対に入れない。本番 [vars] には絶対に置かない。
