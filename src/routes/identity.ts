@@ -34,6 +34,7 @@ import {
   clearCustomerLinkage,
   resolveUnlinkTargets,
 } from "../lib/customer-linkage";
+import { notifyLinkageEstablished } from "../lib/linkage-notify";
 import {
   issueAccountLinkNonce,
   isValidLinkTokenFormat,
@@ -338,6 +339,15 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
     console.log(
       `[identity/link-liff] linked messaging user ${result.lineUserId} <-> shopify ${result.shopifyCustomerId}`,
     );
+
+    /* 台帳に行が立った = 合体のきっかけ（M-2）。web-app 側が同じ流れの中で合体を
+       走らせるので、この経路では web-app が「書いた直後に読み直す」必要が無くなる。
+       通知が落ちても連携は成立済み（照合経路が後で拾う）。 */
+    void notifyLinkageEstablished(c.env, {
+      lineUserId: result.lineUserId,
+      shopifyCustomerId: result.shopifyCustomerId,
+      source: "liff",
+    });
 
     // QA S-1: 連携成立時に未連携カルテ（lineUsers）の好みを users へ累積統合する（冪等・best-effort）。
     //   併せて「連携先に注文/定期便があるか」を判定し、web-app の完了画面コピー分岐（CX S2）に渡す。
