@@ -224,6 +224,41 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
   `MIGRATE_ONLY` に含めても `MIGRATE_DENYLIST_ACK=<version>` を明示しない限り中断する。
   「手順書では禁じているのにスクリプトが当ててしまう」状態を構造的に起こせなくするための二重ガード。
 
+### デプロイ前ゲート — 「今から本番に載るコミット」の検証（scripts/deploy-preflight.sh）
+
+**なぜ**: `wrangler deploy` は *今checkoutしている中身* をそのまま本番へ上げるだけで、それが
+既定ブランチの最新かを一切見ない。実際に、ローカルmasterが `origin/master` より古いまま
+`pnpm deploy` を撃ち、**すでに本番へ入っていた修正を巻き戻したビルド**を本番に載せかけた事故が起きた。
+
+**どこで効くか**: 本番へ向かう2経路の両方が同じ1実装（`scripts/deploy-preflight.sh`）を通る。
+
+| 経路 | ゲート |
+|---|---|
+| `pnpm deploy`（bare `wrangler deploy`） | 実行 |
+| `scripts/deploy-prod.sh` / deploy-prod workflow | preflight STEP 1で実行 |
+| `pnpm deploy:staging` | **対象外**（featureブランチからの検証デプロイが正常運用） |
+
+**中止条件（どちらかに当たればexit 1・デプロイに進まない）**:
+
+1. working treeがdirty（未コミット差分・**未追跡ファイル含む**） — **override不可**。
+   何を本番に載せたか後から再現できないビルドを作らせないため。
+2. `HEAD` のSHAが `origin/master` の最新と不一致（古い / 分岐している）。
+   中止時はahead/behind数と「本番に載らなくなるコミット」の一覧を出す。
+
+**override（緊急時のみ）**: `DEPLOY_ALLOW_NON_DEFAULT=1` を付けると2のみ警告付きで通る
+（差分サマリはoverrideでも必ず表示される）。1は解除できない。
+
+```bash
+# 通常の直し方（override ではなくこちらが既定）
+git fetch origin && git checkout master && git merge --ff-only origin/master
+
+# どうしても今の HEAD を載せる必要があるとき（意図を明示）
+DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
+```
+
+リグレッションテストは `tests/unit/deploy-preflight.test.ts`（`pnpm test:unit` に組み込み済み。
+使い捨てのgitリポジトリをtempに作って通過/中止/overrideを実行検証する。本番には触らない）。
+
 ### Deploy Order
 
 1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
@@ -251,6 +286,7 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 npx tsx scripts/verify-staging.ts
 
 # 2. Deploy to production
+#    ⚠ `pnpm deploy` はwranglerの前にscripts/deploy-preflight.shを通る（下記「デプロイ前ゲート」）。
 pnpm deploy
 
 # 3. Verify production (health check only, no Claude API calls)
