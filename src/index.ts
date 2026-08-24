@@ -200,6 +200,13 @@ export type Env = {
    * SYNC_API_SECRET とは別に持つ。同期の鍵が漏れても消去は撃てないようにするため。
    */
   ERASE_API_SECRET?: string;
+  /**
+   * POST /api/erase が 1 リクエストで外へ投げてよい呼び出し回数の上限（数値の文字列）。
+   * 未設定なら roji-erasure.ts の既定値。Cloudflare 側の subrequest 上限より
+   * 十分小さくしておくと、上限に当たる前に自分から止まって
+   * 202（continue_required）で返せる（500 にしない）。
+   */
+  ERASE_SUBREQUEST_BUDGET?: string;
   // Firebase / Firestore
   FIREBASE_PROJECT_ID?: string;
   FIREBASE_CLIENT_EMAIL?: string;
@@ -320,6 +327,16 @@ app.get("/api/alerts/status", async (c) => {
  * 返り値には必ず residue（消したあとに残っているものの列挙）を含める。
  * clean=false のときは 500 を返す。「消しました」とだけ言う実装にしない。
  *
+ * ─ 応答の 3 分岐（修正 F6 / 2026-08-24）─
+ *   200 {status:"erased"}      … 消し終わった（検算も clean）
+ *   202 {status:"in_progress"} … 1 リクエストで消しきれず途中まで。**同じ body で再送すれば続きから消える**
+ *                                （各段階は冪等。別名表もまだ生きている）
+ *   500 {status:"incomplete"}  … 全経路を回したのに消し残しがある＝異常
+ *   500 {error:"erase_failed"} … 例外
+ *   旧実装は「途中まで」も 500 erase_failed に落としていたため、再送すれば済む状態が
+ *   呼び出し側からは失敗としか見えなかった（実測: 21 doc で発生）。
+ *   ⚠ 202 は 2xx だが **完了ではない**。呼び出し側は status / continue_required を必ず見ること。
+ *
  * 痕跡を残さない: 本人の ID をログに出さない。成否と件数だけを出す。
  */
 app.post("/api/erase", async (c) => {
@@ -340,21 +357,40 @@ app.post("/api/erase", async (c) => {
 
   try {
     const result = await erasePerson(c.env, { kind, id });
+    if (result.continueRequired) {
+      // 1 リクエストの上限で途中まで。**失敗ではない**（再送で続きから消える）。
+      // ここを 500 にすると「再送すれば済む状態」が呼び出し側から失敗にしか見えない。
+      console.warn(
+        "[erase] partial — continue required",
+        JSON.stringify({ firestore_docs: result.firestore.deletedDocs }),
+      );
+      return c.json(
+        {
+          status: "in_progress",
+          continue_required: true,
+          deleted: { firestore_docs: result.firestore.deletedDocs },
+          detail:
+            "1 リクエストで消しきれなかった。同じ subject_kind / subject_id でもう一度呼ぶと続きから消える（各段階は冪等）。まだ消し終わっていないので完了として扱わないこと。",
+        },
+        202,
+      );
+    }
     if (!result.clean) {
       // 消し残しがある = 「消せます」が守れていない。成功を返してはならない。
       console.error("[erase] residue remains", JSON.stringify({
-        supabase: result.residue.remaining,
-        firestore: result.firestoreResidue.remaining,
+        supabase: result.residue?.remaining ?? null,
+        firestore: result.firestoreResidue?.remaining ?? null,
       }));
       return c.json({ status: "incomplete", residue: result.residue, firestore_residue: result.firestoreResidue }, 500);
     }
+    const supabaseDeleted = result.supabase?.deleted ?? {};
     console.log("[erase] completed", JSON.stringify({
       firestore_docs: result.firestore.deletedDocs,
-      supabase_rows: Object.values(result.supabase.deleted).reduce((a, b) => a + b, 0),
+      supabase_rows: Object.values(supabaseDeleted).reduce((a, b) => a + b, 0),
     }));
     return c.json({
       status: "erased",
-      deleted: { supabase: result.supabase.deleted, firestore_docs: result.firestore.deletedDocs },
+      deleted: { supabase: supabaseDeleted, firestore_docs: result.firestore.deletedDocs },
       residue: result.residue,
       firestore_residue: result.firestoreResidue,
     });
