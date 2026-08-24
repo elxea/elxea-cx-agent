@@ -296,7 +296,11 @@ run_migrations() {
 
 deploy_worker() {
   log "STEP 3/4: wrangler deploy（本番 / default env）"
-  pnpm exec wrangler deploy
+  # bare `wrangler deploy` は呼ばない。version の tag / message にコミット SHA を
+  # 刻む唯一の入口が scripts/deploy-worker.sh で、ここを通さないと「本番に載って
+  # いるのはどのコミットか」が Cloudflare 側から確定できなくなる（実際に一度、
+  # 推測で 11 commit 古いコードを本番だと思って調査する事故が起きている）。
+  bash "$(dirname "${BASH_SOURCE[0]}")/deploy-worker.sh"
   log "wrangler deploy 完了"
 }
 
