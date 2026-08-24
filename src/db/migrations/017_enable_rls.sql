@@ -6,7 +6,13 @@
 -- schema.sql tables
 ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE customer_profiles ENABLE ROW LEVEL SECURITY;
+-- customer_profiles は migration 039 で廃止（死蔵・0 行）。既に当たっている環境では
+-- この行は適用済みで、表ごと消えているため再適用の対象にならない。
+DO $$ BEGIN
+  IF to_regclass('public.customer_profiles') IS NOT NULL THEN
+    EXECUTE 'ALTER TABLE customer_profiles ENABLE ROW LEVEL SECURITY';
+  END IF;
+END $$;
 ALTER TABLE processed_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE unanswered_queries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_identity_map ENABLE ROW LEVEL SECURITY;
