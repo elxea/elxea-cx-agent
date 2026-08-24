@@ -152,7 +152,12 @@ echo "<<< [4/8] OK: push 段階完了（成否に依らず続行）"
 echo ""
 echo ">>> [5/8] START: 本番 deploy（wrangler deploy）"
 echo "[info] keep_vars=true のため既存 secret は消えない。deploy はコードのみ更新。"
-npx wrangler deploy
+# bare `npx wrangler deploy` は呼ばない。version の tag / message にコミット SHA を
+# 刻む唯一の入口が scripts/deploy-worker.sh で、ここを通さないと Cloudflare 側から
+# 「どのコミットが本番に載ったか」を後から確定できなくなる（再設計 M-9）。
+# 実際 2026-08-25 の調査は、刻印の無い version しか無かったせいで 11 commit 遅れた
+# コードを本番だと思って進み、結論を 1 つ取り違えている。
+bash "$(dirname "${BASH_SOURCE[0]}")/deploy-worker.sh"
 echo "<<< [5/8] OK: deploy 完了"
 
 # --- 6. R2_API_TOKEN 投入（値は取得元から実行時読取り・生書きしない）------------------
