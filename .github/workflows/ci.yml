@@ -14,6 +14,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 鍵スキャン（gitleaks）。
+  #
+  # 元は .github/workflows/central-ci.yml が中央 reusable workflow
+  # （elxea/.github の ci.yml, stack: lite）を呼んで実行していた。lite では
+  # build-and-check は skip されるため、中央側が実際に提供していたのはこの
+  # secret-scan ただ 1 ジョブだった。
+  #
+  # その呼び出しは 2026-08 に恒常 failure 化した（run が 0 秒で
+  # "workflow was not found" となりジョブが 1 つも作られない）。呼ばれる側の
+  # elxea/.github は private、呼ぶ側の本リポジトリは public であり、public
+  # リポジトリから private リポジトリの reusable workflow は参照できない。
+  # 中央側の設定（access_level=organization）では public 呼び出し元を救えない。
+  #
+  # よって中央呼び出しを廃止し、実体である鍵スキャンをここへ引き取る。
+  # 検知ルールは従来どおりリポジトリ直下の .gitleaks.toml を正本とする。
+  # 本リポジトリの他ジョブ（型検査・単体・hermetic e2e）とは検査対象が重ならない。
+  #
+  # 中央 CI へ戻すなら elxea/.github を public 化する判断が要る（org のセキュリティ
+  # 方針に関わるため人間の決定事項）。
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # gitleaks/gitleaks-action@v2 は org 所有リポジトリで有償 GITLEAKS_LICENSE を
+      # 要求するため使わない。CLI（Docker イメージ）はライセンス不要。
+      # タグは :latest ではなく明示バージョンに固定する（上流更新での不意の red を避ける）。
+      - name: gitleaks (directory scan, license-free)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            dir . --no-banner --config .gitleaks.toml --redact --verbose
+
   static-checks:
     name: static-checks
     runs-on: ubuntu-latest
