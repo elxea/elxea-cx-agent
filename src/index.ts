@@ -207,6 +207,19 @@ export type Env = {
    * 202（continue_required）で返せる（500 にしない）。
    */
   ERASE_SUBREQUEST_BUDGET?: string;
+  /**
+   * 合体イベント（M-2）の送り先 = web-app のオリジン。例 `https://elxea.com`。
+   * 未設定なら通知しない（連携は成立させたまま、web-app 側の照合経路に委ねる）。
+   */
+  WEB_APP_BASE_URL?: string;
+  /**
+   * 合体イベントの認証鍵。**SYNC_API_SECRET とは別鍵**。
+   *
+   * この口は「この LINE とこの顧客は同一人物である」と宣言でき、通れば web-app は
+   * 元の棚を消して荷物を移す。取り返しがつかない操作なので、他の用途で配った鍵で
+   * 開けられるようにしない。
+   */
+  LINKAGE_EVENT_SECRET?: string;
   // Firebase / Firestore
   FIREBASE_PROJECT_ID?: string;
   FIREBASE_CLIENT_EMAIL?: string;

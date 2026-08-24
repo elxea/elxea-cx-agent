@@ -43,6 +43,7 @@ import type { Env } from "../index";
 import type { LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { upsertCustomerLinkage } from "./customer-linkage";
+import { notifyLinkageEstablished } from "./linkage-notify";
 import { logFlowEvent } from "./flow-events";
 import { getFirestoreEnv, mergeLineUserIntoShopify } from "./firestore";
 import { ACCOUNT_LINK_COMPLETED_BODY } from "./brand-copy";
@@ -487,6 +488,22 @@ export async function handleAccountLinkEvent(
     console.error("[account-link] linkage upsert failed:", result.error);
     return "failed_persist";
   }
+
+  /* 4-b. 台帳に行が立った = 合体のきっかけ（M-2）。
+   *
+   * **この経路にだけ、これが無かった。** LINE トーク内の Account Link は
+   * LINE → cx-agent の webhook だけで完結し、web-app を一度も通らない。だから
+   * web-app 側には合体を始めるきっかけが構造的に存在せず、連携は台帳上成立して
+   * いるのに、お気に入りは `users/line:<ID>` に取り残されていた（再設計 D-3）。
+   *
+   * 通知は連携の**後**に起きる出来事であって、連携の成否を決める条件ではない。
+   * 失敗しても連携は成立させたまま進む（届かなかった分は web-app 側の照合経路が
+   * 次のメールログインで拾う）。 */
+  void notifyLinkageEstablished(env, {
+    lineUserId,
+    shopifyCustomerId: result.shopifyCustomerId,
+    source: ACCOUNT_LINK_SOURCE,
+  });
 
   // 5. 連携完了の記録（fire-and-forget・応答を止めない）。
   void logEvent(supabase, {
