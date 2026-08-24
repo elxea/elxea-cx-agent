@@ -195,7 +195,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec wrangler deploy --env staging
+      # bare `wrangler deploy` は使わない。deploy-worker.sh が version の
+      # tag / message にコミット SHA を刻む（どのコミットが載ったかを後から
+      # Cloudflare 側だけで確定できるようにするため）。
+      - run: pnpm run deploy:staging
       - name: Staging smoke test
         run: pnpm test:staging-smoke
         env:

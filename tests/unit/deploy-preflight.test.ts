@@ -234,7 +234,9 @@ it("ゲートが本番デプロイ経路に配線されている（package.json 
     scripts: Record<string, string>;
   };
   assertIncludes(pkg.scripts.deploy, "deploy-preflight.sh", "package.json の deploy");
-  assertIncludes(pkg.scripts.deploy, "wrangler deploy", "package.json の deploy");
+  // 実際のデプロイは deploy-worker.sh 経由（version にコミット SHA を刻むため）。
+  // ゲートがその前段に居ることは上の assertion で担保している。
+  assertIncludes(pkg.scripts.deploy, "deploy-worker.sh", "package.json の deploy");
   // staging はゲート対象外（feature ブランチからの検証デプロイが正常運用のため）。
   assertEqual(
     pkg.scripts["deploy:staging"].includes("deploy-preflight.sh"),
