@@ -5,7 +5,8 @@
 # 実行順序（.github/workflows/deploy-prod.yml もこの 1 本を呼ぶ＝実体を一本化する）:
 #   1. preflight
 #        - confirm == "DEPLOY-PROD" 検証（誤爆防止）
-#        - git working tree clean 検証（未コミット差分での本番反映を禁止）
+#        - scripts/deploy-preflight.sh（working tree clean + HEAD == origin/master 検証。
+#          古いローカル master をそのまま本番へ載せる事故を機械で止める。bare `pnpm deploy` 経路と共有）
 #        - prod Supabase ref HARD ASSERT（SUPABASE_URL の ref === bquqzrbzdzjegdovxalu）
 #        - (#2) 必須 secret「名」の存在確認（wrangler secret list・名前のみ／値は見ない・欠落で中断）
 #        - staging smoke が緑（pnpm test:staging-smoke が exit 0）
@@ -50,6 +51,8 @@
 #   PROD_HEALTH_URL      本番ヘルスチェック URL（既定: https://elxea-agent.setaka-on.workers.dev/）。
 #   FIRST_DEPLOY         "true" のとき初回デプロイ扱い（追加ゲート）。既定 false。
 #   FIRST_DEPLOY_ACK     FIRST_DEPLOY=true のとき "SYNC-CRON-ACK" 必須。
+#   DEPLOY_ALLOW_NON_DEFAULT "1" のとき HEAD が origin/master 最新でなくても続行（差分サマリ + 警告付き）。
+#                        緊急時のみ。未コミット差分の禁止はこの変数では解除できない。
 #   SKIP_STAGING_SMOKE   "true" のとき staging smoke をスキップ（非推奨・緊急時のみ）。
 #   SKIP_SECRET_PREFLIGHT "true" のとき (#2) 必須 secret 名の存在確認をスキップ（非推奨）。
 #   SKIP_WEBHOOK_CHECK   "true" のとき (#6) LINE webhook 検証をスキップ。
@@ -147,12 +150,12 @@ preflight() {
   fi
   log "  [OK] confirm = DEPLOY-PROD"
 
-  # (b) git working tree clean
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    git status --short >&2 || true
-    die "working tree に未コミット差分がある。本番反映はクリーンな tree からのみ許可。"
+  # (b) 「今から本番に載るコミット」の検証（working tree clean + HEAD == origin/master）
+  #     実装は scripts/deploy-preflight.sh に一本化する（bare `pnpm deploy` 経路と同じ 1 実装を通す）。
+  #     不一致を今回だけ許すときは DEPLOY_ALLOW_NON_DEFAULT=1 を付けて再実行する（子プロセスへ継承される）。
+  if ! ./scripts/deploy-preflight.sh; then
+    die "deploy-preflight に失敗（working tree dirty / HEAD が origin/master 最新でない）。本番反映を中断。"
   fi
-  log "  [OK] git working tree clean"
 
   # (c) prod Supabase ref HARD ASSERT（SUPABASE_URL があるときのみここで検証。無ければ migrate.ts の assert に委譲）
   if [[ -n "${SUPABASE_URL:-}" ]]; then

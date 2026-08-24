@@ -24,7 +24,8 @@ Notion をナレッジベースとし、そこに書かれた情報のみで回�
 
 ```bash
 pnpm dev              # ローカル開発サーバー (wrangler dev)
-pnpm deploy           # Cloudflare Workers にデプロイ
+pnpm deploy           # Cloudflare Workersにデプロイ（前段でscripts/deploy-preflight.shが
+                      #   working tree clean + HEAD == origin/masterを検証。外れたら中止）
 pnpm sync-knowledge   # Notion → pgvector 同期
 pnpm typecheck        # TypeScript 型チェック
 ```
