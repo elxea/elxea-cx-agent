@@ -12,7 +12,7 @@
 
 import type { Context } from "hono";
 import type { Env } from "../../src/index";
-import { isValidSyncApiKey } from "../../src/lib/sync-auth";
+import { isValidSyncApiKey, requireSyncApiKey } from "../../src/lib/sync-auth";
 import {
   identityLinkHandler,
   identityLinkLineHandler,
@@ -65,12 +65,15 @@ function makeCtx(opts: {
   apiKey?: string;
   body?: unknown;
   secret?: string; // env.SYNC_API_SECRET。undefined なら未設定を再現
+  path?: string;
 }): Context<{ Bindings: Env }> {
   return {
     req: {
       header: (name: string) =>
         name === "X-API-Key" ? opts.apiKey : undefined,
       json: async () => opts.body ?? {},
+      // 拒否ログに載る route。実 Hono では `c.req.path` が入る。
+      path: opts.path ?? "/api/identity/linkage-status",
     },
     env: { SYNC_API_SECRET: opts.secret } as unknown as Env,
     json: (body: unknown, status = 200): MockResult => ({
@@ -141,6 +144,91 @@ describe("isValidSyncApiKey (pure)", () => {
 
   it("一致 → true", () => {
     assertEqual(isValidSyncApiKey(TEST_SECRET, TEST_SECRET), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 拒否ログ（沈黙させない・秘密は出さない）
+//
+// この 401 は両側から見えない失敗だった。web-app が受け取るのは
+// `{"error":"Unauthorized"}` だけで理由が分からず、cx-agent 側は何も出していない。
+// 鍵がずれた瞬間、痕跡はどこにも残らず「連携済みのお客さまが未連携に見える」と
+// いう症状だけが表に出る。ここで理由の書き分けを機械で固定する。
+// ---------------------------------------------------------------------------
+
+/** requireSyncApiKey を呼び、その間に出た console.warn を集める。 */
+function warnsFrom(opts: {
+  apiKey?: string;
+  secret?: string;
+  path?: string;
+}): { status: number; warns: string[] } {
+  const warns: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warns.push(args.map((a) => String(a)).join(" "));
+  };
+  try {
+    const res = requireSyncApiKey(makeCtx(opts));
+    return { status: res === null ? 200 : statusOf(res), warns };
+  } finally {
+    console.warn = original;
+  }
+}
+
+describe("requireSyncApiKey -- 拒否を必ずログに残す", () => {
+  it("secret 未設定 → reason=secret-unset", () => {
+    const { status, warns } = warnsFrom({ apiKey: TEST_SECRET });
+    assertEqual(status, 401);
+    assertEqual(warns.length, 1, "拒否は必ず 1 行残る");
+    assertTrue(
+      warns[0].includes("reason=secret-unset"),
+      `got: ${warns[0]}`,
+    );
+  });
+
+  it("ヘッダー無し → reason=key-absent", () => {
+    const { warns } = warnsFrom({ secret: TEST_SECRET });
+    assertTrue(warns[0].includes("reason=key-absent"), `got: ${warns[0]}`);
+  });
+
+  it("鍵の不一致 → reason=key-mismatch（ローテートの片側漏れ・改行混入）", () => {
+    const { warns } = warnsFrom({
+      apiKey: `${TEST_SECRET}\n`,
+      secret: TEST_SECRET,
+    });
+    assertTrue(warns[0].includes("reason=key-mismatch"), `got: ${warns[0]}`);
+  });
+
+  it("どの route で弾いたかが分かる", () => {
+    const { warns } = warnsFrom({
+      secret: TEST_SECRET,
+      path: "/api/identity/linkage-status",
+    });
+    assertTrue(
+      warns[0].includes("path=/api/identity/linkage-status"),
+      `got: ${warns[0]}`,
+    );
+  });
+
+  it("鍵の値は一切出さない（ログは平文で保存される）", () => {
+    const { warns } = warnsFrom({
+      apiKey: "attacker-guess-xyz",
+      secret: TEST_SECRET,
+    });
+    assertTrue(!warns[0].includes(TEST_SECRET), "サーバ秘密が漏れている");
+    assertTrue(
+      !warns[0].includes("attacker-guess-xyz"),
+      "提供された鍵が漏れている",
+    );
+  });
+
+  it("通過したときは何も書かない（正常時に鳴るログにしない）", () => {
+    const { status, warns } = warnsFrom({
+      apiKey: TEST_SECRET,
+      secret: TEST_SECRET,
+    });
+    assertEqual(status, 200, "認証は通過する");
+    assertEqual(warns.length, 0, "通過時は無音");
   });
 });
 
