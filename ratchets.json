@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "GENERATED-ASSISTED FILE — max は scripts/ops/check-ratchet.mjs --update が書く。",
+    "source / why は人が書く (何を数えていて、なぜその数が残っているのか)。",
+    "max を手で増やすだけの変更は、旧経路を増やしたことの申告である。",
+    "検査は両方向: 増えたら落ちる (旧経路が増えた) / 減ったのに max が残っていても落ちる",
+    "(緩んだ枠を残すと、その分だけ黙って増やせる)。",
+    "",
+    "この表が数えているのは lint の例外ではなく **顧客データ統合の撤去対象** である",
+    "(web-app 側の ratchets.json が lint の例外表を数えているのとは対象が違う)。",
+    "目標値と撤去の段は統合設計 §6-2 / §6-4 が正本: 各 why の末尾に段を書いてある。"
+  ],
+  "ratchets": {
+    "firestore-person-namespaces": {
+      "max": 3,
+      "source": "src/** に現れる「人に紐づく Firestore の棚」の入口の種類数 (users/{shopifyCustomerId} / users/line:{lineUserId} / lineUsers/{lineUserId})",
+      "why": "同じ人の記録が 3 つの棚に分かれて置かれている。連携済みなら users/{shopifyId}、Web からの LINE 連携人格なら users/line:{lineUserId}、未連携 LINE なら lineUsers/{lineUserId}。棚が分かれているぶんだけ「消し残し」と「カルテの分裂」が起きる (消去側 roji-erasure.ts も同じ 3 種を個別に組み立てて回っている)。目標 1 (棚のキーを subject_id 1 種にする)。撤去は Stage 5 / T-8・T-9。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) であり、この ratchet は進捗を固定する側。"
+    },
+    "identity-ledger-tables": {
+      "max": 2,
+      "source": "src/** の .from(\"…\") のうち、テーブル名に identity または linkage を含むものの種類数 (現在 user_identity_map / customer_linkages)",
+      "why": "「この LINE とこの顧客は同じ人だ」を書く台帳が 2 冊あり、相互参照がゼロのまま並存している。実害は既に出ていて、LIFF と Account Link は customer_linkages にしか書かないのに、横断の会話履歴を引く getCrossChannelMessages は user_identity_map しか見ない — 連携しても LINE の会話が統合ビューに出ない (統合設計 C-1)。目標 1 (identity_edges 1 冊)。撤去は Stage 5 / T-6・T-7。再流入を止めるのは E4 (edges/links の UPDATE/DELETE を Postgres トリガで ABORT)。"
+    },
+    "identity-merge-functions": {
+      "max": 2,
+      "source": "src/** の `export (async) function merge…IntoShopify | merge…AnonymousSession` の定義数 (現在 mergeLineUserIntoShopify / mergeAnonymousSession)",
+      "why": "「棚から棚へ荷物を移す」形の統合処理。移送の途中で落ちれば片方に残り、移送対象から漏れたコレクション (comments 等) は連携後に持ち主が合わなくなる。追記型 identity (subject_links に 1 行足すだけ) に置き換われば、この操作自体が存在しなくなる。目標 0。撤去は Stage 5 / T-4・T-5。再流入を止めるのは E2 (events gateway 以外からの書込を lint で落とす)。注: web-app 側にもう 1 本 (mergeLineIdentityIntoShopify / T-3) あり、そちらは web-app の ratchets.json が別に数える — 2 リポにまたがる 1 つの数は作れないため。"
+    },
+    "persona-writers": {
+      "max": 1,
+      "source": "src/** で購入シグナルの重み定数 PURCHASE_SIGNAL_WEIGHT を使うモジュール数 (定義元 purchase-signals.ts を除く)",
+      "why": "購入から persona スコアを加算する書き手。2026-08-28 以前は web-app の注文 webhook と cx-agent の preference-pipeline が **同一注文でそれぞれ加算** しており、接続先 Firebase プロジェクトが同一なら二重加算、別なら別々のカルテへの分裂という、どちらにせよ壊れた状態だった (統合設計 C-3)。Stage 0 で web-app 側 (T-1) を撤去し、書き手を cx-agent のこの 1 本に寄せた。この 1 は **これ以上増やさないための固定** であり、減らす対象ではない (0 にすると購入が persona に反映されなくなる)。恒久解は Stage 1 の L0 冪等キー。⚠ 全体で 1 本であることは、web-app 側の `__tests__/orders-webhook-no-persona-write.test.ts` が「注文 webhook は persona を 1 項目も書かない」を実書き込みペイロードで固定していることと合わせて成立する (2 リポにまたがる 1 つの数は作れないため、cx-agent=1 本 + web-app=0 本 の 2 つで担保する)。web-app 側を字面の件数固定にしなかったのは、0 に固定する ratchet はパターンが対象を見失った瞬間に 0 件のまま緑になり、「数えられていない」と「書いていない」が区別できなくなるため。"
+    },
+    "raw-identity-key-legacy": {
+      "max": 10,
+      "source": "src/** (src/db/migrations は除く) のうち、生の LINE userId を行に載せる形 (`line_user_id:`) を持つモジュール数",
+      "why": "生の LINE userId は「その人に話しかけられる鍵」であり、置き場が散らばるほど消去も差し替えも届きにくくなる (E5)。数えるのは参照ではなく保管 — where 句で引くだけの読み手まで数えると、読み手を消さないと数が減らないことになり、E5 が意図する「置き場を 1 箇所に寄せる」とは別の圧力になるため。目標 1 (delivery_identity 1 表のみが生値を持つ)。撤去は Stage 5 / T-7。⚠ 統合設計 §6-4 の表は同じ ratchet を「5 → 1」と書いているが、あちらは設計時点の粗い見積り (置き場の概数) であり、本値 10 は上記の数え方による実測である。単位が違うので進捗として比較しないこと — 締めていく基準は常にこの実測値の側。"
+    }
+  }
+}

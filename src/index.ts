@@ -34,6 +34,10 @@ import { runDormantReengagement } from "./lib/dormant-reengagement";
 import { runMarcheActivation } from "./lib/marche-activation";
 import { getAlertStatus } from "./lib/alerts";
 import { erasePerson } from "./lib/roji-erasure";
+import {
+  assertFirestoreConfigured,
+  isFirestoreConfigured,
+} from "./lib/firestore";
 
 /**
  * 配信の起動経路（2026-08-22 完全オンデマンド化・Setaka 指示）。
@@ -225,11 +229,96 @@ export type Env = {
   FIREBASE_PROJECT_ID?: string;
   FIREBASE_CLIENT_EMAIL?: string;
   FIREBASE_PRIVATE_KEY?: string;
+  /**
+   * 【非本番専用の申告】Firebase 未設定のまま起動してよい、と明示的に宣言する。
+   *
+   * 既定（未設定）では E6' の起動時 assert が全リクエストを 503 で落とす。
+   * ハーメティックテストと一部 staging 検証は Firebase 資格情報を持たずに走るため、
+   * そこだけ "true" を宣言する。
+   *
+   * ⚠ 本番（DELIVERY_TARGET_ENV="prod"）ではこの宣言は無視される（設定しても拒否される）。
+   *    逃げ道が本番に効くなら fail-closed とは呼べないため。
+   *    正本は src/lib/firestore.ts の assertFirestoreConfigured。
+   */
+  FIRESTORE_UNCONFIGURED_ACK?: string;
 };
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/", (c) => c.json({ status: "ok", service: "elxea-agent" }));
+
+/**
+ * E6' — Firebase 接続先の契約を外から確かめるための口。
+ *
+ * 返すのは **接続先プロジェクト ID だけ**。顧客の情報は 1 バイトも返さない
+ * （PII なし・件数なし・資格情報なし）。プロジェクト ID は web-app の
+ * `.firebaserc` に平文でコミットされている値と同種のもので、秘密ではない。
+ *
+ * 何のためにあるか:
+ *   web-app と cx-agent は別リポジトリ・別ランタイムでありながら、同じ Firestore を
+ *   顧客カルテの置き場として共有している。にもかかわらず「両者が本当に同じ
+ *   プロジェクトを見ているか」を機械で確かめる手段がこれまで無く、2026-08 の
+ *   CDP 審査では 3 案すべてが接続先を取り違えて推測していた。
+ *   食い違えばカルテが 2 つに分裂し、一致していれば persona の二重加算になる —
+ *   どちらが起きているのかを、人が実機に入るまで誰も言えなかった。
+ *
+ *   この口が返す値を web-app 側 CI が `.firebaserc` と突き合わせ、
+ *   **不一致でも未設定でも落とす**（fail-closed）。突合スクリプトの正本は
+ *   web-app の scripts/ops/check-firebase-project-parity.mjs。
+ *
+ * 認証を掛けない理由:
+ *   掛けると突合のために CI へ鍵を配る必要が生じ、「契約を検査するための鍵」が
+ *   新しい漏洩面になる。返す情報が非秘密である以上、鍵を増やすほうが割に合わない。
+ */
+app.get("/health/firebase", (c) => {
+  const env = c.env as Env;
+  const configured = isFirestoreConfigured(env);
+  return c.json(
+    {
+      service: "elxea-agent",
+      configured,
+      // 未設定なら null を返す。突合側はこれを「不一致」と同じく失敗として扱う。
+      project_id: configured ? (env.FIREBASE_PROJECT_ID ?? null) : null,
+      delivery_target_env: env.DELIVERY_TARGET_ENV ?? null,
+    },
+    configured ? 200 : 503,
+  );
+});
+
+/**
+ * E6' の起動時 assert（fail-closed ゲート）。
+ *
+ * Workers に「起動」の瞬間は無いので、**最初のリクエストで落ちる**形で実現する。
+ * 未設定なら 503 を返して以降も返し続ける = 事実上の起動拒否。
+ *
+ * 除外するのは `/`（サービス生存）と `/health/firebase`（設定状況そのものの報告）だけ。
+ * ここまで 503 にすると「なぜ止まっているのか」を外から読む手段が消え、
+ * 静かに壊れているのと区別がつかなくなるため。
+ *
+ * 除外は **登録順と明示リストの二重**にしてある。Hono は登録順に合成するので
+ * 上の 2 本（このミドルウェアより前に登録済み）は本来ここへ来ないが、
+ * 誰かが行を並べ替えた瞬間に health が 503 になって「設定状況を読む口」が
+ * 道連れで死ぬ、という壊れ方をしうる。並べ替えで壊れない形にしておく。
+ *
+ * 詳細な理由・例外表は src/lib/firestore.ts の assertFirestoreConfigured を参照
+ * （二重に書かない）。
+ */
+const FIRESTORE_GATE_EXEMPT_PATHS = new Set(["/", "/health/firebase"]);
+
+app.use("*", async (c, next) => {
+  if (FIRESTORE_GATE_EXEMPT_PATHS.has(c.req.path)) return next();
+  try {
+    assertFirestoreConfigured(c.env as Env);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(message);
+    return c.json(
+      { status: "unconfigured", reason: "firestore_not_configured" },
+      503,
+    );
+  }
+  return next();
+});
 
 // CORS for Web Chat API（M-1: localhost は開発環境のみ許可）
 app.use("/api/*", async (c, next) => {
@@ -723,6 +812,16 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ) => {
+    // E6'（起動時 assert）の cron 側。HTTP と同じ契約を cron にも掛ける。
+    //
+    // 掛けないと「web からは 503 で止まっているのに、cron だけは未設定のまま
+    // 静かに走り続ける」という半分死んだ状態になる。日次のカルテ照合・
+    // Metafield 同期はまさに Firestore を書く処理なので、そこが黙って
+    // no-op になるのが元の欠陥そのものだった。
+    //
+    // throw すると Cloudflare 側で cron 実行が失敗として記録される = 気づける。
+    assertFirestoreConfigured(env);
+
     const cronKind = classifyCron(event.cron);
 
     // ── 一斉配信は cron から発火しない（2026-08-22 完全オンデマンド化・Setaka 指示）──

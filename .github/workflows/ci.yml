@@ -63,6 +63,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec tsc -p tsconfig.ci.json --noEmit
 
+      # 撤去の進捗を CI に固定する（憲章 R8 / CDP 統合設計 §6-4）。
+      #
+      # 新規ジョブは作らず static-checks に相乗りさせる。理由は 2 つ:
+      #   (1) 検査は数十ミリ秒で、専用ジョブを立てるほうが起動コストのほうが大きい
+      #   (2) ratchet は「型検査と同じ扱いの静的検査」であってほしい。別ジョブにすると
+      #       「落ちたけど本筋ではない」という扱いを許す余地ができる
+      #
+      # 両方向検査（増えたら落ちる / 減ったのに上限が残っていても落ちる）なので、
+      # 撤去が進むたびに ratchets.json の上限を締め直さないとここが赤くなる。
+      # 仕組みそのものの検査は tests/unit/check-ratchet.test.ts が持つ。
+      - name: ratchet (撤去の進捗を固定する)
+        run: node scripts/ops/check-ratchet.mjs --check
+
   unit-tests:
     name: unit-tests
     needs: static-checks

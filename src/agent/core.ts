@@ -15,7 +15,7 @@ import {
   getLineUserProfile,
   mergeLineUserIntoShopify,
   addBehaviorEvent,
-  getFirestoreEnv,
+  tryGetFirestoreEnv,
   type CustomerProfile,
   type FirestoreEnv,
   type TasteProfile,
@@ -166,13 +166,9 @@ export async function runAgent(
   const sourceTypeFilter = classifyQuery(userMessage);
   console.log(`Query classified as: ${sourceTypeFilter ?? "null (no filter)"}`);
 
-  // Firestore env を一度だけ取得してキャッシュ（複数箇所で使用）
-  let fsEnv: ReturnType<typeof getFirestoreEnv> | null = null;
-  try {
-    fsEnv = getFirestoreEnv(env);
-  } catch {
-    // Firebase 未設定の場合はスキップ
-  }
+  // Firestore env を一度だけ取得してキャッシュ（複数箇所で使用）。
+  // T-12: 未設定は黙ってスキップしない（理由付きで 1 行出す）。
+  const fsEnv = tryGetFirestoreEnv(env, "agent.core.generateResponse");
 
   // --- 並列フェーズ: 顧客プロファイル取得 + ハイブリッド検索を同時実行 ---
   // 以前は直列だった2つの重い I/O を並列化し、初回トークンまでの時間を短縮する。
@@ -694,8 +690,8 @@ export async function runAgentStreaming(
 
   const sourceTypeFilter = classifyQuery(userMessage);
 
-  let fsEnv: ReturnType<typeof getFirestoreEnv> | null = null;
-  try { fsEnv = getFirestoreEnv(env); } catch { /* Firebase 未設定 */ }
+  // T-12: 未設定は黙ってスキップしない（理由付きで 1 行出す）。
+  const fsEnv = tryGetFirestoreEnv(env, "agent.core.generateResponseStream");
 
   // --- 並列フェーズ: 顧客プロファイル取得 + ハイブリッド検索 ---
   console.log("[agent-stream] step=parallel-fetch");

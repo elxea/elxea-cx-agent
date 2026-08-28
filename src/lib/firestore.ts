@@ -524,6 +524,116 @@ export function getFirestoreEnv(env: Env): FirestoreEnv {
 }
 
 // ---------------------------------------------------------------------------
+// E6' — Firebase 接続先の契約（起動時 assert / 縮退の可視化）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「Firebase 未設定でも動かしてよい」と明示的に宣言する変数名。
+ *
+ * これは逃げ道ではなく **申告** である。未設定のまま動かすこと自体は
+ * ハーメティックテストや一部の staging 検証で必要になるが、「気づかないうちに
+ * そうなっていた」を無くしたい。よって既定は拒否で、動かしたい側が名前を書いて
+ * 宣言する形にした（宣言は必ず設定ファイルの差分に残る）。
+ *
+ * ⚠ 本番（DELIVERY_TARGET_ENV="prod"）ではこの申告は **効かない**。
+ *    本番で未設定なら、何を宣言していても起動を拒否する（下記 assertFirestoreConfigured）。
+ *    逃げ道が本番に効くなら fail-closed とは呼べないため。
+ */
+export const FIRESTORE_UNCONFIGURED_ACK_VAR = "FIRESTORE_UNCONFIGURED_ACK";
+
+/** Firebase 資格情報 3 点が揃っているか（値は読まない・存在だけ見る）。 */
+export function isFirestoreConfigured(env: Env): boolean {
+  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } =
+    env as Env & Partial<FirestoreEnv>;
+  return Boolean(
+    FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY,
+  );
+}
+
+/**
+ * E6'（起動時 assert）— Firebase 未設定なら **起動を拒否する**。
+ *
+ * なぜ要るか（実際に起きた事故の形）:
+ *   このリポジトリには `try { getFirestoreEnv(env) } catch { return }` という
+ *   縮退が各所にあり、未設定でも例外を出さず「何もしないで成功したように見える」
+ *   状態で動き続けられた。カルテも persona も書かれないのに、ログにも監視にも
+ *   何も出ない。実際 2026-08 の CDP 審査では 3 つの設計案すべてが「本番の
+ *   cx-agent は Firestore 未設定なのではないか」と疑い、実機で secret を数えるまで
+ *   誰も確定できなかった。**設定されているのかいないのかを、外から見て言えない**
+ *   というのが、この縮退が作った本当の損害である。
+ *
+ *   さらに悪いことに、この誤読は persona 二重加算（web-app 注文 webhook と
+ *   cx-agent preference-pipeline が同一注文で各々加算していた問題）の見落としに
+ *   直結した。「cx-agent 側は動いていないはずだから二重にはならない」という
+ *   前提が、この縮退のせいで成立して見えていた。
+ *
+ * 何をするか:
+ *   資格情報が無ければ throw する。呼び出し側（src/index.ts の入口ゲート）が
+ *   これを受けて全リクエストを 503 で落とす = 「静かに何もしない」ではなく
+ *   「はっきり止まる」。止まれば必ず気づく。
+ *
+ * 例外表（唯一）:
+ *   `FIRESTORE_UNCONFIGURED_ACK="true"` を宣言した非本番環境のみ通す。
+ *   本番（DELIVERY_TARGET_ENV="prod"）では宣言を無視して拒否する。
+ *
+ * 接続先が「合っているか」（web-app の .firebaserc と同じプロジェクトか）は
+ * ここでは判定できない（cx-agent は web-app の設定を知らない）。それは
+ * `GET /health/firebase` が返すプロジェクト ID を web-app 側 CI が
+ * `.firebaserc` と突き合わせて判定する（E6' の CI 側・fail-closed）。
+ */
+export function assertFirestoreConfigured(env: Env): void {
+  if (isFirestoreConfigured(env)) return;
+
+  const e = env as Env & {
+    DELIVERY_TARGET_ENV?: string;
+    FIRESTORE_UNCONFIGURED_ACK?: string;
+  };
+  const isProd = e.DELIVERY_TARGET_ENV === "prod";
+  const acknowledged = e.FIRESTORE_UNCONFIGURED_ACK === "true";
+
+  if (acknowledged && !isProd) {
+    console.warn(
+      `[e6] Firestore 未設定のまま起動します（${FIRESTORE_UNCONFIGURED_ACK_VAR}=true の申告あり / ` +
+        `DELIVERY_TARGET_ENV=${e.DELIVERY_TARGET_ENV ?? "unset"}）。` +
+        "カルテ・persona・嗜好は一切書かれません。本番でこの警告が出た場合は設定事故です。",
+    );
+    return;
+  }
+
+  throw new Error(
+    "[e6] Firestore 未設定のため起動を拒否します（fail-closed）。" +
+      "FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY の 3 点が必要です" +
+      "（`wrangler secret put FIREBASE_PROJECT_ID` 等）。" +
+      (isProd
+        ? `本番（DELIVERY_TARGET_ENV="prod"）では ${FIRESTORE_UNCONFIGURED_ACK_VAR} による申告は効きません。`
+        : `未設定のまま動かすなら ${FIRESTORE_UNCONFIGURED_ACK_VAR}="true" を明示的に宣言してください。`),
+  );
+}
+
+/**
+ * 縮退を **黙らせない** ための取得口。
+ *
+ * `try { getFirestoreEnv(env) } catch { return }` の置き換え。制御フローは同じ
+ * （未設定なら null が返り、呼び出し側は従来どおり早期 return する）だが、
+ * **必ず理由付きで 1 行ログに出る**。どの機能が・なぜ動かなかったのかが後から言える。
+ *
+ * 起動時 assert（assertFirestoreConfigured）が入ったので、本番でここが null を
+ * 返すことは構造上ありえない。それでも各所を null 返しのままにしてあるのは、
+ * ハーメティックテストと staging が未設定で走るためで、そこでの挙動を変えないため。
+ *
+ * @param site 呼び出し箇所の識別子（ログに出す。例 "preference-pipeline.conversation"）
+ */
+export function tryGetFirestoreEnv(env: Env, site: string): FirestoreEnv | null {
+  if (!isFirestoreConfigured(env)) {
+    console.warn(
+      `[firestore] 未設定のため ${site} をスキップしました（Firestore への読み書きは発生していません）。`,
+    );
+    return null;
+  }
+  return getFirestoreEnv(env);
+}
+
+// ---------------------------------------------------------------------------
 // バリデーション
 // ---------------------------------------------------------------------------
 
