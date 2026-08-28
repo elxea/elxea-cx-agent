@@ -14,7 +14,7 @@
     "customer-fact-write-sites": {
       "max": 5,
       "source": "src/** のうち、顧客の事実を **L0 以外** のストアへ直接書いている面を持つモジュール数 (flow_events / product_ratings への insert、Firestore behaviorLog への addBehaviorEvent、roji アンケートのカルテ書き込み)",
-      "why": "E2「顧客の事実を書く口は 1 つ」の登録。Stage 1 の events gateway は既存 5 経路を **透過で通す** 段なので、これらの面はまだ実在する — だから 0 ではなく実測 5 で始める (これが「warn から開始する」の実体で、既存の面は据え置き・**新しく増やしたときだけ落ちる**)。数えるのは書き込みの口であって呼び出し側ではない: 呼び出し側まで数えると、読み手を消さないと 数が減らないことになり、E2 が意図する「口を 1 本に寄せる」とは別の圧力になる (raw-identity-key-legacy と同じ考え方)。目標 0 (書く口が L0 の 1 本になる)。撤去は Stage 5。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) と、この ratchet。"
+      "why": "E2「顧客の事実を書く口は 1 つ」の登録。Stage 1 の events gateway は既存 5 経路を **透過で通す** 段なので、これらの面はまだ実在する — だから 0 ではなく実測 5 で始める (これが「warn から開始する」の実体で、既存の面は据え置き・**新しく増やしたときだけ落ちる**)。数えるのは書き込みの口であって呼び出し側ではない: 呼び出し側まで数えると、読み手を消さないと 数が減らないことになり、E2 が意図する「口を 1 本に寄せる」とは別の圧力になる (raw-identity-key-legacy と同じ考え方)。目標 0 (書く口が L0 の 1 本になる)。撤去は Stage 5。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) と、この ratchet。⚠ Stage 3 で 5 のまま据え置き。Stage 3 の注文 webhook 一本化で撤去したのは **web-app 側**の直書き (注文 webhook が users/{id}/behaviorLog に書いていた {action:\"purchase\"} の行。D4 が名指ししていた「route を迂回して channel:\"shopify\" を実書込」) であって、cx-agent 側の口は 1 つも減っていない。2 リポにまたがる 1 つの数は作れないので、web-app 側は persona-writers と同じ形 (__tests__/orders-webhook-no-persona-write.test.ts が実書き込みペイロードで「行動ログの購入行が復活しない」を固定) で担保する。数が動かないことを「何もしていない」と読み違えないための申告。"
     },
     "event-vocabulary-declarations": {
       "max": 7,

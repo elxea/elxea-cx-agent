@@ -19,14 +19,21 @@
  *     使い切っている（wrangler.toml のコメント参照）。
  *   - 外部に何も送らない。
  *
- * ─ 一致の定義（この 3 つが 0 の日が「一致した 1 日」）─
+ * ─ 一致の定義（この 4 つが 0 の日が「一致した 1 日」）─
  *
- *   linked_without_link       … 旧台帳では連携済みなのに link が無い人数
+ *   linked_without_link       … 旧台帳 customer_linkages で連携済みなのに link が無い人数
+ *   identity_map_without_link … もう 1 冊の旧台帳 user_identity_map で同上
  *   delivery_identity_missing … 連携済みなのに配信の宛先の派生が無い人数
  *   multi_line_components     … 1 人に LINE が 2 本以上（J-4 の破れ）
  *
- *   数え方の正本は SQL 側（migration 043 の cdp_stage2_parity）。ここは呼んで
+ *   数え方の正本は SQL 側（migration 043 → 044 の cdp_stage2_parity）。ここは呼んで
  *   ログに落とすだけで、判定条件を 2 か所に書かない。
+ *
+ *   ⚠ identity_map_without_link は 043 の時点でも**数えて返していた**が、
+ *     in_agreement の式に入っていなかった（Stage 2 の QA 指摘 MID-1）。★11 の断線は
+ *     user_identity_map を引く読出（getCrossChannelMessages / resolveUnifiedUserId）で
+ *     起きているので、これは「新旧一致」の旧の側に確かに含まれる。044 で判定に入れた。
+ *     数は 043 の時点から毎日ログに出ているため、**過去の日も後から判定し直せる**。
  */
 
 import { createClient } from "@supabase/supabase-js";

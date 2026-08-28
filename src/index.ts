@@ -12,6 +12,11 @@ import {
 import { surveyHandler } from "./routes/survey";
 import { eventsIntakeHandler } from "./routes/events";
 import {
+  cdpL0EventsHandler,
+  cdpL0DailyCountsHandler,
+  cdpSubjectMapHandler,
+} from "./routes/cdp-export";
+import {
   identityLinkHandler,
   identityLinkLineHandler,
   identityLinkLiffHandler,
@@ -365,6 +370,16 @@ app.post("/api/survey", surveyHandler);
 //   Supabase クライアントを持たない elxea-web-app から出来事を積むためにある。
 //   認証は既存の共有秘密（SYNC_API_SECRET / X-API-Key）。新しい秘密は増やさない。
 app.post("/api/events", eventsIntakeHandler);
+
+// L0 の読み口（CDP 統合 Stage 3）— 解析側（elxea-cdp / ローカル SQLite）が
+//   日次で取りに来る。Workers からローカルファイルには書けないので、押し込む形では
+//   なく取りに来る形にしてある（設計 §4-5）。3 つとも GET・読み取り専用で、
+//   生 LINE userId / email_hash は 1 つも返さない（E5 / SEC-1）。
+//   認証は events gateway と同じ共有秘密（SYNC_API_SECRET / X-API-Key）。
+//   契約: docs/cdp-events-gateway-contract.md §12
+app.get("/api/cdp/l0/events", cdpL0EventsHandler);
+app.get("/api/cdp/l0/daily-counts", cdpL0DailyCountsHandler);
+app.get("/api/cdp/l0/subject-map", cdpSubjectMapHandler);
 
 // Identity link routes
 app.post("/api/identity/link", identityLinkHandler);
