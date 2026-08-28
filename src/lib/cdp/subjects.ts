@@ -43,10 +43,24 @@ export type SubjectSkipReason =
   | "identifier_kind_not_resolvable"
   | "edge_lookup_failed"
   | "subject_insert_failed"
-  | "edge_insert_failed";
+  | "edge_insert_failed"
+  // 追加は通ったかもしれないが、勝者を確定させる引き直しが落ちた。
+  // edge_insert_failed（＝入っていない）とは意味が違うので別の理由にする（T-12）。
+  | "subject_settle_failed";
 
 /**
  * 鍵から主体を引き、無ければ発行する。
+ *
+ * ─ 並行して呼ばれたときに何が起きるか ─
+ *   同じ鍵で同時に 2 つ走ると、両方が「無い」と見てから両方が発行しにいく。
+ *   edge の UNIQUE は (kind, value) の 2 列なので、**必ず片方だけが入る**。
+ *   もう片方は引き直して勝者に合流するので、返る subject_id は 1 つに収束し、
+ *   identity_edges は 1 行のままになる。
+ *
+ * ─ 負けた側が発行した subjects の行は残る ─
+ *   edge を持たない 26 文字が 1 行残るだけで、どの鍵からも辿れず、本人に
+ *   結びつく情報も持たない（E4 により消せもしない ＝ 消す必要も無い）。
+ *   1 鍵 = 1 主体は edge 側の UNIQUE が保つので、この残骸はその不変条件を破らない。
  *
  * @param observedBy どの経路が観測したか（slug）。edge に残る。
  */
@@ -72,8 +86,19 @@ export async function resolveOrIssueSubject(
     return { subjectId: existing.subjectId, issued: false };
   }
 
-  // 発行。ULID なので衝突は実質起きないが、同時に 2 リクエストが来ると
-  // edge の UNIQUE で片方が落ちる。落ちたほうは引き直す（勝ったほうに合流する）。
+  // 発行。ここが「同じ鍵に同時に 2 リクエストが来た」ときの分岐点になる。
+  //
+  // 収束の根拠は **index の列構成** にある: identity_edges_uniq は
+  // (identifier_kind, identifier_value) の 2 列（migration 040）。subject_id を
+  // 含まないので、後から来たほうは必ず衝突する。3 列だった初版では衝突せず、
+  // 「同じ鍵を指す主体が 2 つ」が黙って成立していた（QA 指摘 MID-1）。
+  //
+  // 衝突したときに例外を投げさせない（= on_conflict do nothing にする）のは、
+  // 「負けた」ことは異常ではなく **合流すべき正常な結果** だから。負けた側は
+  // 下の引き直しで勝ったほうの subject_id を受け取る。
+  //
+  // ⚠ ignoreDuplicates: true（= ON CONFLICT DO NOTHING）から外さないこと。
+  //   DO UPDATE は既存行の UPDATE なので、E4 の追記専用トリガに掛かって落ちる。
   const subjectId = newSubjectId();
   const { error: subjectError } = await supabase
     .from(SUBJECTS_TABLE)
@@ -82,20 +107,33 @@ export async function resolveOrIssueSubject(
     return { subjectId: null, issued: false, reason: "subject_insert_failed" };
   }
 
-  const { error: edgeError } = await supabase.from(IDENTITY_EDGES_TABLE).insert({
-    subject_id: subjectId,
-    identifier_kind: identifier.kind,
-    identifier_value: value,
-    observed_by: observedBy,
-  });
+  const { error: edgeError } = await supabase.from(IDENTITY_EDGES_TABLE).upsert(
+    {
+      subject_id: subjectId,
+      identifier_kind: identifier.kind,
+      identifier_value: value,
+      observed_by: observedBy,
+    },
+    { onConflict: "identifier_kind,identifier_value", ignoreDuplicates: true },
+  );
   if (edgeError) {
-    // 競合で負けた可能性。引き直して、あるならそれを使う。
+    // DO NOTHING でも拾えない失敗（接続断など）。引き直して、あるならそれを使う。
     const retry = await lookupEdge(supabase, identifier.kind, value);
     if (retry.subjectId) return { subjectId: retry.subjectId, issued: false };
     return { subjectId: null, issued: false, reason: "edge_insert_failed" };
   }
 
-  return { subjectId, issued: true };
+  // DO NOTHING は「入ったのか、既にあったのか」を返さない。**必ず引き直して**
+  // 勝者を確定させる。ここを省くと、負けたリクエストが自分の subject_id を
+  // 返してしまい、同じ人に 2 つの主体で出来事が積まれる。
+  const settled = await lookupEdge(supabase, identifier.kind, value);
+  if (settled.subjectId) {
+    // 自分が入れたものと一致していれば発行者は自分。違えば合流した側。
+    return { subjectId: settled.subjectId, issued: settled.subjectId === subjectId };
+  }
+  // ここに来るのは「引き直しそのものが落ちた」か「入れたはずの行が見えない」場合。
+  // 入っていないと断定できないので edge_insert_failed とは言わない（T-12）。
+  return { subjectId: null, issued: false, reason: "subject_settle_failed" };
 }
 
 async function lookupEdge(

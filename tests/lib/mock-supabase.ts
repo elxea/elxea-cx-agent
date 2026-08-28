@@ -35,6 +35,15 @@ const UNIQUE_COLUMNS: Record<string, string> = {
   subjects: "subject_id",
 };
 
+/**
+ * 複合の一意制約。migration 040 の identity_edges_uniq は
+ * (identifier_kind, identifier_value) の **2 列**（subject_id を含まない）。
+ * これが「1 つの鍵は 1 つの主体しか指さない」の実体なので、mock でも同じ形で持つ。
+ */
+const COMPOSITE_UNIQUE_COLUMNS: Record<string, string[]> = {
+  identity_edges: ["identifier_kind", "identifier_value"],
+};
+
 /** Postgres の一意制約違反（23505）を PostgREST の形で返す。 */
 function uniqueViolation(table: string, column: string): Response {
   return new Response(
@@ -184,11 +193,26 @@ export function createSupabaseMock(): SupabaseMock {
           const clash = table(t).some((r) => String(r[uniqueCol]) === String(row[uniqueCol]));
           if (clash) return uniqueViolation(t, uniqueCol);
         }
+        const compositeCols = COMPOSITE_UNIQUE_COLUMNS[t];
+        if (compositeCols && !onConflict && compositeCols.every((c) => row[c] !== undefined)) {
+          const clash = table(t).some((r) =>
+            compositeCols.every((c) => String(r[c]) === String(row[c])),
+          );
+          if (clash) return uniqueViolation(t, compositeCols.join(","));
+        }
         if (onConflict) {
-          const idx = table(t).findIndex(
-            (r) => String(r[onConflict]) === String(row[onConflict]),
+          // on_conflict は **カンマ区切りの複合キー**を取りうる
+          // （例: identity_edges の (identifier_kind, identifier_value)）。
+          // 1 列としてしか見ないと、複合キー指定のとき両辺 undefined で
+          // 「常に先頭行に一致」してしまい、無関係の行を書き換える。
+          const cols = onConflict.split(",").map((c) => c.trim()).filter(Boolean);
+          const idx = table(t).findIndex((r) =>
+            cols.every((c) => String(r[c]) === String(row[c])),
           );
           if (idx >= 0) {
+            // ignoreDuplicates: true → Prefer: resolution=ignore-duplicates（= DO NOTHING）。
+            // 既存行に触らない（identity_edges は追記専用なので UPDATE 自体が許されない）。
+            if (prefer.includes("resolution=ignore-duplicates")) continue;
             table(t)[idx] = { ...table(t)[idx], ...row };
             continue;
           }

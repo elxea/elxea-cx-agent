@@ -45,9 +45,30 @@
 -- 例外表をコードの外（DB）に置くのは、「消せます」の約束と「書き換えない」の約束が
 -- 両方とも守られていることを、呼び出し側の作法に依存せず言えるようにするため。
 --
+-- ─ 1 鍵 = 1 主体（identity_edges_uniq が 2 列である理由）─
+--
+-- 「この鍵はどの主体か」が一意に決まることは Stage 1 の中心的な不変条件で、
+-- **index の列構成そのものがその宣言**である。初版は (kind, value, subject_id) の
+-- 3 列だったが、それでは subject_id が違えば衝突しないため、未登録の鍵への
+-- 並行 2 リクエストで主体が 2 つ立つ（詳細は下の index 定義のコメント）。
+-- 2 列に是正した（QA 指摘 MID-1 / 2026-08-29）。
+--
+-- ⚠ この訂正を **新番号ではなく 040 の修正として** 入れている理由:
+--   040 は本番・staging のいずれにも未適用（`migrate.ts --dry-run` の pending に
+--   両環境とも 040 / 041 / 042 が並ぶことを 2026-08-29 に実測）。台帳
+--   （schema_migrations）は version 名だけを見るので、未適用の version を正しい形に
+--   直しておけば、当たる瞬間には最初から 2 列で立つ。新番号で「3 列を作ってすぐ
+--   落とす」履歴を残すのは、まだ一度も存在していない状態を再現してから壊す
+--   ことになり、読む人に「この index は一度 3 列だった」と誤解させる。
+--   一方で、初版を手元に当ててしまった環境が在り得るので、下の DO ブロックが
+--   3 列版を検出して作り直す（冪等性は保つ）。
+--   前例: 017 も 039 の廃止に合わせて後から冪等化している（= 未適用/再適用が
+--   安全な範囲での既存 migration 修正は本リポジトリの作法の内）。
+--
 -- ─ 冪等性 ─ CREATE TABLE IF NOT EXISTS / CREATE OR REPLACE FUNCTION /
 --            DROP TRIGGER IF EXISTS + CREATE TRIGGER。何度当てても同じ。
--- ─ 破壊性 ─ 新規オブジェクトの追加のみ。既存の表・関数・データに一切触れない。
+-- ─ 破壊性 ─ 新規オブジェクトの追加のみ。既存の表・関数・データに一切触れない
+--            （唯一の例外は、初版で作られた 3 列 index の作り直し）。
 --
 -- ─ 適用手順 ─
 --
@@ -115,14 +136,49 @@ CREATE TABLE IF NOT EXISTS identity_edges (
   CONSTRAINT identity_edges_observed_by_slug CHECK (observed_by ~ '^[a-z0-9_.\-]{1,64}$')
 );
 
--- 同じ（種類・値・主体）の観測を何度記録しても 1 行に収める。
--- 追記専用なので「上書きで整える」ことができない以上、重複の抑止は index 側に置く。
-CREATE UNIQUE INDEX IF NOT EXISTS identity_edges_uniq
-  ON identity_edges (identifier_kind, identifier_value, subject_id);
+-- 「1 つの鍵は 1 つの主体しか指さない」を **index で** 保つ（Stage 1 の中心的な不変条件）。
+--
+-- ⚠ ここを (kind, value, subject_id) の 3 列にしてはいけない。3 列だと subject_id が
+--   違えば衝突しないので、未登録の鍵に同時に 2 リクエストが来たとき「同じ鍵を指す
+--   edge が 2 本・主体が 2 つ」が **黙って** 成立する。1 鍵 = 1 主体は Stage 1 の前提
+--   （Stage 2 の canonical 解決も、同じ鍵が 1 主体を指すことに乗っている）なので、
+--   破れたことに気づけない形にはしない。2 列にすれば負けたほうが 23505 で落ち、
+--   呼び出し側は引き直して勝ったほうへ合流する（src/lib/cdp/subjects.ts）。
+--
+-- 消去との両立: 042 の消去は identity_edges の行を消す。edge が消えれば index も
+-- 空くので、同じ鍵で再来訪した人には新しい主体が発行される（消去後の再発行と両立する）。
+--
+-- ⚠ ON CONFLICT を使う側は必ず DO NOTHING にする。DO UPDATE は既存行の UPDATE なので
+--   E4 のトリガに掛かって落ちる（追記専用の約束はここでも効いている）。
+DO $$
+BEGIN
+  -- 3 列版が既に立っている環境（本 migration の初版を当てた環境）では、
+  -- CREATE UNIQUE INDEX IF NOT EXISTS は **名前が同じなので何もしない**。
+  -- 列構成が違うものは明示的に落としてから作り直す。
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE i.indrelid = to_regclass('public.identity_edges')
+      AND c.relname = 'identity_edges_uniq'
+      AND pg_get_indexdef(i.indexrelid) LIKE '%subject_id%'
+  ) THEN
+    RAISE NOTICE '040: 旧 3 列版の identity_edges_uniq を落として 2 列版に作り直す（1 鍵 = 1 主体）。';
+    EXECUTE 'DROP INDEX public.identity_edges_uniq';
+  END IF;
+END;
+$$;
 
--- 「この鍵はどの主体か」（解決の主経路）。
-CREATE INDEX IF NOT EXISTS identity_edges_lookup
+-- ⚠ 既に「同じ鍵が 2 主体を指す」行が入っている環境では、この CREATE は 23505 で
+--   落ちる。それが正しい — 黙って片方を捨てる（どちらが本物か機械には決められない）
+--   のではなく、当てる人に見せて判断させる。
+CREATE UNIQUE INDEX IF NOT EXISTS identity_edges_uniq
   ON identity_edges (identifier_kind, identifier_value);
+
+-- 「この鍵はどの主体か」（解決の主経路）は identity_edges_uniq がそのまま使える。
+-- 初版は同じ 2 列の非一意 index（identity_edges_lookup）を別に持っていたが、
+-- uniq を 2 列に是正した結果、**列構成が完全に一致する重複 index** になった。
+-- 重複を残すと書き込みのたびに 2 本更新することになるので落とす。
+DROP INDEX IF EXISTS identity_edges_lookup;
 
 -- 「この主体はどの鍵で観測されたか」（消去・逆引き）。
 CREATE INDEX IF NOT EXISTS identity_edges_subject
