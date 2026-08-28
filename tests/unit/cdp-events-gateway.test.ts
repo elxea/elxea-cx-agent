@@ -57,6 +57,17 @@ function makeFake(opts?: { failTable?: string; throwOnTable?: string }) {
   const store: Record<string, Array<Record<string, unknown>>> = {};
   const rows = (t: string) => (store[t] ??= []);
 
+  /** identity_edges_uniq（migration 040・2 列）の写し。subject_id は **含まない**。 */
+  const edgeClash = (
+    existing: Array<Record<string, unknown>>,
+    row: Record<string, unknown>,
+  ) =>
+    existing.some(
+      (r) =>
+        r.identifier_kind === row.identifier_kind &&
+        r.identifier_value === row.identifier_value,
+    );
+
   const client = {
     from(table: string) {
       if (opts?.throwOnTable === table) throw new Error("network down");
@@ -69,6 +80,29 @@ function makeFake(opts?: { failTable?: string; throwOnTable?: string }) {
               (r) => r.idempotency_key === row.idempotency_key,
             );
             if (clash) return { error: { code: "23505", message: "duplicate key value" } };
+          }
+          if (table === "identity_edges" && edgeClash(rows(table), row)) {
+            return { error: { code: "23505", message: "duplicate key value" } };
+          }
+          rows(table).push({ ...row });
+          return { error: null };
+        },
+        // ON CONFLICT DO NOTHING（ignoreDuplicates: true）だけを再現する。
+        // DO UPDATE は E4 のトリガに掛かるため実スキーマでも使えない ＝ ここでも拒む。
+        async upsert(
+          row: Record<string, unknown>,
+          options?: { onConflict?: string; ignoreDuplicates?: boolean },
+        ) {
+          if (opts?.failTable === table) return { error: { message: "upsert boom" } };
+          if (options?.ignoreDuplicates !== true) {
+            return { error: { message: "この fake は DO NOTHING のみ再現する" } };
+          }
+          if (table === "identity_edges") {
+            // 実スキーマ（040）の identity_edges_uniq は 2 列。3 列だと衝突しない。
+            if (options.onConflict !== "identifier_kind,identifier_value") {
+              return { error: { message: `想定外の onConflict: ${options.onConflict}` } };
+            }
+            if (edgeClash(rows(table), row)) return { error: null }; // DO NOTHING
           }
           rows(table).push({ ...row });
           return { error: null };
@@ -206,6 +240,48 @@ it("初回は発行し、2 回目は同じ主体を引く（edge が 2 本にな
   assertEqual(second.issued, false, "2 回目は発行しない");
   assertEqual(store.subjects.length, 1, "subjects 1 行");
   assertEqual(store.identity_edges.length, 1, "edges 1 行");
+});
+
+// MID-1（QA 指摘 2026-08-29）: 未登録の鍵に同時に 2 つ来ても主体は 1 つに収まる。
+// 3 列 UNIQUE だった初版は、subject_id が違えば衝突しないので edge が 2 本立ち、
+// 「1 鍵 = 1 主体」が黙って破れていた。fake の一意判定も 2 列に揃えてある。
+it("同じ鍵で並行に 2 つ走っても、主体は 1 つに収束する（edge は 1 本・発行者は 1 つ）", async () => {
+  const { client, store } = makeFake();
+  const [a, b] = await Promise.all([
+    resolveOrIssueSubject(client, { kind: "line_messaging_uid", value: "U-race" }, "test-a"),
+    resolveOrIssueSubject(client, { kind: "line_messaging_uid", value: "U-race" }, "test-b"),
+  ]);
+
+  assertTrue(a.subjectId !== null, "A が主体を得られない");
+  assertTrue(b.subjectId !== null, "B が主体を得られない");
+  assertEqual(a.subjectId, b.subjectId, "同じ鍵なのに違う主体を返した（1 鍵 = 1 主体が破れている）");
+  assertEqual(store.identity_edges.length, 1, "edge が 2 本立っている");
+  assertEqual([a.issued, b.issued].filter(Boolean).length, 1, "発行者はちょうど 1 つ");
+
+  // 収束したあとに 3 つ目が来ても、同じ主体を引くだけ（発行しない）。
+  const third = await resolveOrIssueSubject(
+    client,
+    { kind: "line_messaging_uid", value: "U-race" },
+    "test-c",
+  );
+  assertEqual(third.subjectId, a.subjectId, "3 つ目が別の主体を引いた");
+  assertEqual(third.issued, false, "3 つ目が発行してしまった");
+  assertEqual(store.identity_edges.length, 1, "3 つ目で edge が増えた");
+});
+
+it("負けた側が発行した主体は残るが、鍵からは辿れない（不変条件は edge 側が保つ）", async () => {
+  const { client, store } = makeFake();
+  const [a, b] = await Promise.all([
+    resolveOrIssueSubject(client, { kind: "web_session_id", value: "s-race" }, "test-a"),
+    resolveOrIssueSubject(client, { kind: "web_session_id", value: "s-race" }, "test-b"),
+  ]);
+  const winner = a.subjectId;
+  assertEqual(b.subjectId, winner, "勝者が 1 つに定まっていない");
+  // 発行そのものは 2 回起きうる（負けたほうは edge を持てない）。
+  assertTrue(store.subjects.length <= 2, "主体が 3 つ以上立っている");
+  const edgeSubjects = new Set(store.identity_edges.map((e) => e.subject_id));
+  assertEqual(edgeSubjects.size, 1, "鍵から辿れる主体が 1 つでない");
+  assertTrue(edgeSubjects.has(winner), "鍵が勝者以外を指している");
 });
 
 it("空の識別子では発行しない（理由付き）", async () => {
