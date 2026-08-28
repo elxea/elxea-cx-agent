@@ -36,6 +36,7 @@ import {
   isKnownEventType,
   isWellFormedChannel,
   isWellFormedEventType,
+  isWellFormedPayload,
 } from "./event-vocabulary";
 import { resolveOrIssueSubject, type ObservedIdentifier } from "./subjects";
 
@@ -132,7 +133,14 @@ export async function recordCustomerEvent(
       return countedSkip(fact, `subject_unavailable:${subject.reason}`, legacy);
     }
 
-    const schemaOk = isKnownEventType(fact.eventType) && isKnownChannel(fact.channel);
+    // Stage 4: 語彙が既知であることに加えて、**L1 を動かす出来事は payload の形も見る**。
+    //   形が読めない行を L1 が畳むと、壊れた入力が静かに解釈へ混ざる（046 の畳み手は
+    //   schema_ok = true の行だけを畳むので、ここで false を立てれば入らない）。
+    //   捨てはしない — 保存はして schema_ok = false を立てるだけ（E1）。
+    const schemaOk =
+      isKnownEventType(fact.eventType) &&
+      isKnownChannel(fact.channel) &&
+      isWellFormedPayload(fact.eventType, fact.payload);
     const row = {
       subject_id: subject.subjectId,
       event_type: fact.eventType,

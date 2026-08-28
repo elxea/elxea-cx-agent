@@ -160,11 +160,58 @@ export const STANDALONE_EVENT_TYPES = [
   "diagnosis.answer",
 ] as const;
 
+// ---------------------------------------------------------------------------
+// Stage 4: 解釈（L1）を動かす出来事
+// ---------------------------------------------------------------------------
+
+/**
+ * L1（subject_profile）の値を動かす出来事の語彙（設計 §4 #18 / §6-1 Stage 4）。
+ *
+ * ─ なぜ「出来事」として置くのか ─
+ *
+ *   事前通知への変更・安全に関する申告・本人訂正には、いま**置き場が無い**（#18）。
+ *   置き場を作るとき、L1 の列に直接書ける口を開けると「解釈を直接書き換える経路」が
+ *   でき、L1 が L0 から再計算できなくなる（Stage 4 の不変条件が壊れる）。
+ *   よって受け口は **L0 に 1 行積むだけ**にして、L1 はそれを畳んだ結果にする。
+ *   畳み方の正本は migration 046 の cdp_l1_build_profile 1 か所。
+ *
+ * ─ 一覧（畳まれ方は 046 の CASE と 1 対 1）─
+ *
+ *   persona.baseline_imported … 移行の起点。Firestore に既に貯まっていた点を 1 回だけ載せる
+ *   persona.signal_applied    … 点が動いた 1 回分（出所と増減）
+ *   exclusion.set / .cleared  … 「もういらない」（項目13 noneOf）。解除できる
+ *   safety.declared           … 安全に関する申告（項目6）。**減らす方向に畳まない**
+ *   notify.preference_set     … 事前通知の設定（key / value）
+ *   notify.suppressed / .resumed … 配信を止める / 再開する
+ *   profile.override          … 本人訂正（field / value）
+ */
+export const PROFILE_EVENT_TYPES = [
+  "persona.baseline_imported",
+  "persona.signal_applied",
+  "exclusion.set",
+  "exclusion.cleared",
+  "safety.declared",
+  "notify.preference_set",
+  "notify.suppressed",
+  "notify.resumed",
+  "profile.override",
+] as const;
+
+export type ProfileEventType = (typeof PROFILE_EVENT_TYPES)[number];
+
+const PROFILE_EVENT_TYPE_SET: ReadonlySet<string> = new Set<string>(PROFILE_EVENT_TYPES);
+
+/** L1 を動かす出来事か（＝ payload の形が意味を持つ出来事か）。 */
+export function isProfileEventType(value: string): value is ProfileEventType {
+  return PROFILE_EVENT_TYPE_SET.has(value);
+}
+
 /** 既知の event_type 全集合。ここに無い値も **保存される**（schema_ok = false）。 */
 export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   ...BEHAVIOR_ACTIONS.map(behaviorEventType),
   ...FLOW_EVENT_NAMES.map(flowEventType),
   ...STANDALONE_EVENT_TYPES,
+  ...PROFILE_EVENT_TYPES,
 ]);
 
 /** DB 側の CHECK（customer_events_type_form）と同じ形。 */
@@ -247,4 +294,80 @@ export const RESOLVABLE_IDENTIFIER_KINDS: ReadonlySet<IdentifierKind> = new Set<
 
 export function isIdentifierKind(value: unknown): value is IdentifierKind {
   return typeof value === "string" && (IDENTIFIER_KINDS as readonly string[]).includes(value);
+}
+
+// ---------------------------------------------------------------------------
+// payload の形（L1 を動かす出来事だけ）
+// ---------------------------------------------------------------------------
+
+/**
+ * L1 を動かす出来事の payload が読める形か（Stage 4）。
+ *
+ * ─ なぜ形を見るのか ─
+ *
+ *   L1 はこの payload を畳んで解釈を作る。形が壊れた行を畳むと、**壊れた入力が
+ *   静かに解釈へ混ざる**（「もういらない」の銘柄番号が空文字で入る、点の増減が
+ *   数値でない、など）。046 の畳み手は schema_ok = true の行だけを畳むので、
+ *   ここで false を立てておけば L1 には入らない。
+ *
+ * ─ 捨てるのではない（E1）─
+ *
+ *   形が読めなくても **保存はする**。schema_ok = false が立ち、部分 index
+ *   customer_events_unknown_type で数えられる。「読めない形で届いた」を
+ *   「無かったこと」に変えないための非対称は、語彙のときと同じ。
+ *
+ * ─ L1 を動かさない出来事は常に true ─
+ *   行動ログ・フロー・購入の payload は解釈に使わないので、形を問わない
+ *   （問うと、既存 5 経路の payload を全部ここに写す羽目になる = 二重管理）。
+ */
+export function isWellFormedPayload(
+  eventType: string,
+  payload: Record<string, unknown> | undefined,
+): boolean {
+  if (!isProfileEventType(eventType)) return true;
+  const p = payload ?? {};
+
+  switch (eventType) {
+    case "persona.baseline_imported":
+      return isPersonaScoreBucket(p.scores);
+    case "persona.signal_applied":
+      return nonEmptyString(p.source) && isPersonaScoreBucket(p.delta);
+    case "exclusion.set":
+    case "exclusion.cleared":
+      return nonEmptyString(p.ref);
+    case "safety.declared":
+      return (
+        Array.isArray(p.tags) &&
+        p.tags.length > 0 &&
+        p.tags.every((t) => nonEmptyString(t))
+      );
+    case "notify.preference_set":
+      return nonEmptyString(p.key) && "value" in p;
+    case "notify.suppressed":
+      return nonEmptyString(p.reason);
+    case "notify.resumed":
+      return true;
+    case "profile.override":
+      return nonEmptyString(p.field) && "value" in p;
+    default:
+      return true;
+  }
+}
+
+/** 3 軸の数値バケツか（欠けた軸は許す。数値でない値が入っているものは弾く）。 */
+function isPersonaScoreBucket(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const axes = ["serenity", "explorer", "sensory"] as const;
+  let seen = 0;
+  for (const axis of axes) {
+    const v = (value as Record<string, unknown>)[axis];
+    if (v === undefined) continue;
+    if (typeof v !== "number" || !Number.isFinite(v)) return false;
+    seen += 1;
+  }
+  return seen > 0;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
 }

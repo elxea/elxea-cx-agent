@@ -31,9 +31,11 @@ import { runBatchMetafieldSync } from "./sync/shopify-metafield";
 import { runKarteReconcile } from "./lib/karte-reconcile";
 import { runLinkageReconcile } from "./lib/linkage-reconcile";
 import { runStage2Parity } from "./lib/cdp/stage2-parity";
+import { runStage4Parity } from "./lib/cdp/stage4-parity";
 import {
   runDelivery,
   runOnDemandDelivery,
+  compareSegmentTargets,
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
@@ -74,6 +76,15 @@ export type Env = {
   LINE_CHANNEL_ACCESS_TOKEN_TEST?: string;
   /** 配信の対象環境。"prod" | "test"（未設定・不正は "test" に倒す）。 */
   DELIVERY_TARGET_ENV?: string;
+  /**
+   * セグメント配信の宛先を誰が決めるか（CDP 統合 Stage 4 / T-11）。
+   *   off    … 旧 resolver のみ（Firestore 全件スキャン 3 本）
+   *   shadow … 旧が決める。新（L1 の SQL 1 本）も引いて食い違いを数える（**既定**）
+   *   cdp    … 新が決める。新が引けなければ送らない（fail-closed）
+   * 未設定・未知の値は shadow。読み取りだけなので配信の挙動は変わらない。
+   * 旧 3 本の撤去は Stage 5（設計 §6-2 T-11）。
+   */
+  CDP_SEGMENT_MODE?: string;
   /**
    * アカウント連携導線の LIFF URL（トーク内入り口の「連携ボタン」の遷移先・ブロック4）。
    * 設定時のみ、未連携ユーザーの連携文脈（完全一致トリガー / ④定期便の未連携分岐）に
@@ -1038,6 +1049,23 @@ export default {
           .catch((err) => {
             console.warn(
               "[cdp/stage2-parity] scheduled run failed:",
+              err instanceof Error ? err.message : err,
+            );
+          }),
+        // CDP 統合 Stage 4 の日次観測（読み取り + L1 の畳み直しのみ・配信はしない）。
+        //   Stage 4 の完了条件は 2 つとも観測でしか言えない:
+        //     (1) E8' … 保存してある解釈が L0 から再計算したものと一致するか
+        //     (2) 配信対象が新旧（Firestore 全件スキャン 3 本 ↔ L1 の SQL 1 本）で一致するか
+        //   新旧比較は旧 resolver を持つ delivery-runtime 側から注入する（観測側に
+        //   全件スキャンの口をもう 1 つ作らないため）。**新規 cron は作らない**。
+        //   外部送信ゼロ・never throw。1 件の失敗で全体を止めない。
+        runStage4Parity(env, { compareSegments: () => compareSegmentTargets(env) })
+          .then((result) => {
+            console.log("Scheduled CDP stage4 parity completed:", JSON.stringify(result));
+          })
+          .catch((err) => {
+            console.warn(
+              "[cdp/stage4-parity] scheduled run failed:",
               err instanceof Error ? err.message : err,
             );
           }),

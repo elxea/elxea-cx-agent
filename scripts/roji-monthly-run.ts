@@ -42,6 +42,7 @@ import {
   type MonthlySubject,
 } from "../src/lib/roji/monthly/monthly-run";
 import { derivePeriod, assertValidPeriod } from "../src/lib/roji/monthly/period";
+import { readExclusions } from "../src/lib/cdp/subject-profile";
 
 dotenv.config({ quiet: true });
 dotenv.config({ path: ".dev.vars", quiet: true });
@@ -116,6 +117,57 @@ async function listKarteSubjects(fsEnv: FirestoreEnv): Promise<MonthlySubject[]>
     if (!cursor) break;
   }
   return out;
+}
+
+/**
+ * L1（CDP `subject_profile.exclusions`）の除外条件を対象者に載せる（統合設計 §6-1 Stage 4）。
+ *
+ * ─ なぜ要るか ─
+ *   「もういらない」の書き手は Stage 4 の時点でカルテ（項目13）と L0 の出来事
+ *   （`exclusion.set`）の両方に居る。カルテ側しか読まないと、L0 に申告した人の
+ *   意思が割当に届かない（＝ Stage 4 の完了条件「除外条件が割当に実効」が満たせない）。
+ *   和を採るのは割当エンジン側（s1-engine の noneOf）。ここは運ぶだけ。
+ *
+ * ─ 読めなかったときの態度 ─
+ *   * 関数が無い（migration 046 未適用）… 警告して続ける。046 は本 PR で入る新規で、
+ *     未適用の環境では L0 由来の申告がまだ 1 件も無い（＝ 落とすものが無い）。
+ *   * それ以外の失敗 … **その月ごと止める**（設計 4-2）。「除外が読めなかったので
+ *     除外なしで配った」を黙って起こさない。
+ */
+async function attachL1Exclusions(
+  client: pg.Client,
+  subjects: MonthlySubject[],
+): Promise<MonthlySubject[]> {
+  const ids = subjects.map((s) => s.shopifyCustomerId).filter((v) => v.length > 0);
+  if (ids.length === 0) return subjects;
+
+  let rows: Record<string, unknown>;
+  try {
+    const res = await client.query("SELECT cdp_l1_exclusions_by_shopify($1) AS r", [ids]);
+    rows = (res.rows[0]?.r ?? {}) as Record<string, unknown>;
+  } catch (err) {
+    // 42883 = undefined_function（046 未適用）。
+    const code = (err as { code?: string } | null)?.code;
+    if (code === "42883") {
+      console.log(
+        "  [WARN] L1 の除外条件を読む関数がありません（migration 046 未適用）。" +
+          "カルテ側の「もういらない」だけで割り当てます。",
+      );
+      return subjects;
+    }
+    throw err;
+  }
+
+  let applied = 0;
+  for (const s of subjects) {
+    const raw = rows[s.shopifyCustomerId];
+    if (raw === undefined) continue;
+    const ex = readExclusions(raw);
+    s.karte.exclusions = { teaRefs: ex.teaRefs, safetyTags: ex.safetyTags };
+    if (ex.teaRefs.length > 0 || ex.safetyTags.length > 0) applied += 1;
+  }
+  console.log(`  L1 由来の除外条件を持つ人: ${applied} 人 / ${subjects.length} 人`);
+  return subjects;
 }
 
 /** Firestore のカルテ本体 → 割当が読む面だけ（新しいカルテ項目を作らない・types.ts の RojiKarte）。 */
@@ -284,7 +336,8 @@ async function main() {
   const sink = { ledger: [] as LedgerWrite[], months: [] as MonthRecord[] };
   try {
     const realPorts: MonthlyPorts = {
-      listSubjects: () => listKarteSubjects(fsEnv),
+      // CDP 統合 Stage 4: カルテを集めたあと、L1 の除外条件を載せてから割当に渡す。
+      listSubjects: async () => attachL1Exclusions(client, await listKarteSubjects(fsEnv)),
       loadCandidates: async (): Promise<Candidate[]> => {
         const [teas, articles] = await Promise.all([
           fetchSellingTeas(workerEnv),

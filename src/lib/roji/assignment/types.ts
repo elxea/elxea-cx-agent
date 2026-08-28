@@ -45,6 +45,35 @@ export interface RojiKarte {
   tasteProfile: TasteProfile | null;
   teaRequests?: TeaRequestList | null;
   windowAffinity?: WindowAffinity | null;
+  /**
+   * L1（CDP `subject_profile.exclusions`）由来のハード制約（統合設計 §3-2 / §6-1 Stage 4）。
+   *
+   * ─ なぜカルテと別に受けるのか ─
+   *   Stage 4 は並走の段で、「もういらない」の書き手が Firestore のカルテ（項目13
+   *   `teaRequests.noneOf`）と L0 の出来事（`exclusion.set`）の両方に居る。片方だけを
+   *   読むと、もう片方に申告した人の「もういらない」が黙って無視される。
+   *   よって **両方受けて和を採る**（除外は消す方向に畳まない、が原則）。
+   *   Stage 5 で書き手が L0 1 本になったら `teaRequests` 側が落ちる。
+   *
+   * ─ 依存の向き ─
+   *   CDP の型を import せず、必要な形だけをここに置く（割当エンジンは CDP を知らない）。
+   */
+  exclusions?: KarteHardExclusions | null;
+}
+
+/** 点数では絶対に覆らない制約（L1 由来）。 */
+export interface KarteHardExclusions {
+  /** 「もういらない」お茶の銘柄番号。`teaRequests.noneOf` と同じ意味・同じ扱い。 */
+  teaRefs: string[];
+  /**
+   * 安全に関する申告のタグ（項目6）。
+   *
+   * ⚠ **S1 は割当の条件として読まない**（2026-08-10 Setaka 判断: 販売はお茶のみで
+   *   リスク実態がないため）。ここに運ぶのは、S2 が条件として使うときに「カルテには
+   *   あるが割当まで届いていない」状態を作らないため — 運ぶことと使うことは別で、
+   *   使い始めるのは S2 でお茶側の属性が揃ってから。
+   */
+  safetyTags: string[];
 }
 
 /**

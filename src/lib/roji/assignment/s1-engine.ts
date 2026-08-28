@@ -160,8 +160,14 @@ export class S1Engine implements AssignmentEngine {
     // --- 順1: 「もういらない」を外す（絶対条件。点数でも別の希望でも覆らない・決して緩めない）。
     //     同じ銘柄が「もういらない」と「また入れてほしい」の両方にあるときは、ここで落ちる
     //     ＝ **「もういらない」が勝つ**（設計 3-6）。
+    //     CDP 統合 Stage 4: 「もういらない」の書き手はカルテ（項目13 `teaRequests.noneOf`）と
+    //     L0 の出来事（`exclusion.set` → L1 `subject_profile.exclusions.tea_refs`）の
+    //     **両方**に居る（並走の段）。片方だけを読むと、もう片方に申告した人の意思が
+    //     黙って無視される。よって和を採る（除外は消す方向に畳まない）。
     const noneOf = new Set(
-      (karte.teaRequests?.noneOf ?? []).map(normRef).filter((s) => s.length > 0),
+      [...(karte.teaRequests?.noneOf ?? []), ...(karte.exclusions?.teaRefs ?? [])]
+        .map(normRef)
+        .filter((s) => s.length > 0),
     );
     const afterNoneOf: TeaItem[] = [];
     for (const t of teas) {
