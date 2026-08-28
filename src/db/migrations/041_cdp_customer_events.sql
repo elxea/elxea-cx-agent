@@ -125,5 +125,46 @@ CREATE TRIGGER customer_events_append_only
   BEFORE UPDATE OR DELETE ON customer_events
   FOR EACH ROW EXECUTE FUNCTION cdp_append_only_guard();
 
+-- ===================================================================
+-- 消した人の記録は **復活しない**
+--
+-- ─ なぜ要るか ─
+--   消去は 1 つのトランザクションだが、その最中や直後に「消える前に投げられた
+--   出来事」が届くことはありうる（gateway は fire-and-forget で、応答を待たない
+--   経路から呼ばれる）。何も止めなければ、消したはずの主体に行が 1 本生えて
+--   そのまま残る — 消去の約束が破れているのに、誰にも見えない形で。
+--
+--   検算（042 の cdp_retired_subject_orphans）はこれを **後から数える**が、
+--   数えられるだけでは「消せます」を守ったことにならない。入口で止める。
+--
+-- ─ 例外なし ─
+--   消去経路そのものは INSERT しないので、app.erasure_context の例外は要らない。
+--   retire 済みの主体に行を足してよい経路は 1 つも無い。
+-- ===================================================================
+CREATE OR REPLACE FUNCTION cdp_reject_retired_subject() RETURNS trigger AS $$
+DECLARE
+  v_retired timestamptz;
+BEGIN
+  SELECT retired_at INTO v_retired FROM subjects WHERE subject_id = NEW.subject_id;
+  IF v_retired IS NOT NULL THEN
+    RAISE EXCEPTION
+      'retired subject: % は消去済みの主体なので、public.% に行を足せない。'
+      ' 消した人の記録は復活しない（GDPR）。新しい観測は新しい主体として発行すること。',
+      NEW.subject_id, TG_TABLE_NAME;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS customer_events_no_retired ON customer_events;
+CREATE TRIGGER customer_events_no_retired
+  BEFORE INSERT ON customer_events
+  FOR EACH ROW EXECUTE FUNCTION cdp_reject_retired_subject();
+
+DROP TRIGGER IF EXISTS identity_edges_no_retired ON identity_edges;
+CREATE TRIGGER identity_edges_no_retired
+  BEFORE INSERT ON identity_edges
+  FOR EACH ROW EXECUTE FUNCTION cdp_reject_retired_subject();
+
 -- 017 の方針に揃える（service_role のみが触る）。
 ALTER TABLE customer_events ENABLE ROW LEVEL SECURITY;

@@ -334,6 +334,7 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "table", table: "customer_events" },
       { kind: "index", index: "customer_events_idempotency" },
       { kind: "index", index: "customer_events_unknown_type" },
+      { kind: "function", func: "cdp_reject_retired_subject" },
       { kind: "rls", table: "customer_events" },
     ],
   },
