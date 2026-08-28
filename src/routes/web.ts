@@ -29,6 +29,8 @@ import { isValidSyncApiKey } from "../lib/sync-auth";
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
+import { behaviorEventType } from "../lib/cdp/event-vocabulary";
+import { recordCustomerEvent } from "../lib/cdp/events-gateway";
 import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
@@ -854,12 +856,39 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: sessionError }, 400);
   }
 
+  const supabase = createSupabaseClient(c.env);
+
   if (!action || !VALID_WEB_EVENTS.includes(action as BehaviorAction)) {
+    // E1「出来事は捨てない」— **語彙に無い action でも L0 には積む**。
+    //
+    //   ここは cx-agent 側で唯一「語彙が合わないという理由だけで出来事を捨てていた」
+    //   場所である。捨てられた側は何も残らないので、送り手がずれたことに誰も気づけない
+    //   （web-app の durationSeconds が数か月落ち続けたのと同じ壊れ方）。
+    //
+    //   ⚠ 応答は 400 のまま変えない。応答コードは既存クライアントとの契約であり、
+    //     Stage 1 の完了条件は「既存の挙動が 1 つも変わらない」ことだから。
+    //     E1 が守りたいのは出来事が消えることで、それは積んだ時点で守られている。
+    //     400 を落とすのは語彙が L0 の登録簿へ一本化されたあと（Stage 4）。進捗は
+    //     ratchet `event-vocabulary-drop-sites`（1 → 0）が固定する。
+    if (action && session_id) {
+      const occurredAt = new Date().toISOString();
+      c.executionCtx.waitUntil(
+        recordCustomerEvent(supabase, {
+          // 形が壊れている値はここで落ちる（gateway が理由付きで数える）。
+          eventType: behaviorEventType(action),
+          channel: "web",
+          identifier: { kind: "web_session_id", value: session_id },
+          dedupe: `rejected@${occurredAt}`,
+          source: "cx-agent.web-chat-event",
+          occurredAt,
+          payload: { rejected_by_legacy_vocabulary: true },
+        }),
+      );
+    }
     return c.json({ error: `Invalid action. Valid actions: ${VALID_WEB_EVENTS.join(", ")}` }, 400);
   }
 
   // fire-and-forget で記録（レスポンスをブロックしない）
-  const supabase = createSupabaseClient(c.env);
   // [SEC-B] shopify_customer_id はサーバ経由（X-API-Key 検証済み）のときだけ identity として採用する。
   // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 session_id に紐付ける。
   const userId = effectiveEventUserId(

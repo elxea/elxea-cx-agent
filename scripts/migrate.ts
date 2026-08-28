@@ -311,6 +311,39 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
    * ⚠ DROP TABLE を含む。本番の customer_profiles は 0 行と実測済みだが、
    *   migration 自身も適用時に 0 行を再確認し、行があれば例外で止まる。 */
   "039_customer_linkages_sot": { idempotent: true, specs: [] },
+  /* 040: 人の鍵を発行制にする（CDP 統合 Stage 1）。subjects / identity_edges と、
+   *      追記専用を DB 側で強制するトリガ関数。 */
+  "040_cdp_subjects_and_edges": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "subjects" },
+      { kind: "table", table: "identity_edges" },
+      { kind: "index", index: "identity_edges_uniq" },
+      { kind: "function", func: "cdp_erasure_context_active" },
+      { kind: "function", func: "cdp_append_only_guard" },
+      { kind: "function", func: "cdp_subjects_guard" },
+      { kind: "rls", table: "subjects" },
+      { kind: "rls", table: "identity_edges" },
+    ],
+  },
+  /* 041: 出来事の置き場を 1 本にする（L0）。冪等キーの UNIQUE と、未知の型を
+   *      安く数えるための部分 index がこの version の実体。 */
+  "041_cdp_customer_events": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "customer_events" },
+      { kind: "index", index: "customer_events_idempotency" },
+      { kind: "index", index: "customer_events_unknown_type" },
+      { kind: "rls", table: "customer_events" },
+    ],
+  },
+  /* 042: 新しい置き場を消去の列挙に自動で乗せる。
+   *
+   * specs が空なのは 039 と同じ理由で、この version が作るオブジェクトが無いから
+   * （既存 3 関数の CREATE OR REPLACE のみ）。「関数が新しい定義になっているか」は
+   * 実在確認では語れないので、no-sentinel（台帳登録せず --apply が冪等に再適用）に倒す。
+   * 再適用は無害（関数定義の差し替えのみ・表とデータに触れない）。 */
+  "042_cdp_erasure_subject_scope": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------

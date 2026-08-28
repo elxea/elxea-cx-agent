@@ -208,6 +208,7 @@ export async function throughGateway<T>(
   supabase: SupabaseClient,
   fact: CustomerFact,
   legacyWrite: () => Promise<T>,
+  mapOutcome?: (result: T) => LegacyOutcome,
 ): Promise<T> {
   let result: T;
   try {
@@ -221,8 +222,23 @@ export async function throughGateway<T>(
     throw err;
   }
 
-  await recordCustomerEvent(supabase, fact, asOutcome(result));
+  await recordCustomerEvent(supabase, fact, mapOutcome ? mapOutcome(result) : asOutcome(result));
   return result;
+}
+
+/**
+ * 「LINE / Web のどちらの人か」から identity_edges の kind を決める。
+ *
+ * 既存の 5 経路はどれも `channel: "line" | "web"` で人を区別しているので、
+ * 変換をここ 1 か所に置く（各経路が自前で分岐すると、増えたときにずれる）。
+ */
+export function identifierForChannel(
+  channel: string,
+  userRef: string,
+): ObservedIdentifier {
+  return channel === "web"
+    ? { kind: "web_session_id", value: userRef }
+    : { kind: "line_messaging_uid", value: userRef };
 }
 
 /** 元の書き込みの返り値を LegacyOutcome に読む（void は "ok"）。 */

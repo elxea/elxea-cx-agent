@@ -18,6 +18,36 @@ type Row = Record<string, unknown>;
 
 const PGRST_OBJECT = "application/vnd.pgrst.object+json";
 
+/**
+ * 一意制約を持つ列（表名 → 列名）。**実スキーマの写しである。**
+ *
+ * インメモリのストアは既定で何でも受け入れるので、DB 側の制約に依存する挙動
+ * （二重加算が構造的に止まる、等）をモックで確かめると **常に緑になる**。
+ * それでは「制約が効いている」ではなく「モックが素通しした」を確かめたことになる。
+ *
+ * ここに書けるのは **実際に UNIQUE index が張ってある列だけ**:
+ *   customer_events.idempotency_key … 041 の customer_events_idempotency
+ *   subjects.subject_id             … 040 の PRIMARY KEY
+ * migration 側から消えたらここからも消すこと（写しなので、ずれたら嘘をつく）。
+ */
+const UNIQUE_COLUMNS: Record<string, string> = {
+  customer_events: "idempotency_key",
+  subjects: "subject_id",
+};
+
+/** Postgres の一意制約違反（23505）を PostgREST の形で返す。 */
+function uniqueViolation(table: string, column: string): Response {
+  return new Response(
+    JSON.stringify({
+      code: "23505",
+      details: null,
+      hint: null,
+      message: `duplicate key value violates unique constraint on ${table}.${column}`,
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
 export interface SupabaseMock {
   /** テーブル名 → 行配列。 */
   store: Record<string, Row[]>;
@@ -146,7 +176,14 @@ export function createSupabaseMock(): SupabaseMock {
         incoming = [];
       }
       const onConflict = params.get("on_conflict");
+      const uniqueCol = UNIQUE_COLUMNS[t];
       for (const row of incoming) {
+        // 一意制約（onConflict 指定が無い素の insert のときだけ効く。
+        // upsert は下の分岐が既存行を更新するので衝突しない）。
+        if (uniqueCol && !onConflict && row[uniqueCol] !== undefined) {
+          const clash = table(t).some((r) => String(r[uniqueCol]) === String(row[uniqueCol]));
+          if (clash) return uniqueViolation(t, uniqueCol);
+        }
         if (onConflict) {
           const idx = table(t).findIndex(
             (r) => String(r[onConflict]) === String(row[onConflict]),
