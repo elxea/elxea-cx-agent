@@ -19,7 +19,7 @@
     "event-vocabulary-declarations": {
       "max": 7,
       "source": "src/** で宣言されている「顧客の出来事の語彙」の名前の種類数 (BehaviorAction / BehaviorChannel / FlowEventName / RatingSource / VALID_WEB_EVENTS / KNOWN_EVENT_TYPES / KNOWN_CHANNELS)",
-      "why": "同じ「何が起きたか」を表す語彙が経路ごとに違う (D3: 行動語彙が cx-agent 14 値 / web-app 型 10 値 / web-app zod 7 値の三分裂。D4: channel が zod 3 値 / 型 2 値 / route は \"web\" 固定 / 注文 webhook は \"shopify\" を実書込 の 4 者食い違い)。語彙が合わないと、合わない側の出来事が 400 で捨てられる。ファイル数ではなく **名前** で数えるのは、1 ファイルに 2 つ宣言があっても 「語彙が 2 つある」ことに変わりはないため。⚠ Stage 1 で 5 → 7 に増やした (KNOWN_EVENT_TYPES / KNOWN_CHANNELS を新設したため)。これは **一時的に 1 つ増やして 2 に減らす** 形の移行であり、増やしたこと自体をここに申告している。目標 2 (L0 の open registry の 2 本だけが残る)。撤去は Stage 5 / T-8・T-9 と同時。"
+      "why": "同じ「何が起きたか」を表す語彙が経路ごとに違う (D3: 行動語彙が cx-agent 14 値 / web-app 型 10 値 / web-app zod 7 値の三分裂。D4: channel が zod 3 値 / 型 2 値 / route は \"web\" 固定 / 注文 webhook は \"shopify\" を実書込 の 4 者食い違い)。語彙が合わないと、合わない側の出来事が 400 で捨てられる。ファイル数ではなく **名前** で数えるのは、1 ファイルに 2 つ宣言があっても 「語彙が 2 つある」ことに変わりはないため。⚠ Stage 1 で 5 → 7 に増やした (KNOWN_EVENT_TYPES / KNOWN_CHANNELS を新設したため)。これは **一時的に 1 つ増やして 2 に減らす** 形の移行であり、増やしたこと自体をここに申告している。目標 2 (L0 の open registry の 2 本だけが残る)。撤去は Stage 5 / T-8・T-9 と同時。 ⚠ Stage 4 で 7 のまま据え置き。L1 を動かす出来事の語彙 (PROFILE_EVENT_TYPES: safety.declared / exclusion.set / notify.* / profile.override / persona.*) を新設したが、これは KNOWN_EVENT_TYPES に畳み込まれる **同じ登録簿の一部** であって、経路ごとに食い違う 2 つ目の語彙ではない (STANDALONE_EVENT_TYPES を Stage 1 で足したときと同じ扱い)。この数え方は「競合する語彙の宣言名」だけを数えるため増えない。数が動かないことを「何もしていない」と読み違えないための申告。"
     },
     "event-vocabulary-drop-sites": {
       "max": 1,

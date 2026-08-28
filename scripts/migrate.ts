@@ -391,6 +391,24 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "function", func: "cdp_subject_shopify_map" },
     ],
   },
+
+  /* 046: 解釈（L1）を 1 冊にして、セグメント配信を SQL 1 本にする
+   *      （CDP 統合 Stage 4 / T-9・T-11）。
+   *
+   * sentinel は表 2 つと、段の芯である 3 関数:
+   *   cdp_l1_build_profile     … 畳み方の唯一の定義（L0 → L1）
+   *   cdp_l1_recompute_parity  … E8'（保存値と再計算値の一致）
+   *   cdp_segment_line_targets … 全件スキャン 3 本の置き換え先 */
+  "046_cdp_l1_subject_profile": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "subject_profile" },
+      { kind: "table", table: "subject_segment_state" },
+      { kind: "function", func: "cdp_l1_build_profile" },
+      { kind: "function", func: "cdp_l1_recompute_parity" },
+      { kind: "function", func: "cdp_segment_line_targets" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

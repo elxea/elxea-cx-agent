@@ -62,7 +62,11 @@ import {
 } from "./image-ingest";
 import { isApprovalAuthorized, selfApprovalRelaxed } from "./delivery-approval";
 import { resolveDeliveryChannel } from "./delivery-channel";
-import { createLineSender } from "./line-messages";
+import {
+  createLineSender,
+  chunkForMulticast,
+  MULTICAST_MAX_RECIPIENTS,
+} from "./line-messages";
 import {
   resolveTargets,
   collectAllPages,
@@ -70,8 +74,15 @@ import {
   type LinkageRow,
   type PersonaRow,
   type LineUserPersonaRow,
+  type ResolvedTargets,
   type TargetResolverDeps,
 } from "./target-resolver";
+import {
+  compareTargets,
+  resolveCdpSegmentTargets,
+  resolveSegmentMode,
+  type SegmentAgreement,
+} from "./cdp/segment-resolver";
 import {
   runDeliveryOnce,
   type OrchestratorDeps,
@@ -240,6 +251,159 @@ async function loadPersonaLineUsers(
     const nextCursor = count >= PAGE ? lastName : undefined;
     return { items, nextCursor };
   });
+}
+
+// ---------------------------------------------------------------------------
+// CDP 統合 Stage 4: 宛先解決の並走（旧 3 本 ↔ 新 SQL 1 本）
+// ---------------------------------------------------------------------------
+//
+// ─ いまここに何本あるか（T-11）─
+//   上の loadLinkages / loadPersonaUsers / loadPersonaLineUsers が「全件スキャン 3 本」
+//   の実体である。3 本あるのは同じ人の記録が 3 つの棚に分かれているからで、
+//   置き換え先は L1 への SQL 1 本（migration 046 の cdp_segment_line_targets）。
+//
+// ─ Stage 4 では消さない ─
+//   設計 §6-1 Stage 4 の完了条件は「配信対象が新旧で一致」。一致を **観測してから**
+//   切り替える（撤去は Stage 5 / T-11）。よって既定は shadow で、旧が決めたまま
+//   新も引いて食い違いを数える。切替は env CDP_SEGMENT_MODE=cdp。
+//
+// ─ 全員配信・社内 allowlist は対象外 ─
+//   broadcast（受信者 ID 不要）と allowlist（env が唯一の供給元）はそもそも棚を
+//   引かないので、置き換える対象が無い。ペルソナ配信だけを並走させる。
+
+/** ペルソナ配信の宛先を、モードに従って解決する（shadow は旧が決める）。 */
+export async function resolveTargetsWithCdp(
+  env: Env,
+  supabase: ReturnType<typeof createSupabaseClient>,
+  audience: AudienceSpec,
+  targetDeps: TargetResolverDeps,
+): Promise<ResolvedTargets> {
+  const mode = resolveSegmentMode(env.CDP_SEGMENT_MODE);
+  if (audience.kind !== "persona" || mode === "off") {
+    return resolveTargets(audience, targetDeps);
+  }
+
+  if (mode === "cdp") {
+    // 切替後。新が引けなかったら **送らない**（旧に黙って落ちると「切り替えたつもりで
+    // 旧のまま」が起きて、切替の是非を誰も判断できなくなる）。
+    const cdp = await resolveCdpSegmentTargets(supabase, audience.persona);
+    if (!cdp.ok) {
+      return { kind: "error", reason: `CDP 宛先解決に失敗（fail-closed）: ${cdp.reason}` };
+    }
+    if (cdp.truncated) {
+      return { kind: "error", reason: "CDP 宛先が上限で切れた（fail-closed。黙って削らない）" };
+    }
+    if (cdp.userIds.length === 0) {
+      return { kind: "error", reason: "対象ユーザーが 0 件（除外後・CDP）" };
+    }
+    console.log(
+      `[cdp/segment] mode=cdp persona=${audience.persona} recipients=${cdp.userIds.length} ` +
+        `excluded=${JSON.stringify(cdp.excluded)}`,
+    );
+    const userIds = cdp.userIds;
+    return {
+      kind: "multicast",
+      userIds,
+      batches: chunkForMulticast(userIds, MULTICAST_MAX_RECIPIENTS),
+      estimatedRecipients: userIds.length,
+    };
+  }
+
+  // shadow（既定）: 旧が決める。新は数えるだけで、配信の挙動を 1 つも変えない。
+  const legacy = await resolveTargets(audience, targetDeps);
+  const cdp = await resolveCdpSegmentTargets(supabase, audience.persona);
+  logSegmentShadow(audience.persona, legacy, cdp);
+  return legacy;
+}
+
+/** shadow の 1 行ログ（**生の LINE userId は出さない**。件数だけ・E5）。 */
+function logSegmentShadow(
+  persona: string,
+  legacy: ResolvedTargets,
+  cdp: Awaited<ReturnType<typeof resolveCdpSegmentTargets>>,
+): void {
+  if (!cdp.ok) {
+    console.warn(
+      `[cdp/segment] mode=shadow persona=${persona} cdp_unavailable reason=${cdp.reason}`,
+    );
+    return;
+  }
+  const legacyIds = legacy.kind === "multicast" ? legacy.userIds : [];
+  const agreement = compareTargets(legacyIds, cdp.userIds);
+  console.log(
+    `[cdp/segment] mode=shadow persona=${persona} ` +
+      `legacy=${agreement.legacyCount} cdp=${agreement.cdpCount} both=${agreement.both} ` +
+      `legacy_only=${agreement.legacyOnly} cdp_only=${agreement.cdpOnly} ` +
+      `in_agreement=${agreement.inAgreement} excluded=${JSON.stringify(cdp.excluded)}`,
+  );
+}
+
+/**
+ * 日次観測用に、ペルソナごとの新旧一致を数える（配信はしない・読み取りのみ）。
+ *
+ * ここに置くのは、旧 resolver（全件スキャン 3 本）が **このファイルにしか無い**ため。
+ * 観測側（cdp/stage4-parity.ts）に写すと「全件スキャンの口」が 1 つ増える。
+ *
+ * ─ 引けなかったペルソナは結果に入れない ─
+ *   0 件同士を「一致」と数えると、Firestore 未設定の日が「一致した 1 日」になる。
+ *   引けなかったことは警告に出し、判定からは外す（空虚合格を作らない）。
+ *
+ * **決して throw しない。**
+ */
+export async function compareSegmentTargets(
+  env: Env,
+): Promise<Record<string, SegmentAgreement>> {
+  const out: Record<string, SegmentAgreement> = {};
+  try {
+    const supabase = createSupabaseClient(env);
+
+    let fsEnv: FirestoreEnv | null = null;
+    try {
+      fsEnv = getFirestoreEnv(env);
+    } catch {
+      fsEnv = null;
+    }
+    if (!fsEnv) {
+      console.warn("[cdp/segment] daily compare skipped: firestore_unconfigured");
+      return out;
+    }
+
+    // 配信はしないので、送信に関わる依存（チャネル・allowlist）は配線しない。
+    const deps: TargetResolverDeps = {
+      loadLinkages: () => loadLinkages(env),
+      loadPersonaUsers: (persona) => loadPersonaUsers(fsEnv as FirestoreEnv, persona),
+      loadPersonaLineUsers: (persona) => loadPersonaLineUsers(fsEnv as FirestoreEnv, persona),
+      broadcastEstimate: async () => null,
+      loadAllowlistUserIds: async () => [],
+    };
+
+    for (const persona of VALID_PERSONAS) {
+      const legacy = await resolveTargets({ kind: "persona", persona }, deps);
+      if (legacy.kind === "error") {
+        console.warn(
+          `[cdp/segment] daily compare skipped persona=${persona}: ${legacy.reason}`,
+        );
+        continue;
+      }
+      const cdp = await resolveCdpSegmentTargets(supabase, persona);
+      if (!cdp.ok) {
+        console.warn(
+          `[cdp/segment] daily compare skipped persona=${persona}: cdp ${cdp.reason}`,
+        );
+        continue;
+      }
+      out[persona] = compareTargets(
+        legacy.kind === "multicast" ? legacy.userIds : [],
+        cdp.userIds,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[cdp/segment] daily compare failed (non-blocking):",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  return out;
 }
 
 /** 承認 pin の結果。 */
@@ -432,7 +596,10 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
       if (error) throw new Error(`ledger hasClaim 失敗: ${error.message}`);
       return (data?.length ?? 0) > 0;
     },
-    resolveTargets: (audience: AudienceSpec) => resolveTargets(audience, targetDeps),
+    // CDP 統合 Stage 4: 既定は shadow（旧 3 本が決め、新 SQL 1 本は数えるだけ）。
+    //   切替は env CDP_SEGMENT_MODE=cdp（そのとき新が引けなければ **送らない**）。
+    resolveTargets: (audience: AudienceSpec) =>
+      resolveTargetsWithCdp(env, supabase, audience, targetDeps),
     // 実送信スイッチ撤去（2026-08-22）: 常に実 sender を配線する。
     // 送信先 OA は resolveDeliveryChannel が env（DELIVERY_TARGET_ENV）から決める
     // （本番 Worker=本番 OA / staging Worker=テスト OA）。

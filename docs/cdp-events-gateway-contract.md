@@ -349,3 +349,71 @@ Supabaseの service role key を Mac に配る形も選べたが採らなかっ�
 あわせて `in_agreement_by`（どれで落ちたかの内訳）を返す。**過去の日も後から判定し直せる** — 数そのものは043の時点から日次ログに出ているので、観測をやり直す必要は無い。
 
 ⚠ `user_identity_map` にStage 2より前の行が残っていると `in_agreement` は false のままになる。**これは誤検知ではない**: その人はいまも旧台帳経由でしか横断読み出しに乗っておらず、Stage 5で `user_identity_map` を落とす（T-6）と横断が黙って消える。0になるまで観測を閉じないのが正しい。
+
+---
+
+## 13. Stage 4 — 解釈を1冊にして、配信の宛先をSQL1本で出す
+
+**この節を足した理由** — §12までは「事実（L0）を書く口・読む口」の契約で、Stage 4が足した**解釈（L1）を動かす口**の契約がどこにも無かった。スキーマの正本は `src/db/migrations/046_cdp_l1_subject_profile.sql`、判断の正本は統合設計 §3-2 / §4 #18 / §5 E8' / §6-1 Stage 4 / §6-2 T-9・T-11。ここは実装者（cx-agent と web-app の両方）が最初に読む索引に留める。
+
+### なぜL1に直接書く口を作らないのか
+
+Stage 4の不変条件は **「L1はL0から全再計算可能」**である。L1の列を直接書ける口を1つでも開けると、その列は「L0を畳んだ結果」ではなくなり、再計算した瞬間に消える（あるいは再計算できなくなる）。よって事前通知の変更・安全に関する申告・本人訂正・「もういらない」は、**すべてL0に1行積むだけ**の口として作った。L1はそれを畳んだ結果として現れる。
+
+畳み方の正本は 046 の `cdp_l1_build_profile` **1か所**。TypeScript側は畳み方を持たない（2か所にあると、片方だけ直した日に「一致していない」のか「直した」のかが区別できなくなる）。
+
+### 追加した語彙（`event_type`）— 送り先は既存の `POST /api/events`
+
+新しいエンドポイントは作っていない。§2の口をそのまま使う（新しい秘密を増やさない・送り手の実装を増やさない）。
+
+| `event_type` | `payload` | 畳まれ方（L1） |
+|---|---|---|
+| `persona.baseline_imported` | `{ scores: {serenity,explorer,sensory}, sources? }` | 好みタイプの**土台**を置き換える（移行の起点・主体につき1回） |
+| `persona.signal_applied` | `{ source: "diagnosis"\|"survey"\|"purchase"\|"conversation", delta: {軸: 数} }` | 合計・出所別内訳・その月の内訳を**同じ増減**で動かす |
+| `exclusion.set` / `exclusion.cleared` | `{ kind: "tea", ref: "銘柄番号" }` | 「もういらない」に足す / 外す |
+| `safety.declared` | `{ tags: string[], has_free_text?: boolean }` | 安全に関する申告に**足すだけ**（減らさない・下記） |
+| `notify.preference_set` | `{ key: string, value: any }` | 事前通知の設定（最後が勝つ） |
+| `notify.suppressed` / `notify.resumed` | `{ reason }` / `{}` | 配信を止める / 再開する |
+| `profile.override` | `{ field: string, value: any }` | 本人訂正（最後が勝つ。`persona_primary` は代表値を上書きするが**点は動かさない**） |
+
+cx-agent 内部から呼ぶときは `src/lib/cdp/profile-intake.ts` の型付き関数を使う（冪等キーと `source` slug の決め方をそこに閉じてある）。
+
+### payloadの形が読めない行は「捨てない」が「畳まない」
+
+上表の型に限り、**payloadの形も `schema_ok` の判定に入る**（§4の語彙の既知/未知に加えて）。形が読めない行は 400 にせず保存し `schema_ok=false` を立てる（E1は変わらない）。L1は `schema_ok=true` の行だけを畳むので、壊れた入力が静かに解釈へ混ざることはない。読めなかった数は `subject_profile.event_count - folded_count` で分かる。
+
+上表**以外**の `event_type`（行動ログ・フロー・購入）は形を問わない。問うと既存5経路のpayloadをこの契約に全部写すことになり、二重管理になる。
+
+### 安全に関する申告だけは「減らす方向に畳まない」
+
+`safety.declared` はunionのみで、取り消しの口を**作っていない**。カルテ定義が「片方にでも申告があれば必ず残す。消す方向の統合を絶対にしない」と定めているためで、取り消せる口をここに作ればその定義は実質無効になる。撤回が要るなら人の判断を挟む別の手続きにする。
+
+なお `tags: ["none"]`（特になし）は申告として積まない — 「聞いたが無かった」と「申告を消した」を同じ操作にしないため。
+
+### 期間別内訳は「暦の月（JST）」で切る
+
+`persona_windows` のキーは `YYYY-MM`。「直近30日」のようなnow相対の窓にすると、**保存値と再計算値が時間の経過だけで食い違い**、E8'の一致判定が毎日偽陽性になる。
+
+### 配信の宛先（T-11の置き換え先）
+
+`cdp_segment_line_targets(persona, limit)` が `subject_segment_state × delivery_identity` を引いて宛先を返す。これが `src/lib/delivery-runtime.ts` の**全件スキャン3本**（`customer_linkages` 全件 / Firestore `users` / Firestore `lineUsers`）の置き換え先である。
+
+**Stage 4は並走であって切替ではない。** 既定は `CDP_SEGMENT_MODE=shadow`（旧が決め、新は数えるだけ）。完了条件「配信対象が新旧で一致」を観測してから `cdp` に切り替える。旧3本の撤去はStage 5（T-11）。`cdp` モードで新が引けなかったときは**送らない**（旧に黙って落ちると「切り替えたつもりで旧のまま」が起きる）。
+
+除外の内訳（`excluded`）を必ず返す。宛先が減った理由を言えない配信を作らないため。
+
+⚠ 友だち解除（unfollow）だけは旧台帳 `customer_linkages` を読む。L0にunfollowの事実がまだ無いためで、Stage 5でL0の出来事にしてからこの枝を外す（T-7）。
+
+### 未連携の人にも宛先が立つ（T-9の置き換えが成立する理由）
+
+`cdp_l1_derive_delivery_identity` が `identity_edges` の `line_messaging_uid`（Stage 1のgatewayが主体を発行したときに入る）から `delivery_identity` を派生させる。連携時にしか派生させないと、新resolverは未連携の人を1人も出せず、旧の `lineUsers` 直読みと構造的に食い違う。**生値の保管先は `delivery_identity` 1表のまま**なので E5 の置き場は増えない。
+
+### E8'（保存してある解釈が、いま畳み直したものと同じか）
+
+`cdp_l1_recompute_parity(limit)` が、保存値と `cdp_l1_build_profile` の返りを比べる。比べるのは**導出値だけ**（`recomputed_at` のような時刻は入れない — 入れると必ず不一致になる）。**1件も見ていない日は `in_agreement=false`**（空虚合格を作らない）。
+
+日次の観測は `src/lib/cdp/stage4-parity.ts` が既存の日次tick（`0 18 * * *`）に相乗りする。**新規cronは作らない**。畳み直し → 観測の順で回す（逆にすると「古いまま放置していた」が「一致していない」に見える）。
+
+### 消去との関係
+
+`subject_profile` / `subject_segment_state` はどちらも `subject_id` 列を持つので、042/043の「表の表」（`roji_person_key_map`）が**自動で列挙する** — 除外リストに入れない＝消える側である、が既定。辿らずに数える孤児検査（`roji_erasure_residue`）にも046で足した。消去済みの主体に行を足そうとすると `cdp_reject_retired_subject` が入口で止める（畳み直しと消去が前後しても解釈が復活しない）。

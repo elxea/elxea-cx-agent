@@ -31,6 +31,50 @@ import {
   buildPurchaseSignals,
   PURCHASE_SIGNAL_WEIGHT,
 } from "./purchase-signals";
+import { createSupabaseClient } from "./supabase";
+import {
+  personaDeltaFromScores,
+  recordPersonaSignal,
+  type PersonaSignalSource,
+} from "./cdp/profile-intake";
+import type { ObservedIdentifier } from "./cdp/subjects";
+
+/**
+ * 点が動いたことを L0 に 1 行積む（CDP 統合 Stage 4）。
+ *
+ * ─ なぜ「前後の差」を積むのか ─
+ *   点を動かす計算（mergePersonaScoresWithSource）は押し替えの取り消しを含むので、
+ *   足した weight と実際に動いた量は一致しない。前後の差なら必ず一致する。
+ *
+ * ─ なぜ Firestore への書き込みの **あと**なのか ─
+ *   Stage 4 は並走の段で、正本はまだ Firestore 側にある。先に L0 へ積むと
+ *   Firestore の書き込みが落ちた回に「動いたことになっている点」が L1 に残る。
+ *
+ * **決して throw しない**（fire-and-forget の呼び出し元を落とさない）。
+ */
+async function emitPersonaSignal(
+  env: Env,
+  identifier: ObservedIdentifier,
+  source: PersonaSignalSource,
+  before: { serenity?: number; explorer?: number; sensory?: number } | undefined,
+  after: { serenity?: number; explorer?: number; sensory?: number } | undefined,
+): Promise<void> {
+  const delta = personaDeltaFromScores(before, after);
+  if (Object.keys(delta).length === 0) return;
+  try {
+    const supabase = createSupabaseClient(env);
+    await recordPersonaSignal(
+      supabase,
+      { identifier, source: `cx-agent.preference-${source}` },
+      { source, delta },
+    );
+  } catch (err) {
+    console.warn(
+      "[preference-pipeline] L0 persona signal failed (non-blocking):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
 
 /**
  * 嗜好抽出 + プロファイル更新パイプライン。
@@ -75,7 +119,21 @@ export async function runPreferencePipeline(
       //   持たないため従来どおり skip（連携時に解消）。
       if (channel === "line") {
         const existingLine = await getLineUserProfile(userId, fsEnv);
-        await updateLineUserTasteProfile(userId, signals, existingLine, fsEnv);
+        const lineUpdates = await updateLineUserTasteProfile(
+          userId,
+          signals,
+          existingLine,
+          fsEnv,
+        );
+        // Stage 4: 未連携の人の点も L1 に届かせる（未連携カルテ lineUsers/ が
+        //   L1 に置き換わる = T-9 の置き換え先が空になるのを防ぐ）。
+        await emitPersonaSignal(
+          env,
+          { kind: "line_messaging_uid", value: userId },
+          "conversation",
+          existingLine?.persona?.scores,
+          lineUpdates.persona?.scores,
+        );
         console.log(
           `[preference-pipeline] Unlinked LINE user — wrote lineUsers/${userId}: ` +
             `categories=${signals.preferred_categories.length}, ` +
@@ -96,6 +154,14 @@ export async function runPreferencePipeline(
 
     // マージして更新
     const profileUpdates = await updateTasteProfile(shopifyId, signals, existingProfile, fsEnv);
+
+    await emitPersonaSignal(
+      env,
+      { kind: "shopify_customer_id", value: shopifyId },
+      "conversation",
+      existingProfile?.persona?.scores,
+      profileUpdates.persona?.scores,
+    );
 
     console.log(
       `[preference-pipeline] Profile updated for customer ${shopifyId}: ` +
@@ -175,6 +241,16 @@ export async function runPurchasePreferencePipeline(
       fsEnv,
       PURCHASE_SIGNAL_WEIGHT,
       "purchase",
+    );
+
+    // Stage 4: 購入は最も強いシグナル（weight=3）。L1 でも「購入で入った点」として
+    //   内訳（persona_sources.purchase）と月別内訳（persona_windows）に残る。
+    await emitPersonaSignal(
+      env,
+      { kind: "shopify_customer_id", value: shopifyCustomerId },
+      "purchase",
+      existingProfile?.persona?.scores,
+      profileUpdates.persona?.scores,
     );
 
     // lastPurchaseAt を更新
