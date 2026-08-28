@@ -45,6 +45,7 @@ import {
   SURVEY_OCCASION,
   type SurveyKarteDeps,
 } from "./roji-survey-record";
+import { throughGateway } from "./cdp/events-gateway";
 import {
   tryGetFirestoreEnv,
   getCustomerProfile,
@@ -129,7 +130,29 @@ async function applyPlan(
       const isFirstTap =
         plan.karte.step != null && (state.answers[plan.karte.step] ?? []).length === 0;
       try {
-        await recordSurveyKarteWith(lineUserId, plan.karte, { isFirstTap }, deps);
+        // CDP 統合 Stage 1: カルテへの書き込みを透過で通しつつ、答えという出来事を
+        //   L0 にも積む。**本文は載せない**（自由文の置き場は roji_words であって L0 ではない）。
+        //   recordSurveyKarteWith が返す "skipped"（差分が空 / 未連携）は、これまで
+        //   呼び出し側で捨てられていた — gateway が理由として残す（T-12）。
+        //   gateway を外すときは recordSurveyKarteWith(...) の直呼びに戻す。
+        const occurredAt = new Date().toISOString();
+        await throughGateway(
+          supabase,
+          {
+            eventType: "survey.answer_recorded",
+            channel: "line",
+            identifier: { kind: "line_messaging_uid", value: lineUserId },
+            dedupe: `${plan.karte.step ?? "-"}@${occurredAt}`,
+            source: "cx-agent.roji-survey",
+            occurredAt,
+            payload: { step: plan.karte.step ?? null, occasion: SURVEY_OCCASION },
+          },
+          () => recordSurveyKarteWith(lineUserId, plan.karte!, { isFirstTap }, deps),
+          (path) =>
+            path === "skipped"
+              ? { status: "skipped", reason: "no_karte_delta_or_unlinked" }
+              : { status: "ok" },
+        );
       } catch (err) {
         console.warn(
           "[roji-survey] karte write failed (non-blocking):",

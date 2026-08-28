@@ -71,7 +71,7 @@ function assertIncludes(haystack: string, needle: string, label = "") {
 /**
  * 偽リポジトリを temp に組み立てる。
  *
- * COUNTERS が数えるのは実在のソースなので、5 つの counter すべてが 0 にならない
+ * COUNTERS が数えるのは実在のソースなので、**すべての** counter が 0 にならない
  * 最小のソースを置く（0 だと「数え方が壊れた」として落ちる仕様のため、
  * それ自体は別のテストで確かめる）。
  */
@@ -93,6 +93,12 @@ function makeFixture(): string {
       "export const w = PURCHASE_SIGNAL_WEIGHT;",
       // raw-identity-key-legacy = 1
       "export const row = { line_user_id: 'U0' };",
+      // customer-fact-write-sites = 1（顧客の事実を L0 以外へ書く面）
+      "export const write = () => db.from(FLOW_EVENTS_TABLE).insert(row);",
+      // event-vocabulary-declarations = 1 種
+      'export type BehaviorAction = "tap_button";',
+      // event-vocabulary-drop-sites = 1（語彙不一致で捨てている箇所）
+      "export const drop = (a: string) => VALID_WEB_EVENTS.includes(a);",
     ].join("\n"),
     "utf8",
   );
@@ -110,6 +116,9 @@ const EXPECTED_FIXTURE_COUNTS: Record<string, number> = {
   "firestore-person-namespaces": 1,
   "persona-writers": 1,
   "raw-identity-key-legacy": 1,
+  "customer-fact-write-sites": 1,
+  "event-vocabulary-declarations": 1,
+  "event-vocabulary-drop-sites": 1,
 };
 
 function writeRatchets(dir: string, maxes: Record<string, number>) {

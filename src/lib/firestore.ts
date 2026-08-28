@@ -19,6 +19,13 @@ import {
   type SpecialFolders,
 } from "./karte-merge-rules";
 
+import { behaviorEventType } from "./cdp/event-vocabulary";
+import {
+  identifierForChannel,
+  throughGateway,
+  type LegacyOutcome,
+} from "./cdp/events-gateway";
+
 export type { KarteMergeRecord } from "./karte-merge-rules";
 
 // ---------------------------------------------------------------------------
@@ -1046,15 +1053,60 @@ export async function recordBehaviorEvent(
   env: FirestoreEnv & { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string },
   supabase?: ReturnType<typeof import("./supabase").createSupabaseClient>,
 ): Promise<void> {
-  // Firestore credentials がなければスキップ
-  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
-    return;
-  }
-
   // Supabase クライアント（渡されなければ動的 import を回避し throw）
+  //
+  // ⚠ この早期 return だけは gateway より前に残る。L0 は Supabase にあるので、
+  //   クライアントが無いと **積む先そのものが無い**。ここを通ったことは 1 行ログに残る
+  //   （従来どおり）。
   if (!supabase) {
     console.warn("[recordBehaviorEvent] supabase client required but not provided, skipping");
     return;
+  }
+
+  // CDP 統合 Stage 1: 既存の直書きを透過で通しつつ、同じ出来事を L0 にも積む。
+  //   ここが T-12（無言 skip）の実体だった場所である。未連携・Firestore 未設定で
+  //   「何もせず return する」のは従来どおりだが、**なぜ書かなかったか**が
+  //   L0 の payload.legacy_write に必ず残るようになった（数えられる）。
+  //   gateway を外すときは throughGateway(...) を writeBehaviorEventDirect(...) に戻す。
+  const occurredAt = new Date().toISOString();
+  await throughGateway(
+    supabase,
+    {
+      eventType: behaviorEventType(action),
+      channel,
+      identifier: identifierForChannel(channel, userId),
+      dedupe: `${metadata.contentId ?? metadata.productId ?? "-"}@${occurredAt}`,
+      source: "cx-agent.behavior-log",
+      occurredAt,
+      // 自由文（query / buttonLabel）は載せない。載せるのは ID 相当のみ。
+      payload: {
+        content_id: metadata.contentId ?? null,
+        product_id: metadata.productId ?? null,
+      },
+    },
+    () => writeBehaviorEventDirect(userId, channel, action, metadata, env, supabase),
+    (outcome) => outcome,
+  );
+}
+
+/**
+ * Firestore behaviorLog への直書き（Stage 1 以前の recordBehaviorEvent の中身）。
+ *
+ * 制御フローは 1 つも変えていない。変えたのは **なぜ書かなかったかを言うようになった**
+ * ことだけで、返り値を無視する呼び出し側から見た挙動は同じ（従来どおり void を返すのと
+ * 同じ扱いで使える）。
+ */
+async function writeBehaviorEventDirect(
+  userId: string,
+  channel: BehaviorChannel,
+  action: BehaviorAction,
+  metadata: BehaviorEventMetadata,
+  env: FirestoreEnv & { SUPABASE_URL: string; SUPABASE_SERVICE_ROLE_KEY: string },
+  supabase: ReturnType<typeof import("./supabase").createSupabaseClient>,
+): Promise<LegacyOutcome> {
+  // Firestore credentials がなければスキップ
+  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
+    return { status: "skipped", reason: "firestore_unconfigured" };
   }
 
   // customer_linkages から Shopify Customer ID を解決
@@ -1066,8 +1118,10 @@ export async function recordBehaviorEvent(
     .single();
 
   if (!linkage?.shopify_customer_id) {
-    // 紐付けなし — イベント記録をスキップ
-    return;
+    // 紐付けなし — Firestore への記録はできない（棚のキーが shopify 顧客番号だから）。
+    // **これが D1 の無言 skip だった枝**。L0 側には subject を発行して積むので、
+    // 出来事そのものは残る。理由はここから gateway に渡って payload に載る。
+    return { status: "skipped", reason: "not_linked_to_shopify" };
   }
 
   const shopifyId = String(linkage.shopify_customer_id);
@@ -1081,6 +1135,7 @@ export async function recordBehaviorEvent(
   };
 
   await addBehaviorEvent(shopifyId, event, env);
+  return { status: "ok" };
 }
 
 // ---------------------------------------------------------------------------

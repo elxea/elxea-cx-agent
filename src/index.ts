@@ -10,6 +10,7 @@ import {
   webChatEventHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
+import { eventsIntakeHandler } from "./routes/events";
 import {
   identityLinkHandler,
   identityLinkLineHandler,
@@ -356,6 +357,13 @@ app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
 
 // Survey route
 app.post("/api/survey", surveyHandler);
+
+// events gateway（CDP 統合 Stage 1）— 顧客の事実を書く口。
+//   契約の正本は docs/cdp-events-gateway-contract.md。
+//   cx-agent 内部の 5 経路は HTTP を経由せず throughGateway を直接呼ぶ。この口は
+//   Supabase クライアントを持たない elxea-web-app から出来事を積むためにある。
+//   認証は既存の共有秘密（SYNC_API_SECRET / X-API-Key）。新しい秘密は増やさない。
+app.post("/api/events", eventsIntakeHandler);
 
 // Identity link routes
 app.post("/api/identity/link", identityLinkHandler);

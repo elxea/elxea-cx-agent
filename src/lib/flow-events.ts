@@ -18,6 +18,8 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { flowEventType } from "./cdp/event-vocabulary";
+import { identifierForChannel, throughGateway } from "./cdp/events-gateway";
 
 /** flow_events テーブル名（migration 021）。 */
 export const FLOW_EVENTS_TABLE = "flow_events";
@@ -173,8 +175,45 @@ export async function logFlowEvent(
   supabase: SupabaseClient,
   input: FlowEventInput,
 ): Promise<void> {
+  if (!input.userRef || typeof input.userRef !== "string") return;
+
+  // CDP 統合 Stage 1: 既存の直書きを **透過で通しつつ**、同じ出来事を L0 にも積む。
+  //   書込先（flow_events）も、握りつぶす作法も、呼び出し側から見た挙動も変えていない。
+  //   gateway を外すときは throughGateway(...) を writeFlowEventRow(supabase, input) に戻す。
+  //   契約: docs/cdp-events-gateway-contract.md
+  const occurredAt = new Date().toISOString();
+  const channel = input.channel ?? "line";
+  await throughGateway(
+    supabase,
+    {
+      eventType: flowEventType(input.eventName),
+      channel,
+      identifier: identifierForChannel(channel, input.userRef),
+      // タップは繰り返されうるので、段・選択値・番号に時刻まで含めて 1 回を決める。
+      dedupe: `${input.step ?? "-"}/${input.value ?? "-"}/${input.productNo ?? "-"}@${occurredAt}`,
+      source: "cx-agent.flow-events",
+      occurredAt,
+      // PII ガードを通した slug だけを載せる（自由文は buildFlowEventRow が落とす）。
+      payload: {
+        step: sanitizeSlug(input.step),
+        value: sanitizeSlug(input.value),
+        product_no: sanitizeProductNo(input.productNo),
+      },
+    },
+    () => writeFlowEventRow(supabase, input),
+  );
+}
+
+/**
+ * flow_events への直書き（Stage 1 以前の logFlowEvent の中身そのまま）。
+ *
+ * ここを **一切変えていない**ことが「既存の挙動が 1 つも変わらない」の実体である。
+ */
+async function writeFlowEventRow(
+  supabase: SupabaseClient,
+  input: FlowEventInput,
+): Promise<void> {
   try {
-    if (!input.userRef || typeof input.userRef !== "string") return;
     const row = buildFlowEventRow(input);
     const { error } = await supabase.from(FLOW_EVENTS_TABLE).insert(row);
     if (error) {

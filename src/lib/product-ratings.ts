@@ -21,6 +21,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PersonaType } from "./firestore";
 import { extractPersonaSignalsFromTags } from "./purchase-signals";
+import { identifierForChannel, throughGateway } from "./cdp/events-gateway";
 
 /** product_ratings テーブル名（migration 022）。 */
 export const PRODUCT_RATINGS_TABLE = "product_ratings";
@@ -169,6 +170,33 @@ export async function recordProductRating(
   input: ProductRatingInput,
 ): Promise<{ ok: boolean }> {
   if (!isValidRatingInput(input)) return { ok: false };
+
+  // CDP 統合 Stage 1: 既存の直書きを透過で通しつつ、同じ出来事を L0 にも積む。
+  //   gateway を外すときは throughGateway(...) を writeProductRatingRow(...) に戻す。
+  const occurredAt = new Date().toISOString();
+  const channel = input.channel ?? "line";
+  return throughGateway(
+    supabase,
+    {
+      eventType: "rating.submitted",
+      channel,
+      identifier: identifierForChannel(channel, input.userRef),
+      // 同じ商品を後から付け直したら別の出来事なので、時刻まで含めて 1 回を決める。
+      dedupe: `${input.productNo}@${occurredAt}`,
+      source: "cx-agent.product-ratings",
+      occurredAt,
+      payload: { product_no: input.productNo, rating: input.rating, rating_source: input.source },
+    },
+    () => writeProductRatingRow(supabase, input),
+    (result) => (result.ok ? { status: "ok" } : { status: "failed", reason: "insert_failed" }),
+  );
+}
+
+/** product_ratings への直書き（Stage 1 以前の recordProductRating の中身そのまま）。 */
+async function writeProductRatingRow(
+  supabase: SupabaseClient,
+  input: ProductRatingInput,
+): Promise<{ ok: boolean }> {
   try {
     const { error } = await supabase
       .from(PRODUCT_RATINGS_TABLE)

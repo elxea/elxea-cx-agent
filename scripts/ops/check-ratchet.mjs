@@ -149,11 +149,16 @@ const COUNTERS = {
     ),
 
   /* 別名台帳の冊数 (T-6 / T-7)。Supabase から読み書きしているテーブル名のうち
-     identity / linkage を名に含むものの **種類数**。3 冊目が増えれば当たる。 */
+     identity / linkage を名に含むものの **種類数**。3 冊目が増えれば当たる。
+
+     ⚠ 2026-08-29: 表名を定数に置いたモジュール (`XXX_TABLE = "…"`) を数え落としていた。
+        `.from("…")` の字面しか見ていなかったため、定数経由で使えば ratchet の外側に
+        台帳を増やせてしまう — 数え方の穴であって「増えていない」ではない。
+        定数宣言側も同じ 1 つのパターンで拾う。 */
   'identity-ledger-tables': () =>
     countDistinctMatches(
       'identity-ledger-tables',
-      /\.from\("([a-z_]*(?:identity|linkage)[a-z_]*)"\)/g,
+      /(?:\.from\("|_TABLE\s*=\s*")([a-z_]*(?:identity|linkage)[a-z_]*)"/g,
     ),
 
   /* 人に紐づく Firestore の棚の入口の種類数 (T-8 / T-9)。
@@ -187,6 +192,34 @@ const COUNTERS = {
       'persona-writers',
       /\bPURCHASE_SIGNAL_WEIGHT\b/g,
     ) - 1 /* 定義元 purchase-signals.ts を除く */,
+
+  /* 顧客の事実を **L0 以外** に直接書いている面の数 (E2 / Stage 1)。
+     数えるのは「書き込みの口」であって呼び出し側ではない — 呼び出し側まで数えると、
+     読み手を消さないと数が減らないことになる (raw-identity-key-legacy と同じ考え方)。
+     events gateway が透過で包んでいる 5 経路のうち、実際に外部ストアへ書く面がこれ。 */
+  'customer-fact-write-sites': () =>
+    countFilesMatching(
+      'customer-fact-write-sites',
+      /\.from\(FLOW_EVENTS_TABLE\)\s*\.insert|\.from\(PRODUCT_RATINGS_TABLE\)\s*\.insert|await addBehaviorEvent\(|await deps\.updateShopifyProfile\(|await deps\.updateLineProfile\(/g,
+    ),
+
+  /* 顧客の出来事の語彙を宣言している **名前の種類数** (D3 / D4)。
+     行動語彙が 14/10/7 に三分裂し、channel が 4 者で食い違っている状態を数える。
+     ファイル数ではなく名前で数えるのは、1 ファイルに 2 つ宣言があっても
+     「語彙が 2 つある」ことに変わりはないから。 */
+  'event-vocabulary-declarations': () =>
+    countDistinctMatches(
+      'event-vocabulary-declarations',
+      /(?:export\s+)?(?:type|const)\s+(BehaviorAction|BehaviorChannel|FlowEventName|RatingSource|VALID_WEB_EVENTS|KNOWN_EVENT_TYPES|KNOWN_CHANNELS)\b/g,
+    ),
+
+  /* 語彙が合わないという理由だけで顧客の出来事を捨てている箇所 (E1)。
+     いまは POST /api/chat/event の 1 か所だけ (VALID_WEB_EVENTS に無い action を 400)。 */
+  'event-vocabulary-drop-sites': () =>
+    countFilesMatching(
+      'event-vocabulary-drop-sites',
+      /VALID_WEB_EVENTS\.includes\(/g,
+    ),
 
   /* 生の LINE userId を「保管する」場所 (E5 / T-7)。
      数えるのは参照ではなく **保管**: 行に載せる形 (`line_user_id:`) を持つ

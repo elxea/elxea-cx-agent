@@ -1,0 +1,250 @@
+/**
+ * @layer CDP
+ *
+ * L0 の語彙登録簿（open registry）— CDP 統合 Stage 1 / 設計 §5 E1 / 欠陥 D3・D4。
+ *
+ * ─ いま何が壊れているか ─
+ *
+ * 「その人に何が起きたか」を表す語彙が経路ごとに違う。
+ *
+ *   行動語彙（D3・三分裂）
+ *     - cx-agent  `BehaviorAction`（src/lib/firestore.ts）… 14 値
+ *     - web-app   `BehaviorAction`（lib/firebase/types.ts）… 10 値
+ *     - web-app   `BehaviorActionSchema`（lib/validation/behavior-schema.ts・zod）… 7 値
+ *   channel（D4・4 者食い違い）
+ *     - zod は 3 値（web / line / shopify）を受理
+ *     - TS の型は 2 値（line / web）
+ *     - web の route は "web" 固定
+ *     - 注文 webhook は route を迂回して channel:"shopify" を実書込
+ *
+ * 語彙が合わないと、合わない側の出来事が **捨てられる**（cx-agent 側は
+ * src/routes/web.ts の VALID_WEB_EVENTS が 400 を返す 1 か所）。
+ *
+ * ─ ここが何をするか ─
+ *
+ * L0（customer_events）に載せる語彙を **1 か所に集める**。ただし閉じない:
+ *
+ *   既知の語彙   … ここに載っている。schema_ok = true で保存される。
+ *   未知の語彙   … 弾かない。schema_ok = false を立てて **保存する**（E1）。
+ *
+ * 「知らない出来事が起きた」を「無かったこと」に変えないための非対称である。
+ * 未知が積み上がったら、語彙を足すか送り手を直すかを人が決める（部分 index
+ * customer_events_unknown_type がその窓）。
+ *
+ * ─ 型で drift を捕まえる ─
+ *
+ * 既存の 2 つの語彙（BehaviorAction / FlowEventName）は **型として取り込み**、
+ * 網羅していなければ tsc が落ちる。片方に値を足して登録簿に足し忘れる、が起きない。
+ * 値そのものはここに列挙する（import した union を実行時に展開できないため）。
+ */
+
+import type { BehaviorAction } from "../firestore";
+import type { FlowEventName } from "../flow-events";
+
+/** 型レベルの網羅アサート。false になると tsc が落ちる。 */
+type Assert<T extends true> = T;
+
+// ---------------------------------------------------------------------------
+// 行動語彙（Firestore behaviorLog 由来）
+// ---------------------------------------------------------------------------
+
+/**
+ * cx-agent の `BehaviorAction` 全 14 値 + web-app 側にしか無い `audio_play`。
+ *
+ * web-app の 10 値・zod の 7 値はいずれもこの集合の部分集合になる
+ * （唯一 cx-agent に無かったのが audio_play で、ここで合流させる）。
+ */
+export const BEHAVIOR_ACTIONS = [
+  "tap_button",
+  "view_content",
+  "view_product",
+  "purchase",
+  "line_message",
+  "search",
+  "tea_mention",
+  "flavor_preference",
+  "topic_interest",
+  "chat_started",
+  "product_viewed",
+  "cart_link_clicked",
+  "feedback_given",
+  "survey_completed",
+  // web-app 側にだけ存在した値（記事内の音声の再生開始）。
+  "audio_play",
+] as const;
+
+/** cx-agent の BehaviorAction を 1 つも取りこぼしていないこと。 */
+type _BehaviorCoverage = Assert<
+  BehaviorAction extends (typeof BEHAVIOR_ACTIONS)[number] ? true : false
+>;
+
+// ---------------------------------------------------------------------------
+// フロー語彙（Supabase flow_events 由来）
+// ---------------------------------------------------------------------------
+
+/** `FlowEventName` の全値。足したらここにも足す（足し忘れは下の Assert が落とす）。 */
+export const FLOW_EVENT_NAMES = [
+  "menu.tap",
+  "welcome.tap",
+  "welcome.source",
+  "tea.list_view",
+  "tea.card_view",
+  "tea.item_view",
+  "tea.number_miss",
+  "diag.start",
+  "diag.answer",
+  "diag.invalid",
+  "diag.result",
+  "consult.entry",
+  "optout.request",
+  "optout.confirm",
+  "link.invite_shown",
+  "link.completed",
+  "link.unlinked",
+  "next_cup_shown",
+  "onboarding.complete",
+  "read.completed",
+  "feedback.shown",
+  "nextmonth.shown",
+  "survey.start",
+  "survey.decline",
+  "survey.answer",
+  "survey.end",
+  "survey.confirm",
+  "survey.estimate_shown",
+  "survey.estimate_corrected",
+  "survey.words_prompt",
+  "survey.words_saved",
+  "survey.quote_consent",
+  "survey.finished",
+] as const;
+
+type _FlowCoverage = Assert<
+  FlowEventName extends (typeof FLOW_EVENT_NAMES)[number] ? true : false
+>;
+
+// ---------------------------------------------------------------------------
+// L0 の event_type
+// ---------------------------------------------------------------------------
+
+/**
+ * L0 の型名は `<領域>.<出来事>` に揃える。領域を前置するのは、3 つの語彙が
+ * 同じ平面に載ったときに由来が消えないようにするため（`purchase` が
+ * 行動語彙の 1 値なのか購入そのものなのかを、名前だけで言えるようにする）。
+ */
+export const EVENT_TYPE_PREFIX = {
+  behavior: "behavior.",
+  flow: "flow.",
+} as const;
+
+/** 行動語彙の 1 値を L0 の event_type にする。 */
+export function behaviorEventType(action: string): string {
+  return `${EVENT_TYPE_PREFIX.behavior}${action}`;
+}
+
+/** フロー語彙の 1 値を L0 の event_type にする（`.` は `_` へ畳む）。 */
+export function flowEventType(name: string): string {
+  return `${EVENT_TYPE_PREFIX.flow}${name.replace(/\./g, "_")}`;
+}
+
+/**
+ * 領域名を前置しない、独立した出来事。
+ *
+ * `diagnosis.answer` は設計 §4 の #14（茶葉診断 Web 入口）の「口」にあたる。
+ * 画面は Stage 4 だが、受け口だけ先に開けておく（口を先に・画面は後）。
+ */
+export const STANDALONE_EVENT_TYPES = [
+  "purchase.order_paid",
+  "rating.submitted",
+  "survey.answer_recorded",
+  "diagnosis.answer",
+] as const;
+
+/** 既知の event_type 全集合。ここに無い値も **保存される**（schema_ok = false）。 */
+export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
+  ...BEHAVIOR_ACTIONS.map(behaviorEventType),
+  ...FLOW_EVENT_NAMES.map(flowEventType),
+  ...STANDALONE_EVENT_TYPES,
+]);
+
+/** DB 側の CHECK（customer_events_type_form）と同じ形。 */
+const EVENT_TYPE_FORM = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$/;
+
+/** 形として L0 に載せられるか（語彙の既知/未知とは別の話）。 */
+export function isWellFormedEventType(value: string): boolean {
+  return value.length > 0 && value.length <= 64 && EVENT_TYPE_FORM.test(value);
+}
+
+/** 既知の語彙か（未知でも捨てない。schema_ok にそのまま入る）。 */
+export function isKnownEventType(value: string): boolean {
+  return KNOWN_EVENT_TYPES.has(value);
+}
+
+// ---------------------------------------------------------------------------
+// channel
+// ---------------------------------------------------------------------------
+
+/**
+ * 既知の channel（D4 の 4 者を 1 つに合流させた集合）。
+ *
+ * "shopify" は TS の型（`BehaviorChannel = "line" | "web"`）には無いが、
+ * 注文 webhook が実際に書いている値である。**実在するものを語彙から外すと、
+ * 実在するほうが「未知」になるだけで何も直らない**ので、ここでは受け入れる。
+ * 型のほうを合わせるのは Stage 5（旧語彙の撤去）。
+ */
+export const KNOWN_CHANNELS = ["line", "web", "shopify"] as const;
+export type KnownChannel = (typeof KNOWN_CHANNELS)[number];
+
+const CHANNEL_FORM = /^[a-z][a-z0-9_]*$/;
+
+export function isWellFormedChannel(value: string): boolean {
+  return value.length > 0 && value.length <= 32 && CHANNEL_FORM.test(value);
+}
+
+export function isKnownChannel(value: string): boolean {
+  return (KNOWN_CHANNELS as readonly string[]).includes(value);
+}
+
+// ---------------------------------------------------------------------------
+// 識別子の種類（040 の CHECK 制約と 1 対 1）
+// ---------------------------------------------------------------------------
+
+/**
+ * identity_edges.identifier_kind の語彙。
+ *
+ * ⚠ ここは **閉じている**。出来事（何が起きたか）は観測の揺らぎがあるので開くが、
+ *   識別子の種類が増えるのは設計判断であって揺らぎではない。
+ */
+export const IDENTIFIER_KINDS = [
+  "line_messaging_uid",
+  "line_login_uid",
+  "shopify_customer_id",
+  "web_anonymous_id",
+  "web_session_id",
+  /**
+   * SEC-1: **観測の記録としてのみ**置く。同一 email を根拠に主体を結ぶ経路は
+   * どこにも無い（042 の解決関数にも枝が無い / resolveSubject も拒否する）。
+   * 生アドレスは決して入れない。渡す側が hash 済みの値だけを渡す。
+   */
+  "email_hash",
+] as const;
+
+export type IdentifierKind = (typeof IDENTIFIER_KINDS)[number];
+
+/**
+ * 主体の解決に使ってよい種類。
+ *
+ * email_hash が入っていないことが SEC-1 の実体である。
+ * ここに足すことは「メールが同じなら同じ人とみなす」という意味になる。
+ */
+export const RESOLVABLE_IDENTIFIER_KINDS: ReadonlySet<IdentifierKind> = new Set<IdentifierKind>([
+  "line_messaging_uid",
+  "line_login_uid",
+  "shopify_customer_id",
+  "web_anonymous_id",
+  "web_session_id",
+]);
+
+export function isIdentifierKind(value: unknown): value is IdentifierKind {
+  return typeof value === "string" && (IDENTIFIER_KINDS as readonly string[]).includes(value);
+}

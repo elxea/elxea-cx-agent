@@ -11,15 +11,30 @@
     "目標値と撤去の段は統合設計 §6-2 / §6-4 が正本: 各 why の末尾に段を書いてある。"
   ],
   "ratchets": {
+    "customer-fact-write-sites": {
+      "max": 5,
+      "source": "src/** のうち、顧客の事実を **L0 以外** のストアへ直接書いている面を持つモジュール数 (flow_events / product_ratings への insert、Firestore behaviorLog への addBehaviorEvent、roji アンケートのカルテ書き込み)",
+      "why": "E2「顧客の事実を書く口は 1 つ」の登録。Stage 1 の events gateway は既存 5 経路を **透過で通す** 段なので、これらの面はまだ実在する — だから 0 ではなく実測 5 で始める (これが「warn から開始する」の実体で、既存の面は据え置き・**新しく増やしたときだけ落ちる**)。数えるのは書き込みの口であって呼び出し側ではない: 呼び出し側まで数えると、読み手を消さないと 数が減らないことになり、E2 が意図する「口を 1 本に寄せる」とは別の圧力になる (raw-identity-key-legacy と同じ考え方)。目標 0 (書く口が L0 の 1 本になる)。撤去は Stage 5。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) と、この ratchet。"
+    },
+    "event-vocabulary-declarations": {
+      "max": 7,
+      "source": "src/** で宣言されている「顧客の出来事の語彙」の名前の種類数 (BehaviorAction / BehaviorChannel / FlowEventName / RatingSource / VALID_WEB_EVENTS / KNOWN_EVENT_TYPES / KNOWN_CHANNELS)",
+      "why": "同じ「何が起きたか」を表す語彙が経路ごとに違う (D3: 行動語彙が cx-agent 14 値 / web-app 型 10 値 / web-app zod 7 値の三分裂。D4: channel が zod 3 値 / 型 2 値 / route は \"web\" 固定 / 注文 webhook は \"shopify\" を実書込 の 4 者食い違い)。語彙が合わないと、合わない側の出来事が 400 で捨てられる。ファイル数ではなく **名前** で数えるのは、1 ファイルに 2 つ宣言があっても 「語彙が 2 つある」ことに変わりはないため。⚠ Stage 1 で 5 → 7 に増やした (KNOWN_EVENT_TYPES / KNOWN_CHANNELS を新設したため)。これは **一時的に 1 つ増やして 2 に減らす** 形の移行であり、増やしたこと自体をここに申告している。目標 2 (L0 の open registry の 2 本だけが残る)。撤去は Stage 5 / T-8・T-9 と同時。"
+    },
+    "event-vocabulary-drop-sites": {
+      "max": 1,
+      "source": "src/** のうち、語彙が合わないという理由だけで顧客の出来事を捨てている箇所を持つモジュール数 (現在 src/routes/web.ts の VALID_WEB_EVENTS.includes による 400)",
+      "why": "E1「出来事は捨てない」の登録。捨てられた側には何も残らないので、送り手がずれたことに誰も気づけない (web-app の durationSeconds が白名簿から漏れて読了イベントが数か月落ち続けたのと同じ壊れ方)。Stage 1 で **L0 には積むようにした** ので出来事そのものはもう消えないが、応答は 400 のまま残している — 応答コードは既存クライアントとの契約であり、Stage 1 の完了条件は 「既存の挙動が 1 つも変わらない」だから。目標 0 (語彙が L0 の登録簿に一本化された Stage 4 で 400 を落とす)。"
+    },
     "firestore-person-namespaces": {
       "max": 3,
       "source": "src/** に現れる「人に紐づく Firestore の棚」の入口の種類数 (users/{shopifyCustomerId} / users/line:{lineUserId} / lineUsers/{lineUserId})",
       "why": "同じ人の記録が 3 つの棚に分かれて置かれている。連携済みなら users/{shopifyId}、Web からの LINE 連携人格なら users/line:{lineUserId}、未連携 LINE なら lineUsers/{lineUserId}。棚が分かれているぶんだけ「消し残し」と「カルテの分裂」が起きる (消去側 roji-erasure.ts も同じ 3 種を個別に組み立てて回っている)。目標 1 (棚のキーを subject_id 1 種にする)。撤去は Stage 5 / T-8・T-9。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) であり、この ratchet は進捗を固定する側。"
     },
     "identity-ledger-tables": {
-      "max": 2,
-      "source": "src/** の .from(\"…\") のうち、テーブル名に identity または linkage を含むものの種類数 (現在 user_identity_map / customer_linkages)",
-      "why": "「この LINE とこの顧客は同じ人だ」を書く台帳が 2 冊あり、相互参照がゼロのまま並存している。実害は既に出ていて、LIFF と Account Link は customer_linkages にしか書かないのに、横断の会話履歴を引く getCrossChannelMessages は user_identity_map しか見ない — 連携しても LINE の会話が統合ビューに出ない (統合設計 C-1)。目標 1 (identity_edges 1 冊)。撤去は Stage 5 / T-6・T-7。再流入を止めるのは E4 (edges/links の UPDATE/DELETE を Postgres トリガで ABORT)。"
+      "max": 3,
+      "source": "src/** の .from(\"…\") と `…_TABLE = \"…\"` のうち、テーブル名に identity または linkage を含むものの種類数 (現在 user_identity_map / customer_linkages / identity_edges)",
+      "why": "「この LINE とこの顧客は同じ人だ」を書く台帳が何冊あるかを数える。⚠ Stage 1 で 2 → 3 に増やした。増えた 1 冊は identity_edges で、これは **3 冊目ではなく、1 冊に寄せるための行き先** である (追記専用・書き換えなし)。Stage 5 で user_identity_map (T-6) と customer_linkages の台帳機能 (T-7) が落ちて 1 になる。増やしたことをここに申告として残すのが本表の役目なので、黙って max だけ上げていない。⚠ 数え方も同時に直した: 以前は `.from(\"…\")` の字面しか見ておらず、表名を定数に置けば ratchet の外側に台帳を増やせる穴があった (identity_edges がまさにその形だった)。実害は「増えていないように見える」ことなので、定数宣言側も同じパターンで拾うようにした。目標 1 (identity_edges 1 冊)。再流入を止めるのは E4 (edges の UPDATE/DELETE を Postgres トリガで ABORT)。"
     },
     "identity-merge-functions": {
       "max": 2,

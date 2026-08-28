@@ -25,7 +25,38 @@ beforeEach(() => {
   guard = installHermeticFetch(env as unknown as Record<string, unknown>);
 });
 
+/**
+ * テストとテストの **あいだ** に敷く fetch（永久に決まらない Promise を返す）。
+ *
+ * ─ なぜ要るか ─
+ *   このリポジトリの記録系は fire-and-forget で、呼び出し側は応答を待たない
+ *   （`logFlowEvent` / `recordBehaviorEvent` は `void` で投げっぱなし）。
+ *   投げっぱなしということは、**テストが終わったあとも走り続ける尻尾がある**
+ *   ということでもある。afterEach で実 fetch を戻すと、その尻尾が
+ *   モックではなく実ネットワークへ出る。
+ *
+ *   実際に CI で出た（2026-08-28 / CDP Stage 1）: 記録 1 件あたりの往復が
+ *   1 回から 3 回に増えた結果、尻尾がテストの寿命を超えるようになり
+ *   `DNS lookup failed; host = mock-supabase.e2e.local` に到達した。
+ *   さらにその失敗を尻尾が console に書こうとして、環境が畳まれた後の
+ *   ログ送信になり `EnvironmentTeardownError` の未処理拒否が 2 件出た。
+ *   **テストは 114 件すべて緑なのに CI だけが赤**という、いちばん読みにくい形。
+ *
+ * ─ なぜ「throw」でも「エラー応答」でもなく「決まらない」なのか ─
+ *   throw すれば未処理拒否がまた出る。エラー応答を返せば呼び出し側が
+ *   console に書き、環境が畳まれた後のログ送信でまた落ちる。
+ *   尻尾に対して唯一安全なのは **何も起こさないこと** で、決まらない Promise は
+ *   それを表現できる唯一の形。テストプロセスが終われば一緒に消える。
+ *
+ * ─ 何が強くなるか ─
+ *   これは緩和ではなく **強化** である。従来は afterEach と次の beforeEach の
+ *   あいだに実ネットワークへ出られる窓が空いていた（ハーメティックの穴）。
+ *   その窓を閉じる。
+ */
+const BETWEEN_TESTS_FETCH = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+
 afterEach(() => {
   guard?.restore();
   guard = undefined;
+  globalThis.fetch = BETWEEN_TESTS_FETCH;
 });
