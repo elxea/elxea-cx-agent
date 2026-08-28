@@ -299,3 +299,53 @@ L0への追記は **awaitする**。呼ぶ側から見ると、1件につきSupa
 `cdp_stage2_parity()`（読み取り専用）が1回の呼び出しで新旧の食い違いを数え、既存の日次tick（`0 18 * * *` / `src/index.ts` の `runDailySync`）が1行のJSONログに落とす。**新規cronは作らない**（Cloudflareのcron triggerは5本上限を使い切っている）。
 
 一致した1日 = `linked_without_link` / `delivery_identity_missing` / `multi_line_components` が3つとも0（＝ `in_agreement: true`）。判定条件はSQL側が正本で、TS側は呼んでログに落とすだけ。
+
+---
+
+## 12. Stage 3 — 解析がL0を取りに来る口と、突合の是正
+
+**この節を足した理由** — §11までは「書く口」と「人の同一性を書く口」の契約で、Stage 3が足した**読み口**（解析側が日次でL0を取りに来る経路）の契約がどこにも無かった。スキーマの正本は `src/db/migrations/044_cdp_stage2_parity_map_agreement.sql` / `045_cdp_l0_analytics_readout.sql`、判断の正本は統合設計 §4-5 / §5 E8' / §6-1 Stage 3。ここは実装者が最初に読む索引に留める。
+
+### なぜ「取りに来る」形なのか
+
+L0は Supabase にあり、解析（`persons` / `purchases` と JOIN する場所）は Mac 上の SQLite にある。Workers からローカルファイルには書けないので、**書込は Supabase が受け、日次で SQLite が吸い上げる**（設計 §4-5）。押し込む側を作ると Worker が Mac の状態を知る必要が出るので、取りに来る側に倒した。
+
+Supabaseの service role key を Mac に配る形も選べたが採らなかった。あの鍵は**L0以外のすべての表を読み書きできる**全権鍵で、吸い上げに要るのは L0 の読み取りだけだからである。既存の共有秘密（`SYNC_API_SECRET` / `X-API-Key`）をそのまま使い、**新しい秘密を増やさない**（§2 と同じ方針）。
+
+### エンドポイント（3つとも GET・読み取り専用）
+
+| 口 | 返すもの | 使う側 |
+|---|---|---|
+| `GET /api/cdp/l0/events?after_seq=&limit=&day=` | L0の行（`event_seq` 昇順） | 吸い上げ本体 |
+| `GET /api/cdp/l0/daily-counts?from=&to=` | 日ごとの件数（JST） | E8' の突合 |
+| `GET /api/cdp/l0/subject-map?after_edge_seq=&limit=` | 主体（canonical）↔ Shopify顧客番号 | `persons.subject_id` の 1:1 |
+
+実装は `src/routes/cdp-export.ts`、SQL側は 045 の `cdp_l0_daily_counts` / `cdp_subject_shopify_map`。呼ぶ側は `elxea-cdp/l0-ingest.mjs`（同リポジトリではない）。
+
+**返さないもの（意図的）**: 生のLINE userId / LINE Loginのsub / `email_hash` / 会話本文。L0の`payload`は契約上PIIを持たない（§6）。主体の対応で返す生の鍵は Shopify顧客番号だけで、これは既にSQLiteの`persons.ec_customer_id`にある値＝**置き場が増えない**。生LINE userIdを吐けばE5（置き場は`delivery_identity`1表）が破れる。
+
+**`day` がある理由**: L0は追記専用だが**GDPR消去だけが例外**で行を消す（§10）。消去が上流で起きると水位より下の行が黙って減り、前にしか進まない水位では永久に拾えない。突合が食い違いを見つけた日はその日を丸ごと引き直して写しを合わせる — `day` は**「消えたこと」を写しに伝える唯一の経路**である。
+
+### 日の境界はJST（ずれると毎日食い違って見える）
+
+突合の軸は `recorded_at` を**JSTの日**に丸めた値。`occurred_at`（送り手の申告）で切ると遅れて届いた出来事が過去の日に入り、緑になった日の数が後から増える。JSTなのは吸い上げジョブがJSTで回るから。3か所が同じ境界であることが要件:
+
+- SQL側 … 045 の `(recorded_at AT TIME ZONE 'Asia/Tokyo')::date`
+- TS側 … `src/routes/cdp-export.ts` の `jstDayBounds`（`tests/unit/cdp-export.test.ts` が固定）
+- SQLite側 … `elxea-cdp` の `customer_events.recorded_day`
+
+### E8'（2つのL0が同じ数を持っているか）
+
+`cdp_l0_daily_counts` が Supabase 側の数を返し、吸い上げジョブが自分の数と突き合わせる。**閉じた日だけ**を見る（今日は取り込んだ直後にも新しい出来事が届くので、突合すると毎回食い違って見える）。食い違った日は引き直し、それでも直らなければジョブが非ゼロで終わる = 日次ジョブが赤くなる。「緑になるまで次の段へ行かない」の歯はここ。
+
+### 突合の是正（Stage 2 の QA 指摘 MID-1）
+
+`cdp_stage2_parity()` の `in_agreement` に `identity_map_without_link` が入っていなかった。★11 の断線は `user_identity_map` を引く読出（`getCrossChannelMessages` / `resolveUnifiedUserId`）で起きているので、これは「新旧一致」の**旧**の側に確かに含まれる台帳である。数は043の時点から返していたが判定に使われておらず、「観測はしているが合否に効かない」形だった。
+
+044で判定に足した。一致した1日は次の**4つ**がすべて0:
+
+`linked_without_link` / `identity_map_without_link` / `delivery_identity_missing` / `multi_line_components`
+
+あわせて `in_agreement_by`（どれで落ちたかの内訳）を返す。**過去の日も後から判定し直せる** — 数そのものは043の時点から日次ログに出ているので、観測をやり直す必要は無い。
+
+⚠ `user_identity_map` にStage 2より前の行が残っていると `in_agreement` は false のままになる。**これは誤検知ではない**: その人はいまも旧台帳経由でしか横断読み出しに乗っておらず、Stage 5で `user_identity_map` を落とす（T-6）と横断が黙って消える。0になるまで観測を閉じないのが正しい。

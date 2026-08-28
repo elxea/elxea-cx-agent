@@ -371,6 +371,26 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "rls", table: "delivery_identity" },
     ],
   },
+  /* 044: 「新旧一致」の判定に、★11 の読出が引く旧台帳（user_identity_map）を
+   *      入れ忘れていたのを是正する（Stage 2 の QA 指摘 MID-1）。
+   *
+   * specs が空なのは 042 と同じ理由で、この version が作るオブジェクトが無いから
+   * （cdp_stage2_parity の CREATE OR REPLACE のみ）。「関数が新しい定義になっているか」は
+   * 実在確認では語れないので no-sentinel に倒す。再適用は無害（関数定義の差し替えのみ）。
+   * ⚠ 043 は本番適用済みなので書き換えない。是正は必ず次の番号として足す。 */
+  "044_cdp_stage2_parity_map_agreement": { idempotent: true, specs: [] },
+  /* 045: 解析側（elxea-cdp / SQLite）が L0 を取りに来るための読み口
+   *      （CDP 統合 Stage 3）。E8' の日次件数と、persons.subject_id 1:1 の材料。
+   *
+   * 044 と違って sentinel がある（新しい関数を 2 つ作る version なので、実在確認で
+   * 「当たっているか」を言える）。 */
+  "045_cdp_l0_analytics_readout": {
+    idempotent: true,
+    specs: [
+      { kind: "function", func: "cdp_l0_daily_counts" },
+      { kind: "function", func: "cdp_subject_shopify_map" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
