@@ -17,6 +17,7 @@ import {
   getCrossChannelMessages,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
+import { resolveCanonicalUserRefs, lineSeed } from "../lib/cdp/canonical";
 import {
   handleTeaMenuFlow,
   fetchSellingTeas,
@@ -1065,8 +1066,25 @@ async function handleTextMessage(
   const supabase = createSupabaseClient(env);
 
   // Identity Resolver: unified_user_id を解決
-  const identity = await resolveUnifiedUserId(supabase, lineUserId, "line");
+  //
+  // ★11（C-1）の恒久解: 旧解決（user_identity_map）と canonical 解決
+  // （subject_links の連結成分）を **並べて** 引く。LIFF / Account Link で連携した人は
+  // customer_linkages にしか行が無いので旧解決では isLinked=false になり、
+  // 連携済みなのに LINE の会話が統合ビューに出なかった。
+  //
+  // ここで足しているのは「横断して読むか」の判断（|| canonical.linked）と、
+  // 「どの user_id を読むか」（canonical.userRefs）の 2 つだけ。canonical 側が
+  // 落ちても resolved:false で戻るので、そのときは旧解決だけの従来動作になる。
+  // 2 本の引きは独立なので直列にしない（応答時間を増やさない）。
+  const [identity, canonical] = await Promise.all([
+    resolveUnifiedUserId(supabase, lineUserId, "line"),
+    resolveCanonicalUserRefs(supabase, lineSeed(lineUserId)),
+  ]);
   const effectiveUserId = identity.unifiedUserId;
+  // LINE webhook の userId は LINE 署名で検証済み（src/lib/line.ts の署名検証を通っている）。
+  // link 自体もサーバ検証済みの経路でしか作られない（basis のホワイトリスト）ので、
+  // ここで横断を開くのは web 側の [SEC-3] ゲートを緩めることにはならない。
+  const crossChannel = identity.isLinked || canonical.linked;
 
   // メッセージ保存・履歴取得・Embedding 生成を全て並列実行
   // 保存は元の userId (lineUserId) で行い、取得は effectiveUserId で行う
@@ -1078,8 +1096,16 @@ async function handleTextMessage(
       role: "user",
       content: processedMessage,
     }),
-    identity.isLinked
-      ? getCrossChannelMessages(supabase, effectiveUserId)
+    crossChannel
+      ? getCrossChannelMessages(
+          supabase,
+          effectiveUserId,
+          undefined,
+          30,
+          3000,
+          undefined,
+          canonical.userRefs,
+        )
       : getRecentMessages(supabase, effectiveUserId, "line"),
     createEmbedding(processedMessage, env),
   ]);
@@ -1102,6 +1128,14 @@ async function handleTextMessage(
     "line",
     env,
     // A-1: 評価・入口の直読みは生の lineUserId をキーにする（product_ratings.user_ref と一致）。
+    //
+    // ⚠ ここは `crossChannel` ではなく `identity.isLinked` のまま（Stage 2 の意図的な範囲）。
+    //   runAgent の isLinked は「連携済み向けの個別最適を開くか」で、その読み出しは
+    //   effectiveUserId（= unified_user_id）をキーにする。canonical で横断読みが開いても
+    //   effectiveUserId は Stage 2 では変わらない（旧解決のまま）ので、ここだけ true に
+    //   すると存在しないキーでカルテを引きにいく。カルテ側を canonical に寄せるのは
+    //   Stage 3（persons.subject_id 1:1）。★11 が言っている断線は会話履歴のことなので、
+    //   Stage 2 で直すのは上の history だけでよい。
     { isLinked: identity.isLinked, ratingUserRef: lineUserId },
   );
 
@@ -1175,8 +1209,13 @@ async function handleImageMessage(
   const supabase = createSupabaseClient(env);
 
   // Identity Resolver: unified_user_id を解決
-  const identity = await resolveUnifiedUserId(supabase, lineUserId, "line");
+  // ★11（C-1）: テキストと同じく canonical 解決を並べて引く（上の handleTextMessage 参照）。
+  const [identity, canonical] = await Promise.all([
+    resolveUnifiedUserId(supabase, lineUserId, "line"),
+    resolveCanonicalUserRefs(supabase, lineSeed(lineUserId)),
+  ]);
   const effectiveUserId = identity.unifiedUserId;
+  const crossChannel = identity.isLinked || canonical.linked;
 
   // LINE Content API で画像をダウンロード
   const imageContent = await getImageContent(messageId, env);
@@ -1185,8 +1224,16 @@ async function handleImageMessage(
   const imagePrompt = "送られた画像の内容を確認してください。";
 
   // 履歴取得（画像メッセージの前の会話文脈を含める）
-  const history = identity.isLinked
-    ? await getCrossChannelMessages(supabase, effectiveUserId)
+  const history = crossChannel
+    ? await getCrossChannelMessages(
+        supabase,
+        effectiveUserId,
+        undefined,
+        30,
+        3000,
+        undefined,
+        canonical.userRefs,
+      )
     : await getRecentMessages(supabase, effectiveUserId, "line");
 
   // 空の Embedding（画像メッセージではナレッジ検索を行わないため）

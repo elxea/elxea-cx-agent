@@ -42,6 +42,79 @@ import {
 } from "../lib/account-link";
 import { getFirestoreEnv, mergeLineUserIntoShopify } from "../lib/firestore";
 import { logFlowEvent } from "../lib/flow-events";
+import { upsertDeliveryIdentity } from "../lib/customer-linkage";
+import {
+  appendSubjectLink,
+  logLinkAppend,
+  type LinkBasis,
+} from "../lib/cdp/subject-links";
+import { lineSeed, shopifySeed, webSeed } from "../lib/cdp/canonical";
+import { resolveOrIssueSubject } from "../lib/cdp/subjects";
+
+/**
+ * CDP 統合 Stage 2: 連携が成立した瞬間に「同じ人だ」を 1 行足す（設計 §6-1 Stage 2）。
+ *
+ * ─ 並走であることの意味 ─
+ *   既存の書き換え型の統合（mergeLineUserIntoShopify / mergeAnonymousSession）は
+ *   **そのまま残す**。ここで足すのは追記 1 行だけで、撤去は Stage 5（T-3/T-4/T-5）。
+ *
+ * ─ 応答を絶対に変えない ─
+ *   never throw。失敗しても連携そのものは既に成立しているので、HTTP の応答も
+ *   ステータスコードも変えない。失敗は 1 行ログに残り、日次の突合
+ *   （cdp_stage2_parity）が「連携済みなのに link が無い人」として数える。
+ *
+ * ─ J-4 ─
+ *   1 Shopify 顧客への 2 本目の LINE 束縛は DB のトリガが 23514 で落とす。
+ *   HTTP の 409 は従来どおり customer_linkages の UNIQUE 衝突（upsertCustomerLinkage）
+ *   から出る — つまり **409 を返す経路は増えても減ってもいない**（挙動の継承）。
+ *   ここは「link 台帳側にも J-4 違反を記録しない」ことだけを担う。
+ */
+async function recordLinkAndDelivery(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  params: {
+    route: string;
+    basis: LinkBasis;
+    lineUserId: string;
+    shopifyCustomerId: string;
+  },
+): Promise<void> {
+  const result = await appendSubjectLink(supabase, {
+    left: lineSeed(params.lineUserId),
+    right: shopifySeed(params.shopifyCustomerId),
+    basis: params.basis,
+    observedBy: params.route,
+  });
+  logLinkAppend(params.route, params.basis, result);
+
+  // 配信の宛先（生 LINE userId）を派生させる（E5 の行き先・Stage 2 では派生のみ）。
+  //
+  // link 側で LINE の主体は既に解決済み（left = lineSeed）なので、その値をそのまま使う。
+  // 引き直すと同じ鍵に対する往復が 1 回増えるだけで、得るものが無い。
+  // link を足せなかったときだけ引き直す（主体が出せない理由も一緒に残る）。
+  let lineSubjectId: string | null = result.ok ? result.leftSubjectId : null;
+  if (lineSubjectId === null) {
+    const subject = await resolveOrIssueSubject(supabase, lineSeed(params.lineUserId), params.route);
+    if (subject.subjectId === null) {
+      console.warn(
+        "[cdp/delivery-identity] subject unavailable:",
+        JSON.stringify({ route: params.route, reason: subject.reason }),
+      );
+      return;
+    }
+    lineSubjectId = subject.subjectId;
+  }
+  const derived = await upsertDeliveryIdentity(supabase, {
+    subjectId: lineSubjectId,
+    lineUserId: params.lineUserId,
+    source: params.route,
+  });
+  if (!derived.ok) {
+    console.warn(
+      "[cdp/delivery-identity] not derived:",
+      JSON.stringify({ route: params.route, reason: derived.error }),
+    );
+  }
+}
 
 /**
  * POST /api/identity/link-line
@@ -113,6 +186,18 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
         result.unifiedUserId,
       );
       mergedCount = mergeResult.mergedCount;
+
+      /* CDP 統合 Stage 2: 匿名セッションの昇格を追記 1 行にする（上と同じ理由）。
+         こちらの相手は LINE **Login** の sub であって Messaging の userId ではないので、
+         kind を line_login_uid にする（040 が 2 つを別 kind で並置しているのはこのため。
+         J-0 の突き合わせが終わっていなくても、edge が 1 本増えるだけで済む）。 */
+      const promotion = await appendSubjectLink(supabase, {
+        left: webSeed(session_id),
+        right: { kind: "line_login_uid", value: line_user_id },
+        basis: "anonymous_promotion",
+        observedBy: "identity.link-line",
+      });
+      logLinkAppend("identity.link-line", "anonymous_promotion", promotion);
     }
 
     return c.json({
@@ -212,6 +297,31 @@ export async function identityLinkHandler(c: Context<{ Bindings: Env }>) {
       sessionId,
       identity.unifiedUserId,
     );
+
+    /* CDP 統合 Stage 2: 匿名セッションの昇格を「同じ人だ」の追記 1 行にする。
+       上の mergeAnonymousSession（会話行の user_id を書き換えて移す形）は残置し、
+       撤去は Stage 5 / T-5。ここで足す link があれば、会話を移さなくても
+       canonical 解決が両方の会話を 1 人として読める。
+       shopify 側の鍵は **数値へ正規化した値**を使う（user_identity_map には
+       gid:// 形が入りうるが、edges の値は 1 つに揃えないと連結成分が繋がらない）。 */
+    const normalizedShopify = normalizeShopifyCustomerId(shopify_customer_id);
+    if ("error" in normalizedShopify) {
+      // ここに来るのは gid:// 形でも数値でもない値。上の validateShopifyCustomerId は
+      // 通っているので通常は起きないが、起きたら link を足さずに理由だけ残す
+      // （応答は従来どおり 200 のまま — Stage 2 は応答を変えない）。
+      console.warn(
+        "[identity/link] shopify_customer_id not normalizable; subject link skipped:",
+        normalizedShopify.error,
+      );
+    } else {
+      const promotion = await appendSubjectLink(supabase, {
+        left: webSeed(sessionId),
+        right: shopifySeed(normalizedShopify.numericId),
+        basis: "anonymous_promotion",
+        observedBy: "identity.link",
+      });
+      logLinkAppend("identity.link", "anonymous_promotion", promotion);
+    }
 
     return c.json({
       success: true,
@@ -394,12 +504,24 @@ export async function identityLinkLiffHandler(c: Context<{ Bindings: Env }>) {
       result.shopifyCustomerId,
     );
 
+    /* CDP 統合 Stage 2: 「同じ人だ」を subject_links に 1 行足す（並走・追記のみ）。
+       既存の書き換え型の統合（上の carryoverMerge）はそのまま残す。撤去は Stage 5。
+       応答を遅らせないよう waitUntil に載せる。never throw。 */
+    const linkAppend = recordLinkAndDelivery(supabase, {
+      route: "identity.link-liff",
+      basis: "liff_id_token",
+      lineUserId: result.lineUserId,
+      shopifyCustomerId: result.shopifyCustomerId,
+    });
+
     try {
       c.executionCtx.waitUntil(linkCompletedLog);
       c.executionCtx.waitUntil(carryoverMerge);
+      c.executionCtx.waitUntil(linkAppend);
     } catch {
       await linkCompletedLog;
       await carryoverMerge;
+      await linkAppend;
     }
 
     return c.json({

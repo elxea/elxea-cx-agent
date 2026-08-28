@@ -345,6 +345,32 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
    * 実在確認では語れないので、no-sentinel（台帳登録せず --apply が冪等に再適用）に倒す。
    * 再適用は無害（関数定義の差し替えのみ・表とデータに触れない）。 */
   "042_cdp_erasure_subject_scope": { idempotent: true, specs: [] },
+  /* 043: 「同じ人だ」を書き換えではなく追記 1 行にする（CDP 統合 Stage 2）。
+   *      subject_links / delivery_identity と、連結成分を解く読み口。
+   *
+   * 042 と違って sentinel がある（新しい表と関数を作る version なので、
+   * 実在確認で「当たっているか」を言える）。
+   * ⚠ この version は roji_person_key_map / roji_resolve_identity /
+   *   roji_erasure_residue の CREATE OR REPLACE も含むが、それらは 042 が作った
+   *   ものの差し替えなので sentinel には使えない（実在しても 042 版かもしれない）。
+   *   よって sentinel は 043 が **新しく作るもの** だけに絞る。 */
+  "043_cdp_subject_links": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "subject_links" },
+      { kind: "table", table: "delivery_identity" },
+      { kind: "index", index: "subject_links_uniq" },
+      { kind: "index", index: "delivery_identity_line_uid" },
+      { kind: "function", func: "cdp_subject_component" },
+      { kind: "function", func: "cdp_canonical_subject" },
+      { kind: "function", func: "cdp_canonical_identifiers" },
+      { kind: "function", func: "cdp_subject_links_j4_guard" },
+      { kind: "function", func: "cdp_reject_retired_link" },
+      { kind: "function", func: "cdp_stage2_parity" },
+      { kind: "rls", table: "subject_links" },
+      { kind: "rls", table: "delivery_identity" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

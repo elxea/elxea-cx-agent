@@ -32,9 +32,9 @@
       "why": "同じ人の記録が 3 つの棚に分かれて置かれている。連携済みなら users/{shopifyId}、Web からの LINE 連携人格なら users/line:{lineUserId}、未連携 LINE なら lineUsers/{lineUserId}。棚が分かれているぶんだけ「消し残し」と「カルテの分裂」が起きる (消去側 roji-erasure.ts も同じ 3 種を個別に組み立てて回っている)。目標 1 (棚のキーを subject_id 1 種にする)。撤去は Stage 5 / T-8・T-9。再流入を止めるのは E3 (事実行は subject_id NOT NULL + FK) であり、この ratchet は進捗を固定する側。"
     },
     "identity-ledger-tables": {
-      "max": 3,
-      "source": "src/** の .from(\"…\") と `…_TABLE = \"…\"` のうち、テーブル名に identity または linkage を含むものの種類数 (現在 user_identity_map / customer_linkages / identity_edges)",
-      "why": "「この LINE とこの顧客は同じ人だ」を書く台帳が何冊あるかを数える。⚠ Stage 1 で 2 → 3 に増やした。増えた 1 冊は identity_edges で、これは **3 冊目ではなく、1 冊に寄せるための行き先** である (追記専用・書き換えなし)。Stage 5 で user_identity_map (T-6) と customer_linkages の台帳機能 (T-7) が落ちて 1 になる。増やしたことをここに申告として残すのが本表の役目なので、黙って max だけ上げていない。⚠ 数え方も同時に直した: 以前は `.from(\"…\")` の字面しか見ておらず、表名を定数に置けば ratchet の外側に台帳を増やせる穴があった (identity_edges がまさにその形だった)。実害は「増えていないように見える」ことなので、定数宣言側も同じパターンで拾うようにした。目標 1 (identity_edges 1 冊)。再流入を止めるのは E4 (edges の UPDATE/DELETE を Postgres トリガで ABORT)。"
+      "max": 5,
+      "source": "src/** の .from(\"…\") と `…_TABLE = \"…\"` のうち、テーブル名に identity / linkage / subject_links を含むものの種類数 (現在 user_identity_map / customer_linkages / identity_edges / subject_links / delivery_identity)",
+      "why": "「この LINE とこの顧客は同じ人だ」を書く台帳が何冊あるかを数える。⚠ Stage 1 で 2 → 3 に増やした (identity_edges)。⚠ Stage 2 で 3 → 5 に増やした。増えた 2 冊の内訳と、それが「3 冊目・4 冊目」ではない理由: (1) subject_links は「同じ人だと判定した」判断の追記先で、identity_edges と対で **1 冊に寄せるための行き先**である (両方とも追記専用・書き換え無し)。(2) delivery_identity は台帳ではなく **生 LINE userId の置き場** (E5 の行き先)。この表の数え方が名前ベースなので同じ数に入ってしまうが、責務は別である (設計 §6-3 の最終形では「人の同一性」と「生 LINE userId」は別の行)。⚠ 数え方も同時に直した: 名前に identity / linkage を含む表しか拾えておらず、subject_links が数の外に落ちていた (Stage 1 で塞いだ「定数経由で増やせる穴」と同種)。数え方を広げるのは常により多く捕まえる方向なので緩めることにはならない。目標 3 (identity_edges + subject_links + delivery_identity)。Stage 5 で user_identity_map (T-6) と customer_linkages の台帳機能 (T-7) が落ちる。再流入を止めるのは E4 (edges / links の UPDATE・DELETE を Postgres トリガで ABORT)。"
     },
     "identity-merge-functions": {
       "max": 2,
@@ -49,7 +49,7 @@
     "raw-identity-key-legacy": {
       "max": 10,
       "source": "src/** (src/db/migrations は除く) のうち、生の LINE userId を行に載せる形 (`line_user_id:`) を持つモジュール数",
-      "why": "生の LINE userId は「その人に話しかけられる鍵」であり、置き場が散らばるほど消去も差し替えも届きにくくなる (E5)。数えるのは参照ではなく保管 — where 句で引くだけの読み手まで数えると、読み手を消さないと数が減らないことになり、E5 が意図する「置き場を 1 箇所に寄せる」とは別の圧力になるため。目標 1 (delivery_identity 1 表のみが生値を持つ)。撤去は Stage 5 / T-7。⚠ 統合設計 §6-4 の表は同じ ratchet を「5 → 1」と書いているが、あちらは設計時点の粗い見積り (置き場の概数) であり、本値 10 は上記の数え方による実測である。単位が違うので進捗として比較しないこと — 締めていく基準は常にこの実測値の側。"
+      "why": "生の LINE userId は「その人に話しかけられる鍵」であり、置き場が散らばるほど消去も差し替えも届きにくくなる (E5)。数えるのは参照ではなく保管 — where 句で引くだけの読み手まで数えると、読み手を消さないと数が減らないことになり、E5 が意図する「置き場を 1 箇所に寄せる」とは別の圧力になるため。目標 1 (delivery_identity 1 表のみが生値を持つ)。撤去は Stage 5 / T-7。⚠ 統合設計 §6-4 の表は同じ ratchet を「5 → 1」と書いているが、あちらは設計時点の粗い見積り (置き場の概数) であり、本値 10 は上記の数え方による実測である。単位が違うので進捗として比較しないこと — 締めていく基準は常にこの実測値の側。 ⚠ Stage 2 で 10 のまま据え置き。delivery_identity への書き込み (upsertDeliveryIdentity) は **新しいモジュールを作らず** src/lib/customer-linkage.ts に置いた — この表は customer_linkages の役割を引き継ぐ先 (T-7) であり、引き継ぎ先の 書き込みを引き継がれる側と同じファイルに置けば「生 ID の置き場」が 1 つ増えずに済む。別ファイルに新設すると、寄せるどころか 11 になる。"
     }
   }
 }

@@ -25,6 +25,7 @@ import { runKnowledgeSync } from "./sync/knowledge";
 import { runBatchMetafieldSync } from "./sync/shopify-metafield";
 import { runKarteReconcile } from "./lib/karte-reconcile";
 import { runLinkageReconcile } from "./lib/linkage-reconcile";
+import { runStage2Parity } from "./lib/cdp/stage2-parity";
 import {
   runDelivery,
   runOnDemandDelivery,
@@ -1006,6 +1007,22 @@ export default {
           .catch((err) => {
             console.warn(
               "[linkage-reconcile] scheduled run failed:",
+              err instanceof Error ? err.message : err,
+            );
+          }),
+        // CDP 統合 Stage 2 の並走突合（読み取り専用・何も直さない）。
+        //   Stage 2 の完了条件「新旧解決の一致率 100% を 5 営業日観測」の材料を
+        //   毎日 1 行残す。**新規 cron は作らない** — Cloudflare の cron trigger は
+        //   アカウント上限 5 本を使い切っている（wrangler.toml のコメント参照）ので、
+        //   既存の日次同期に同居させる。外部送信ゼロ・never throw。
+        //   一致していない日は in_agreement=false が 1 行に残る（探しにいかなくても済む形）。
+        runStage2Parity(env)
+          .then((result) => {
+            console.log("Scheduled CDP stage2 parity completed:", JSON.stringify(result));
+          })
+          .catch((err) => {
+            console.warn(
+              "[cdp/stage2-parity] scheduled run failed:",
               err instanceof Error ? err.message : err,
             );
           }),

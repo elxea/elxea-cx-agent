@@ -31,6 +31,7 @@ import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from ".
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
 import { behaviorEventType } from "../lib/cdp/event-vocabulary";
 import { recordCustomerEvent } from "../lib/cdp/events-gateway";
+import { resolveCanonicalUserRefs, webSeed } from "../lib/cdp/canonical";
 import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
@@ -174,6 +175,17 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     );
     identityIsLinked = crossChannelAllowed;
 
+    // CDP 統合 Stage 2: canonical 解決（subject_links の連結成分）で「同じ人の鍵」を引く。
+    //
+    // ⚠ [SEC-3] のゲート（crossChannelAllowed）は **一切緩めない**。canonical が
+    //   できるのは「既に横断してよいと決まった人について、読む user_id を増やす」ことだけで、
+    //   横断してよいかの判断には関与しない。LINE 側と非対称なのは意図的で、web の
+    //   session_id は「知っているだけ」の弱い証明だから（crossChannelHistoryAllowed の
+    //   コメント参照）。この 1 行を消せば Stage 2 以前の読み出しに戻る。
+    const canonical = crossChannelAllowed
+      ? await resolveCanonicalUserRefs(supabase, webSeed(sessionId))
+      : { userRefs: [] as string[] };
+
     console.log("[web] step=pre-parallel");
     const [, fetchedHistory, emb] = await withTimeout(
       Promise.all([
@@ -184,7 +196,15 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
           content: processedMessage,
         }),
         crossChannelAllowed
-          ? getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId)
+          ? getCrossChannelMessages(
+              supabase,
+              effectiveUserId,
+              undefined,
+              30,
+              3000,
+              sessionId,
+              canonical.userRefs,
+            )
           : getRecentMessages(supabase, effectiveUserId, "web"),
         createEmbedding(processedMessage, c.env),
       ]),
@@ -722,8 +742,21 @@ export async function webChatImageHandler(c: Context<{ Bindings: Env }>) {
     });
 
     // 履歴取得
+    // Stage 2: [SEC-3] ゲートはそのまま。横断してよいと決まった人だけ、読む user_id を
+    //   canonical 解決の分だけ増やす（テキスト側と同じ扱い）。
+    const canonical = crossChannelAllowed
+      ? await resolveCanonicalUserRefs(supabase, webSeed(sessionId as string))
+      : { userRefs: [] as string[] };
     const history = crossChannelAllowed
-      ? await getCrossChannelMessages(supabase, effectiveUserId, undefined, 30, 3000, sessionId as string)
+      ? await getCrossChannelMessages(
+          supabase,
+          effectiveUserId,
+          undefined,
+          30,
+          3000,
+          sessionId as string,
+          canonical.userRefs,
+        )
       : await getRecentMessages(supabase, effectiveUserId, "web");
 
     // 空の Embedding（画像メッセージではナレッジ検索をスキップ）
