@@ -18,13 +18,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
 import { extractPreferences } from "./preference-extractor";
 import {
-  getFirestoreEnv,
+  tryGetFirestoreEnv,
   getCustomerProfile,
   updateTasteProfile,
   updateCustomerProfile,
   getLineUserProfile,
   updateLineUserTasteProfile,
-  type FirestoreEnv,
 } from "./firestore";
 import { syncAfterProfileUpdate } from "../sync/shopify-metafield";
 import type { Channel } from "./supabase";
@@ -50,14 +49,10 @@ export async function runPreferencePipeline(
   supabase: SupabaseClient,
 ): Promise<void> {
   try {
-    // Firestore 設定チェック
-    let fsEnv: FirestoreEnv;
-    try {
-      fsEnv = getFirestoreEnv(env);
-    } catch {
-      // Firebase 未設定 — スキップ
-      return;
-    }
+    // Firestore 設定チェック（T-12: 黙ってスキップしない）。
+    // 本番では入口ゲート（E6' assert）が未設定を弾くのでここは通らない。
+    const fsEnv = tryGetFirestoreEnv(env, "preference-pipeline.conversation");
+    if (!fsEnv) return;
 
     // 嗜好シグナルを抽出
     const signals = await extractPreferences(conversationHistory, env);
@@ -148,14 +143,14 @@ export async function runPurchasePreferencePipeline(
   env: Env,
 ): Promise<void> {
   try {
-    // Firestore 設定チェック
-    let fsEnv: FirestoreEnv;
-    try {
-      fsEnv = getFirestoreEnv(env);
-    } catch {
-      // Firebase 未設定 — スキップ
-      return;
-    }
+    // Firestore 設定チェック（T-12: 黙ってスキップしない）。
+    //
+    // ⚠ この関数は CDP 統合後の **persona の唯一の書き手** である
+    //   （web-app 注文 webhook 側の persona 書込は Stage 0 / T-1 で撤去した）。
+    //   ここが黙ってスキップすると、購入という最も強いシグナルがどこにも
+    //   記録されないまま「成功」になる。理由を必ずログに出す。
+    const fsEnv = tryGetFirestoreEnv(env, "preference-pipeline.purchase");
+    if (!fsEnv) return;
 
     // 全商品のタグからシグナルを生成
     const allProductTags = lineItems.map((item) => item.productTags);

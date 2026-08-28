@@ -46,7 +46,7 @@ import {
   type SurveyKarteDeps,
 } from "./roji-survey-record";
 import {
-  getFirestoreEnv,
+  tryGetFirestoreEnv,
   getCustomerProfile,
   updateCustomerProfile,
   getLineUserProfile,
@@ -95,12 +95,10 @@ export async function loadSurveyState(
 }
 
 function karteDeps(env: Env): SurveyKarteDeps | null {
-  let fsEnv;
-  try {
-    fsEnv = getFirestoreEnv(env);
-  } catch {
-    return null; // Firebase 未設定 → カルテは書けない（出来事の記録は続ける）。
-  }
+  // T-12: Firebase 未設定 → カルテは書けない（出来事の記録は続ける）。
+  // 黙って null を返さず、理由を 1 行出してから返す。
+  const fsEnv = tryGetFirestoreEnv(env, "roji-survey-handler.karteDeps");
+  if (!fsEnv) return null;
   const supabase = createSupabaseClient(env);
   return {
     resolveShopifyId: (id) => resolveCallerShopifyCustomerId(id, "line", supabase),

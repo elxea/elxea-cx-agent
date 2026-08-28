@@ -57,6 +57,14 @@ export default defineConfig({
           //   assert-not-prod の assertSendDisabled の対象外。実送信はゼロのまま。
           //   OFF/未設定側の挙動は flow17 の「停止スイッチ」describe が env を一時上書きして検証する。
           ROJI_SURVEY_ENABLED: "true",
+          // E6'（Firebase 未設定なら起動拒否）の申告。
+          //   ハーメティックは Firebase 資格情報を持たない（実 Firestore を叩かないため
+          //   持ってはいけない）。既定のままだと入口ゲートが全リクエストを 503 にして
+          //   全動線が落ちるので、「未設定で動かす」を明示的に宣言する。
+          //   本番（DELIVERY_TARGET_ENV="prod"）ではこの宣言は無視される仕様なので、
+          //   ここに置いても本番の fail-closed は緩まない（上の DELIVERY_TARGET_ENV="test" も参照）。
+          //   正本: src/lib/firestore.ts の assertFirestoreConfigured。
+          FIRESTORE_UNCONFIGURED_ACK: "true",
         },
       },
     }),
