@@ -43,7 +43,10 @@ export type SubjectSkipReason =
   | "identifier_kind_not_resolvable"
   | "edge_lookup_failed"
   | "subject_insert_failed"
-  | "edge_insert_failed";
+  | "edge_insert_failed"
+  // 追加は通ったかもしれないが、勝者を確定させる引き直しが落ちた。
+  // edge_insert_failed（＝入っていない）とは意味が違うので別の理由にする（T-12）。
+  | "subject_settle_failed";
 
 /**
  * 鍵から主体を引き、無ければ発行する。
@@ -128,7 +131,9 @@ export async function resolveOrIssueSubject(
     // 自分が入れたものと一致していれば発行者は自分。違えば合流した側。
     return { subjectId: settled.subjectId, issued: settled.subjectId === subjectId };
   }
-  return { subjectId: null, issued: false, reason: "edge_insert_failed" };
+  // ここに来るのは「引き直しそのものが落ちた」か「入れたはずの行が見えない」場合。
+  // 入っていないと断定できないので edge_insert_failed とは言わない（T-12）。
+  return { subjectId: null, issued: false, reason: "subject_settle_failed" };
 }
 
 async function lookupEdge(
