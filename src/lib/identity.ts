@@ -134,9 +134,19 @@ export async function mergeAnonymousSession(
 ): Promise<{ mergedCount: number }> {
   try {
     // 1. anonymous session の会話を identified user に移行
+    //
+    //    `{ count: "exact" }` を渡さないと supabase-js は count を返さない (undefined)。
+    //    従来はこれが無かったため下の `count ?? 0` が常に 0 になり、実際には数十件を
+    //    移行していても戻り値 mergedCount は 0、ログの「Merged N conversations」も
+    //    出ない状態だった。統合が動いているのか一件も拾えていないのかを、呼び出し側も
+    //    ログの読み手も区別できない = 失敗が誰にも届かない (憲章 R1)。
+    //
+    //    注: この関数自体は CDP 統合 Stage 5 で `subject_links` への追記 1 行に置き換えて
+    //    消える予定 (撤去一覧 T-5)。本修正は「消えるまでの間、嘘の 0 を返さない」ための
+    //    暫定であり、恒久解ではない。
     const { count, error: convError } = await supabase
       .from("conversations")
-      .update({ user_id: identifiedUserId })
+      .update({ user_id: identifiedUserId }, { count: "exact" })
       .eq("user_id", anonymousSessionId);
 
     if (convError) {
