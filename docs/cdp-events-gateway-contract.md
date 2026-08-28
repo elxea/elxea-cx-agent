@@ -240,3 +240,62 @@ L0への追記は **awaitする**。呼ぶ側から見ると、1件につきSupa
 **例外は1つだけ**: GDPR消去経路が `set_config('app.erasure_context', 'on', true)`（= `SET LOCAL`）を立てたとき。トランザクションを抜ければ自動的に外れるので、呼び出し側が立てっぱなしにすることはできない。
 
 `subjects` だけは `retired_at` のUPDATEを追加で許す（同じ例外表の下で）。`subject_id` / `created_at` はどの経路からも不変。
+
+---
+
+## 11. Stage 2 — 連携を追記1行にし、横断読み出しをcanonical経由にする
+
+**この節を足した理由** — §1〜§10はStage 1（出来事を書く口）の契約で、Stage 2が足した「人の同一性を書く口」の契約がどこにも無かった。スキーマの正本は `src/db/migrations/043_cdp_subject_links.sql`、判断の正本は統合設計 §3-1 / §4 C-1（★11）/ §6-1 Stage 2。ここは実装者が最初に読む索引に留め、二重に書かない。
+
+### 何が変わったか（1行で）
+
+「同じ人だ」と分かったときに **既存行を書き換えず `subject_links` に1行足す**。読み出しは、その追記の連結成分を解いた結果を **旧joinに足して** 引く。
+
+### 連携の3経路とbasis
+
+`basis` は `subject_links` のCHECKと `src/lib/cdp/subject-links.ts` の `LINK_BASES` が1対1。**ここは閉じている**（識別子の種類と同じ理由 — 増えるのは設計判断であって観測の揺らぎではない）。
+
+| 経路 | 呼び出し元 | basis |
+|---|---|---|
+| LIFF連携 | `src/routes/identity.ts` `identityLinkLiffHandler` | `liff_id_token` |
+| LINE純正Account Link | `src/lib/account-link.ts` `handleAccountLinkEvent` | `line_account_link` |
+| 匿名セッションの昇格 | `src/routes/identity.ts` `identityLinkHandler` / `identityLinkLineHandler` | `anonymous_promotion` |
+
+**SEC-1**: `email_equality` はこの語彙に**無い**。DBのCHECKにもTSのunionにも入っていないので、メール等値で人を結ぶ経路は型として存在しない。ここに値を足すことは「その根拠で人を結んでよい」という決定そのものである。
+
+**J-4**（1 Shopify顧客に複数LINEを束縛しない）: DBトリガ `cdp_subject_links_j4_guard` が、その link を足すと1つの連結成分にLINEトークIDが2本入る場合に `23514` で落とす。**HTTPの409は従来どおり `customer_linkages` のUNIQUE衝突から出る**（409を返す経路は増えても減ってもいない）。J-4が覆ったらこのトリガを落とすだけでよい（スキーマは触っていない）。
+
+### 読み出し（★11の恒久解）
+
+```
+読む user_id の集合
+  = 旧join（unified_user_id + user_identity_map の3列 + 元のsession_id）
+  + canonical解決（subject_links の連結成分から引いた鍵）
+```
+
+- 組み立ての正本は `src/lib/supabase.ts` の `unionCrossChannelUserIds`（純関数）。**足すだけで旧の要素を1つも削らない。**
+- canonical側は `cdp_canonical_identifiers(kind, value)` RPC（`src/lib/cdp/canonical.ts` が呼ぶ）。落ちても・主体が未発行でも `resolved: false` で戻り、呼び出し側は旧joinだけで読む＝**Stage 2以前とまったく同じ挙動**になる。これが「フォールバック付き読出」の実体で、`extraUserIds` を渡すのをやめれば元に戻る。
+- `email_hash` では引けないし、返り値にも入らない（SEC-1。RPC側にも枝が無い）。
+
+**LINEとWebで扱いが非対称なのは意図的**:
+
+- LINE側（`src/routes/line.ts`）は `identity.isLinked || canonical.linked` で横断を開く。webhookのuserIdはLINE署名で検証済みで、linkもサーバ検証済みの経路でしか作られないため。
+- Web側（`src/routes/web.ts`）は **[SEC-3] のゲート（`crossChannelHistoryAllowed`）を一切緩めない**。canonicalができるのは「既に横断してよいと決まった人について読むuser_idを増やす」ことだけ。web の session_id は「知っているだけ」の弱い証明だから。
+
+**runAgentに渡す `isLinked` はStage 2では変えない**。あれは「連携済み向けの個別最適を開くか」で、その読み出しは `effectiveUserId` をキーにする。Stage 2では `effectiveUserId` は旧解決のままなので、ここだけtrueにすると存在しないキーでカルテを引きにいく。カルテ側をcanonicalに寄せるのはStage 3。
+
+### materializeを作り置かない（設計 §9 への回答）
+
+設計は緩和策として「materialize + 連携完了時の即時再解決」を挙げているが、**作り置きは作らなかった**。毎回連結成分を辿る形なら (a) 古くなる窓が構造的に存在せず（＝「即時再解決」は常に成立）、(b) 読み手のいないデータ（E7）を作らずに済む。本番連携0件・連結成分は数個という規模では毎回辿るほうが安い。規模の見張りは日次突合が `max_component_size` を毎日出すことで行い、速さが問題になったら読み口の形を変えずに作り置きを足せる。
+
+### 消去（GDPR）
+
+`subject_links` と `delivery_identity` は **列挙で自動的に消去の対象になる**。043が037/042の「人を指す列の名前の語彙」に `subject_a` / `subject_b` を足したため、どちら側に居ても消える（列ごとに1回ずつ消す既存のloopがそのまま効く）。
+
+加えて `roji_resolve_identity` を **linkの連結成分まで広げた**。広げないと「LINEで消してくれ」と言われたときにlinkの向こう側の主体が残る（台帳経由でも届くことは多いが、その台帳はStage 5で消える）。検算 `roji_erasure_residue` の孤児検査にも `subject_links` / `delivery_identity` を足した。
+
+### 観測（5営業日の突合）
+
+`cdp_stage2_parity()`（読み取り専用）が1回の呼び出しで新旧の食い違いを数え、既存の日次tick（`0 18 * * *` / `src/index.ts` の `runDailySync`）が1行のJSONログに落とす。**新規cronは作らない**（Cloudflareのcron triggerは5本上限を使い切っている）。
+
+一致した1日 = `linked_without_link` / `delivery_identity_missing` / `multi_line_components` が3つとも0（＝ `in_agreement: true`）。判定条件はSQL側が正本で、TS側は呼んでログに落とすだけ。

@@ -154,11 +154,17 @@ const COUNTERS = {
      ⚠ 2026-08-29: 表名を定数に置いたモジュール (`XXX_TABLE = "…"`) を数え落としていた。
         `.from("…")` の字面しか見ていなかったため、定数経由で使えば ratchet の外側に
         台帳を増やせてしまう — 数え方の穴であって「増えていない」ではない。
-        定数宣言側も同じ 1 つのパターンで拾う。 */
+        定数宣言側も同じ 1 つのパターンで拾う。
+
+     ⚠ 2026-08-29 (Stage 2): 名前に identity / linkage を含む表しか拾えていなかった。
+        Stage 2 で足した `subject_links` は **まさにこの表が数えたい台帳**
+        (「この LINE とこの顧客は同じ人だ」を書く場所) なのに、名前にどちらの語も
+        含まないので数の外に落ちていた。上と同じ種類の穴なので同じように塞ぐ
+        — 数え方を広げるのは常に「より多く捕まえる」方向なので、緩めることにはならない。 */
   'identity-ledger-tables': () =>
     countDistinctMatches(
       'identity-ledger-tables',
-      /(?:\.from\("|_TABLE\s*=\s*")([a-z_]*(?:identity|linkage)[a-z_]*)"/g,
+      /(?:\.from\("|_TABLE\s*=\s*")([a-z_]*(?:identity|linkage|subject_links)[a-z_]*)"/g,
     ),
 
   /* 人に紐づく Firestore の棚の入口の種類数 (T-8 / T-9)。

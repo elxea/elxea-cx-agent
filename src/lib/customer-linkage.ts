@@ -544,3 +544,55 @@ export function resolveUnlinkTargets(
   }
   return { ok: true, targets: [requested] };
 }
+
+/* ===========================================================================
+ * delivery_identity — 生 LINE userId の置き場を 1 つに寄せる先（E5 / T-7）
+ *
+ * ここに置く理由:
+ *   E5 が言う「生の LINE userId は delivery_identity 1 表のみが持つ」の最終形へ
+ *   向かう第一歩で、**この表は customer_linkages の役割を引き継ぐ側**（T-7）である。
+ *   役割を引き継ぐ先の書き込みを、引き継がれる側と同じモジュールに置くことで、
+ *   「生 ID の置き場」がこのファイル 1 つに閉じたまま Stage 5 へ渡せる
+ *   （別ファイルに新設すると、寄せるどころか置き場が 1 つ増える）。
+ *
+ * Stage 2 での位置づけ:
+ *   派生（customer_linkages と link から作り直せる写し）。追記専用ではない
+ *   （連携先の付け替えで更新される）。読み手は日次の突合
+ *   （cdp_stage2_parity / src/lib/cdp/stage2-parity.ts）で、配信側が読むのは Stage 4。
+ * =========================================================================== */
+
+export const DELIVERY_IDENTITY_TABLE = "delivery_identity";
+
+export type DeliveryIdentityResult =
+  | { ok: true; updated: boolean }
+  | { ok: false; error: string };
+
+/**
+ * 主体 1 つに対する配信の宛先（生 LINE userId）を派生させる。**決して throw しない。**
+ *
+ * 冪等（onConflict=subject_id）。連携が成立したときに呼ぶ。
+ */
+export async function upsertDeliveryIdentity(
+  supabase: SupabaseClient,
+  params: { subjectId: string; lineUserId: string; source: string },
+): Promise<DeliveryIdentityResult> {
+  if (!MESSAGING_USER_ID_RE.test(params.lineUserId)) {
+    // 形が違うものを配信の宛先として保存しない（別プロバイダ ID の混入を入口で止める）。
+    return { ok: false, error: "line_user_id has unexpected format" };
+  }
+  try {
+    const { error } = await supabase.from(DELIVERY_IDENTITY_TABLE).upsert(
+      {
+        subject_id: params.subjectId,
+        line_user_id: params.lineUserId,
+        source: params.source,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "subject_id" },
+    );
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, updated: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}

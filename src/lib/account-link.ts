@@ -42,7 +42,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
 import type { LineResponder } from "./line";
 import { createSupabaseClient } from "./supabase";
-import { upsertCustomerLinkage } from "./customer-linkage";
+import { upsertCustomerLinkage, upsertDeliveryIdentity } from "./customer-linkage";
+import { appendSubjectLink, logLinkAppend } from "./cdp/subject-links";
+import { lineSeed, shopifySeed } from "./cdp/canonical";
+import { resolveOrIssueSubject } from "./cdp/subjects";
 import { notifyLinkageEstablished } from "./linkage-notify";
 import { logFlowEvent } from "./flow-events";
 import { getFirestoreEnv, mergeLineUserIntoShopify } from "./firestore";
@@ -525,6 +528,51 @@ export async function handleAccountLinkEvent(
 
   // 好みの引き継ぎ（never throw）。
   await carryover(env, lineUserId, result.shopifyCustomerId);
+
+  /* CDP 統合 Stage 2: 「同じ人だ」を subject_links に 1 行足す（並走・追記のみ）。
+   *
+   * この経路は LINE → cx-agent の webhook だけで完結し web-app を通らないため、
+   * ★11（連携済みなのに LINE の会話が統合ビューに出ない）が最も出やすい経路だった。
+   * link が 1 行立てば canonical 解決が両方の会話を 1 人として読む。
+   *
+   * never throw。失敗しても連携は既に成立しており、お客さまへの完了メッセージも
+   * 送信済みなので、ここで投げると webhook ループを壊すだけになる。
+   * 失敗は 1 行ログに残り、日次の突合（cdp_stage2_parity）が拾う。 */
+  const linkResult = await appendSubjectLink(supabase, {
+    left: lineSeed(lineUserId),
+    right: shopifySeed(result.shopifyCustomerId),
+    basis: "line_account_link",
+    observedBy: "account-link",
+  });
+  logLinkAppend("account-link", "line_account_link", linkResult);
+
+  // 配信の宛先（生 LINE userId）を派生させる（E5 の行き先・Stage 2 では派生のみ）。
+  // link 側で解決済みの主体をそのまま使う（引き直すと往復が 1 回増えるだけ）。
+  let lineSubjectId: string | null = linkResult.ok ? linkResult.leftSubjectId : null;
+  if (lineSubjectId === null) {
+    const subject = await resolveOrIssueSubject(supabase, lineSeed(lineUserId), "account-link");
+    if (subject.subjectId === null) {
+      console.warn(
+        "[cdp/delivery-identity] subject unavailable:",
+        JSON.stringify({ route: "account-link", reason: subject.reason }),
+      );
+    } else {
+      lineSubjectId = subject.subjectId;
+    }
+  }
+  if (lineSubjectId !== null) {
+    const derived = await upsertDeliveryIdentity(supabase, {
+      subjectId: lineSubjectId,
+      lineUserId,
+      source: "account-link",
+    });
+    if (!derived.ok) {
+      console.warn(
+        "[cdp/delivery-identity] not derived:",
+        JSON.stringify({ route: "account-link", reason: derived.error }),
+      );
+    }
+  }
 
   console.log(`[account-link] linked messaging user ${lineUserId} via account link`);
   return "linked";

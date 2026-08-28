@@ -120,14 +120,73 @@ export async function getRecentMessages(
   return trimmedStart;
 }
 
+/** 旧 join（user_identity_map）の 1 行。null 許容の 3 列だけを見る。 */
+export type LegacyIdentityRow = {
+  line_user_id?: string | null;
+  web_session_id?: string | null;
+  shopify_customer_id?: string | null;
+};
+
+/**
+ * 「同じ人の会話」を引くための user_id の集合を組み立てる（純関数）。
+ *
+ * ここが Stage 2 の「フォールバック付き読出」の実体である。
+ *
+ *   旧 join の分（unifiedUserId + user_identity_map の 3 列 + 元の sessionId）
+ * + canonical 解決の分（subject_links の連結成分から引いた鍵）
+ *
+ * **足すだけで、旧 join の結果は 1 つも削らない。** だから
+ * `extraUserIds` を渡さなければ Stage 2 以前と 1 件も違わない結果になり、
+ * canonical 側が落ちても（resolveCanonicalUserRefs が空配列を返す）
+ * 履歴が減ることは無い。
+ *
+ * DB にも HTTP にも触れないので、新旧の差分だけを単体で固定できる
+ * （tests/db/cdp-stage2-canonical.db.test.ts が合成データでこれを回す）。
+ */
+export function unionCrossChannelUserIds(input: {
+  unifiedUserId: string;
+  legacy?: LegacyIdentityRow;
+  originalSessionId?: string;
+  extraUserIds?: string[];
+}): string[] {
+  const userIds: string[] = [];
+  const add = (v: unknown) => {
+    if (typeof v === "string" && v !== "" && !userIds.includes(v)) userIds.push(v);
+  };
+
+  // unified_user_id 自身 + 紐づいた各チャネルの user_id（旧 join）
+  add(input.unifiedUserId);
+  add(input.legacy?.line_user_id);
+  add(input.legacy?.web_session_id);
+  add(input.legacy?.shopify_customer_id);
+  // 元の sessionId（Web メッセージは sessionId で保存されるため）
+  add(input.originalSessionId);
+  // canonical 解決の分（★11 の断線が塞がるのはこの足し算による）
+  for (const ref of input.extraUserIds ?? []) add(ref);
+
+  return userIds;
+}
+
 /**
  * クロスチャネル会話履歴を取得（unified_user_id 対応）。
  *
  * unified_user_id に紐づく全ての user_id（元の LINE userId、session_id 等）の
  * 会話を統合して取得する。紐付け情報は user_identity_map テーブルから取得。
  *
+ * ## canonical 解決の分を足す（CDP 統合 Stage 2 / ★11 の恒久解）
+ *
+ * `extraUserIds` は `subject_links` の連結成分から引いた「同じ人の鍵」
+ * （`src/lib/cdp/canonical.ts`）。**旧 join の結果に足すだけ**で、置き換えない。
+ *
+ * - 足すだけなので、旧 join が拾えていた会話を 1 件も落とさない。
+ * - `extraUserIds` を渡さなければ Stage 2 以前とまったく同じ結果になる
+ *   （＝ 呼び出し側で引数を外せば元に戻る。これが「フォールバック付き読出」の実体）。
+ * - LIFF / Account Link で連携した人は `customer_linkages` にしか行が無く、
+ *   ここが引く `user_identity_map` には現れない。★11 の断線が塞がるのはこの足し算による。
+ *
  * @param unifiedUserId - 解決済みの unified_user_id
  * @param channelFilter - 特定チャネルのみ取得する場合に指定（省略時は全チャネル）
+ * @param extraUserIds - canonical 解決で分かった同じ人の user_id（旧 join に足す）
  */
 export async function getCrossChannelMessages(
   supabase: SupabaseClient,
@@ -137,6 +196,7 @@ export async function getCrossChannelMessages(
   maxChars = 3000,
   /** 元の sessionId（Web メッセージは sessionId で保存されるため、検索対象に含める） */
   originalSessionId?: string,
+  extraUserIds?: string[],
 ): Promise<{ role: "user" | "assistant"; content: string; channel: string }[]> {
   // user_identity_map から紐づいた全 user_id を取得
   const { data: identityData } = await supabase
@@ -145,21 +205,12 @@ export async function getCrossChannelMessages(
     .eq("unified_user_id", unifiedUserId)
     .single();
 
-  // unified_user_id 自身 + 紐づいた各チャネルの user_id を収集
-  const userIds: string[] = [unifiedUserId];
-  if (identityData?.line_user_id && !userIds.includes(identityData.line_user_id)) {
-    userIds.push(identityData.line_user_id);
-  }
-  if (identityData?.web_session_id && !userIds.includes(identityData.web_session_id)) {
-    userIds.push(identityData.web_session_id);
-  }
-  if (identityData?.shopify_customer_id && !userIds.includes(identityData.shopify_customer_id)) {
-    userIds.push(identityData.shopify_customer_id);
-  }
-  // 元の sessionId を含める（Web メッセージは sessionId で保存されるため）
-  if (originalSessionId && !userIds.includes(originalSessionId)) {
-    userIds.push(originalSessionId);
-  }
+  const userIds = unionCrossChannelUserIds({
+    unifiedUserId,
+    legacy: identityData ?? undefined,
+    originalSessionId,
+    extraUserIds,
+  });
 
   let query = supabase
     .from("conversations")

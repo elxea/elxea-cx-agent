@@ -50,6 +50,7 @@ const CDP_MIGRATIONS = [
   "040_cdp_subjects_and_edges.sql",
   "041_cdp_customer_events.sql",
   "042_cdp_erasure_subject_scope.sql",
+  "043_cdp_subject_links.sql",
 ];
 
 /** 本テストが入れる値の目印。実データと衝突しない形にする。 */
@@ -386,15 +387,332 @@ async function runAppendOnlyChecks(client: pg.Client) {
     assertTrue(rows[0].v === null || rows[0].v === "", `関数を抜けても例外表が残っている: ${JSON.stringify(rows[0].v)}`);
   }, client);
 
-  console.log("\n=== Stage 1 の範囲確認 ===");
+  // =========================================================================
+  // Stage 2: subject_links — Stage 1 のこのファイルが「できたら足すこと」と
+  //          書いていた両方向テストを、約束どおりここに足す（2026-08-29）。
+  // =========================================================================
+  console.log("\n=== Stage 2: subject_links の型（basis ホワイトリスト / 無向の正規化）===");
 
-  await it("subject_links はまだ存在しない（Stage 2 の範囲）", async () => {
+  const SUBJECT_L = fakeUlid("stage2-line-x");
+  const SUBJECT_S = fakeUlid("stage2-shop-x");
+  const SUBJECT_W = fakeUlid("stage2-web-x");
+  const LINE_UID_2 = `U${"a".repeat(31)}1`;
+  const LINE_UID_3 = `U${"b".repeat(31)}2`;
+  const SHOP_ID = `9${TAG.replace(/\D/g, "").slice(-8)}`;
+  const WEB_SID = `sess-${TAG}`;
+
+  await it("subject_links が存在し、Stage 2 の 3 主体と鍵を用意できる", async () => {
     const { rows } = await client.query(`SELECT to_regclass('public.subject_links') AS reg`);
-    // 存在するようになったら、上と同じ両方向テストをこのファイルに足すこと。
-    assertTrue(
-      rows[0].reg === null,
-      "subject_links ができている。E4 の両方向テストをこのファイルに追加すること",
+    assertTrue(rows[0].reg !== null, "subject_links が無い（043 が当たっていない）");
+
+    await client.query(`INSERT INTO subjects (subject_id) VALUES ($1), ($2), ($3)`, [
+      SUBJECT_L,
+      SUBJECT_S,
+      SUBJECT_W,
+    ]);
+    await client.query(
+      `INSERT INTO identity_edges (subject_id, identifier_kind, identifier_value, observed_by) VALUES
+         ($1, 'line_messaging_uid',  $2, 'db-test'),
+         ($3, 'shopify_customer_id', $4, 'db-test'),
+         ($5, 'web_session_id',      $6, 'db-test')`,
+      [SUBJECT_L, LINE_UID_2, SUBJECT_S, SHOP_ID, SUBJECT_W, WEB_SID],
     );
+  }, client);
+
+  await it("SEC-1: basis='email_equality' は型で拒否される（メール等値で人を結べない）", async () => {
+    await expectReject(
+      client,
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'email_equality', 'db-test')`,
+      [SUBJECT_L < SUBJECT_S ? SUBJECT_L : SUBJECT_S, SUBJECT_L < SUBJECT_S ? SUBJECT_S : SUBJECT_L],
+      "email_equality による link",
+      { code: "23514" },
+    );
+  }, client);
+
+  await it("向きは持てない（subject_a < subject_b に正規化されていないと入らない）", async () => {
+    const [lo, hi] = SUBJECT_L < SUBJECT_S ? [SUBJECT_L, SUBJECT_S] : [SUBJECT_S, SUBJECT_L];
+    await expectReject(
+      client,
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'liff_id_token', 'db-test')`,
+      [hi, lo],
+      "逆向きの link",
+      { code: "23514" },
+    );
+    // 自分自身に結ぶ行も同じ CHECK で入らない。
+    await expectReject(
+      client,
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $1, 'liff_id_token', 'db-test')`,
+      [SUBJECT_L],
+      "自己ループ",
+      { code: "23514" },
+    );
+  }, client);
+
+  await it("同じ 2 主体・同じ根拠の 2 行目は 23505（ON CONFLICT DO NOTHING なら増えない）", async () => {
+    const [lo, hi] = SUBJECT_L < SUBJECT_S ? [SUBJECT_L, SUBJECT_S] : [SUBJECT_S, SUBJECT_L];
+    await client.query(
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'liff_id_token', 'db-test')`,
+      [lo, hi],
+    );
+    await expectReject(
+      client,
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'liff_id_token', 'db-test-again')`,
+      [lo, hi],
+      "同じ判断の 2 行目",
+      { code: "23505" },
+    );
+    await client.query(
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'liff_id_token', 'db-test-again')
+       ON CONFLICT (subject_a, subject_b, basis) DO NOTHING`,
+      [lo, hi],
+    );
+    const { rows } = await client.query(
+      `SELECT count(*)::int AS n FROM subject_links WHERE subject_a = $1 AND subject_b = $2`,
+      [lo, hi],
+    );
+    assertEqual(rows[0].n, 1, "link が 2 本になっている");
+  }, client);
+
+  console.log("\n=== Stage 2 / E4-A: 消去経路 **以外** からは書き換えられない ===");
+
+  await it("subject_links の UPDATE は拒否される", async () => {
+    await expectReject(
+      client,
+      `UPDATE subject_links SET observed_by = 'tampered' WHERE subject_a = $1 OR subject_b = $1`,
+      [SUBJECT_L],
+      "link の UPDATE",
+      { messageIncludes: "append-only violation" },
+    );
+  }, client);
+
+  await it("subject_links の DELETE は拒否される", async () => {
+    await expectReject(
+      client,
+      `DELETE FROM subject_links WHERE subject_a = $1 OR subject_b = $1`,
+      [SUBJECT_L],
+      "link の DELETE",
+      { messageIncludes: "append-only violation" },
+    );
+  }, client);
+
+  console.log("\n=== Stage 2 / E4-B: 消去経路（app.erasure_context）からは通る ===");
+
+  await it("app.erasure_context を立てると subject_links を UPDATE / DELETE できる", async () => {
+    await client.query("SAVEPOINT sp_link_erasure");
+    await client.query(`SELECT set_config('app.erasure_context', 'on', true)`);
+
+    const upd = await client.query(
+      `UPDATE subject_links SET observed_by = 'erasure-path' WHERE subject_a = $1 OR subject_b = $1`,
+      [SUBJECT_L],
+    );
+    assertEqual(upd.rowCount, 1, "消去経路からの UPDATE が通っていない");
+
+    const del = await client.query(
+      `DELETE FROM subject_links WHERE subject_a = $1 OR subject_b = $1`,
+      [SUBJECT_L],
+    );
+    assertEqual(del.rowCount, 1, "消去経路からの DELETE が通っていない");
+
+    await client.query("ROLLBACK TO SAVEPOINT sp_link_erasure");
+    await client.query("RELEASE SAVEPOINT sp_link_erasure");
+  }, client);
+
+  await it("例外は巻き戻すと閉じる（link 側でも立てっぱなしにできない）", async () => {
+    await expectReject(
+      client,
+      `DELETE FROM subject_links WHERE subject_a = $1 OR subject_b = $1`,
+      [SUBJECT_L],
+      "巻き戻した後の link DELETE",
+      { messageIncludes: "append-only violation" },
+    );
+  }, client);
+
+  console.log("\n=== Stage 2: J-4（1 Shopify 顧客に LINE は 1 本まで）===");
+
+  await it("同じ人に 2 本目の LINE を結ぼうとすると J-4 で落ちる", async () => {
+    const SUBJECT_L2 = fakeUlid("stage2-line-y");
+    await client.query(`INSERT INTO subjects (subject_id) VALUES ($1)`, [SUBJECT_L2]);
+    await client.query(
+      `INSERT INTO identity_edges (subject_id, identifier_kind, identifier_value, observed_by)
+       VALUES ($1, 'line_messaging_uid', $2, 'db-test')`,
+      [SUBJECT_L2, LINE_UID_3],
+    );
+    const [lo, hi] = SUBJECT_L2 < SUBJECT_S ? [SUBJECT_L2, SUBJECT_S] : [SUBJECT_S, SUBJECT_L2];
+    await expectReject(
+      client,
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'line_account_link', 'db-test')`,
+      [lo, hi],
+      "2 本目の LINE 束縛",
+      { messageIncludes: "J-4 violation" },
+    );
+  }, client);
+
+  console.log("\n=== Stage 2: canonical 解決（★11 の恒久解が実際に繋がること）===");
+
+  await it("link 前は自分の鍵しか返らない（連携していない人の挙動は変わらない）", async () => {
+    const { rows } = await client.query(
+      `SELECT cdp_canonical_identifiers('web_session_id', $1) AS r`,
+      [WEB_SID],
+    );
+    const r = rows[0].r as { found: boolean; link_count: number; identifier_values: string[] };
+    assertTrue(r.found, "主体が引けていない");
+    assertEqual(r.link_count, 0, "link が無いのに link_count が 0 でない");
+    assertEqual(r.identifier_values.length, 1, "自分以外の鍵まで返っている");
+    assertEqual(r.identifier_values[0], WEB_SID, "自分の鍵が返っていない");
+  }, client);
+
+  await it("link を足すと LINE の鍵から Shopify・Web の鍵まで届く（★11 の断線が塞がる）", async () => {
+    // web を shopify に結ぶ（匿名昇格）。LINE ↔ Shopify は既に上のテストで結ばれている。
+    const [lo, hi] = SUBJECT_W < SUBJECT_S ? [SUBJECT_W, SUBJECT_S] : [SUBJECT_S, SUBJECT_W];
+    await client.query(
+      `INSERT INTO subject_links (subject_a, subject_b, basis, observed_by)
+       VALUES ($1, $2, 'anonymous_promotion', 'db-test')`,
+      [lo, hi],
+    );
+
+    const { rows } = await client.query(
+      `SELECT cdp_canonical_identifiers('line_messaging_uid', $1) AS r`,
+      [LINE_UID_2],
+    );
+    const r = rows[0].r as {
+      found: boolean;
+      link_count: number;
+      member_count: number;
+      identifier_values: string[];
+    };
+    assertTrue(r.found, "LINE の鍵から主体が引けていない");
+    assertEqual(r.member_count, 3, "連結成分が 3 主体になっていない");
+    assertTrue(r.link_count >= 2, `link_count が足りない: ${r.link_count}`);
+    for (const expected of [LINE_UID_2, SHOP_ID, WEB_SID]) {
+      assertTrue(
+        r.identifier_values.includes(expected),
+        `canonical 解決が ${expected === LINE_UID_2 ? "LINE" : expected === SHOP_ID ? "Shopify" : "Web"} の鍵に届いていない: ${JSON.stringify(r.identifier_values)}`,
+      );
+    }
+  }, client);
+
+  await it("SEC-1: email_hash では引けない・返らない", async () => {
+    await client.query(
+      `INSERT INTO identity_edges (subject_id, identifier_kind, identifier_value, observed_by)
+       VALUES ($1, 'email_hash', $2, 'db-test')`,
+      [SUBJECT_S, `hash-${TAG}`],
+    );
+    const byHash = await client.query(
+      `SELECT cdp_canonical_identifiers('email_hash', $1) AS r`,
+      [`hash-${TAG}`],
+    );
+    assertEqual(
+      (byHash.rows[0].r as { found: boolean }).found,
+      false,
+      "email_hash で人が引けてしまっている",
+    );
+    const fromLine = await client.query(
+      `SELECT cdp_canonical_identifiers('line_messaging_uid', $1) AS r`,
+      [LINE_UID_2],
+    );
+    const values = (fromLine.rows[0].r as { identifier_values: string[] }).identifier_values;
+    assertTrue(
+      !values.includes(`hash-${TAG}`),
+      `email_hash が返り値に混ざっている: ${JSON.stringify(values)}`,
+    );
+  }, client);
+
+  console.log("\n=== Stage 2 / GDPR: 消去の列挙に subject_links と delivery_identity が載る ===");
+
+  await it("消去の列挙（roji_person_key_map）が subject_a / subject_b / delivery_identity を含む", async () => {
+    const { rows } = await client.query(
+      `SELECT tbl, col, key_kind FROM roji_person_key_map()
+        WHERE tbl IN ('subject_links', 'delivery_identity') ORDER BY tbl, col`,
+    );
+    const got = rows.map((r) => `${r.tbl}.${r.col}:${r.key_kind}`);
+    for (const expected of [
+      "subject_links.subject_a:subject",
+      "subject_links.subject_b:subject",
+      "delivery_identity.subject_id:subject",
+      "delivery_identity.line_user_id:line",
+    ]) {
+      assertTrue(got.includes(expected), `列挙に ${expected} が無い: ${JSON.stringify(got)}`);
+    }
+  }, client);
+
+  await it("roji_erase_person が link の向こう側まで消し、residue が clean になる", async () => {
+    await client.query("SAVEPOINT sp_stage2_erase");
+
+    // 配信の宛先の派生と、両主体の出来事を 1 件ずつ置く。
+    await client.query(
+      `INSERT INTO delivery_identity (subject_id, line_user_id, source)
+       VALUES ($1, $2, 'db-test')`,
+      [SUBJECT_L, LINE_UID_2],
+    );
+    await client.query(
+      `INSERT INTO customer_events (subject_id, event_type, channel, schema_ok, occurred_at, source, idempotency_key)
+       VALUES ($1, 'behavior.view_content', 'line', true, now(), 'db-test', $2),
+              ($3, 'purchase.order_paid',   'shopify', true, now(), 'db-test', $4)`,
+      [SUBJECT_L, `s2-line:${TAG}`, SUBJECT_S, `s2-shop:${TAG}`],
+    );
+
+    // LINE の鍵だけで消す。link を辿らなければ Shopify 側の主体が残る。
+    const res = await client.query(`SELECT roji_erase_person('line', $1) AS r`, [LINE_UID_2]);
+    const r = res.rows[0].r as {
+      subjects_retired: number;
+      identity: { subject_ids: string[] };
+      deleted: Record<string, number>;
+    };
+
+    for (const s of [SUBJECT_L, SUBJECT_S, SUBJECT_W]) {
+      assertTrue(
+        r.identity.subject_ids.includes(s),
+        `解決が link の向こう側に届いていない（${s} が無い）: ${JSON.stringify(r.identity.subject_ids)}`,
+      );
+    }
+    assertEqual(r.subjects_retired, 3, "3 主体すべてが retire されていない");
+    assertTrue((r.deleted.subject_links ?? 0) >= 2, "subject_links が消えていない");
+    assertEqual(r.deleted.delivery_identity ?? 0, 1, "delivery_identity が消えていない");
+    assertEqual(r.deleted.customer_events ?? 0, 2, "customer_events が両方消えていない");
+
+    // 検算: 孤児（retire 済みの主体を指す行）が 0 で clean。
+    const residue = await client.query(
+      `SELECT roji_erasure_residue(ARRAY[$1], ARRAY[$2], ARRAY[$3]) AS r`,
+      [SHOP_ID, LINE_UID_2, WEB_SID],
+    );
+    const res2 = residue.rows[0].r as {
+      clean: boolean;
+      remaining: Record<string, number>;
+    };
+    assertEqual(
+      res2.remaining.cdp_retired_subject_orphans ?? -1,
+      0,
+      `孤児が残っている: ${JSON.stringify(res2.remaining)}`,
+    );
+    assertTrue(res2.clean, `residue が clean でない: ${JSON.stringify(res2.remaining)}`);
+
+    await client.query("ROLLBACK TO SAVEPOINT sp_stage2_erase");
+    await client.query("RELEASE SAVEPOINT sp_stage2_erase");
+  }, client);
+
+  await it("cdp_stage2_parity が呼べて、判定キーが揃っている（日次 tick の材料）", async () => {
+    const { rows } = await client.query(`SELECT cdp_stage2_parity() AS r`);
+    const r = rows[0].r as Record<string, unknown>;
+    for (const key of [
+      "linked_ledger_rows",
+      "linked_without_link",
+      "delivery_identity_missing",
+      "multi_line_components",
+      "max_component_size",
+      "links_total",
+      "in_agreement",
+    ]) {
+      assertTrue(key in r, `突合の返り値に ${key} が無い: ${JSON.stringify(Object.keys(r))}`);
+    }
+    // J-4 のトリガが効いている限り、この数は常に 0。
+    assertEqual(r.multi_line_components as number, 0, "J-4 が破れている成分がある");
   }, client);
 
   await client.query("ROLLBACK");
