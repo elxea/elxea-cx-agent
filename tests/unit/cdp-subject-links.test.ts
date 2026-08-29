@@ -11,8 +11,11 @@
  * ここは「実 DB を用意しなくても壊れたら分かる」層。
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   LINK_BASES,
+  BACKFILL_ONLY_BASES,
   orderPair,
   classifyLinkError,
 } from "../../src/lib/cdp/subject-links";
@@ -48,16 +51,55 @@ function assertDeep(a: unknown, b: unknown, label: string) {
 
 console.log("\n=== SEC-1: 根拠の語彙に email_equality が無い ===");
 
-it("LINK_BASES は 3 値で、email_equality を含まない", () => {
+it("LINK_BASES は 4 値で、email_equality を含まない", () => {
   assertDeep(
     [...LINK_BASES],
-    ["liff_id_token", "line_account_link", "anonymous_promotion"],
+    [
+      "liff_id_token",
+      "line_account_link",
+      "anonymous_promotion",
+      // 047: Stage 2 より前の連携の写し取り専用。「前の正本がそう言っている」以上を主張しない。
+      "legacy_ledger_backfill",
+    ],
     "根拠の語彙が変わっている",
   );
   assertTrue(
     !(LINK_BASES as readonly string[]).includes("email_equality"),
     "email_equality が語彙に入っている（SEC-1 を取り消すことになる）",
   );
+});
+
+console.log("\n=== 047: 写し取り専用の根拠がランタイム経路に漏れていない ===");
+
+it("BACKFILL_ONLY_BASES は legacy_ledger_backfill だけを持つ", () => {
+  assertDeep(
+    [...BACKFILL_ONLY_BASES],
+    ["legacy_ledger_backfill"],
+    "写し取り専用の語彙が変わっている",
+  );
+});
+
+/**
+ * 型では防げない（どちらも LinkBasis）ので、実ファイルの字面で固定する。
+ *
+ * ランタイムの連携経路（LIFF / Account Link / 匿名昇格）が写し取り専用の根拠を
+ * 使い始めると、「新しく検証した」と「昔そう記録されていた」の区別が消える。
+ */
+it("ランタイムの連携経路は写し取り専用の根拠を使わない", () => {
+  const runtimeFiles = [
+    "src/routes/identity.ts",
+    "src/lib/account-link.ts",
+    "src/lib/cdp/canonical.ts",
+  ];
+  for (const rel of runtimeFiles) {
+    const text = readFileSync(join(process.cwd(), rel), "utf8");
+    for (const basis of BACKFILL_ONLY_BASES) {
+      assertTrue(
+        !text.includes(`"${basis}"`),
+        `${rel} が写し取り専用の根拠 ${basis} を使っている`,
+      );
+    }
+  }
 });
 
 console.log("\n=== 無向辺の正規化 ===");
