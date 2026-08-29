@@ -409,6 +409,19 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "function", func: "cdp_segment_line_targets" },
     ],
   },
+
+  /* 047: Stage 2 より前に成立していた連携を写し取れるようにする（CDP 統合 Stage 2）。
+   *      basis の語彙に legacy_ledger_backfill を足し、写せる/写せないを数える
+   *      読み取り専用の関数を置く。**行は 1 つも書かない**（写し取り本体は
+   *      scripts/cdp-stage2-backfill.ts が Stage 2 の正規経路と同じ関数で行う）。
+   *
+   * sentinel は新しく作る関数 1 つだけ。CHECK 制約の中身は
+   * information_schema の実在確認では「値が増えたか」まで見られないので使わない
+   * （実在するだけでは 043 版か 047 版か言えない — 043 の roji_* と同じ理由）。 */
+  "047_cdp_stage2_legacy_backfill": {
+    idempotent: true,
+    specs: [{ kind: "function", func: "cdp_stage2_backfill_candidates" }],
+  },
 };
 
 // ---------------------------------------------------------------------------

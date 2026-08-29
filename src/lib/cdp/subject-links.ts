@@ -30,7 +30,7 @@ import { resolveOrIssueSubject, type ObservedIdentifier } from "./subjects";
 export const SUBJECT_LINKS_TABLE = "subject_links";
 
 /**
- * 「なぜ同じ人だと判定したか」。**migration 043 の CHECK と 1 対 1**。
+ * 「なぜ同じ人だと判定したか」。**migration 043 → 047 の CHECK と 1 対 1**。
  *
  * ⚠ `email_equality` はここに無い（SEC-1）。足すことは「メールが同じなら同じ人と
  *   みなしてよい」という決定であり、identity.ts の [SEC-1] が実例を書いている
@@ -43,9 +43,31 @@ export const LINK_BASES = [
   "line_account_link",
   /** 匿名 web セッションの昇格: 認証済みの本人が「このセッションは自分だ」と申告した経路。 */
   "anonymous_promotion",
+  /**
+   * Stage 2 より前に旧台帳 customer_linkages（039 で SoT と確定）で成立していた連携の
+   * 写し取り（migration 047）。**「前の正本がそう言っている」以上の根拠を主張しない。**
+   *
+   * ⚠ ランタイムの route はこの値を使わない。書き手は
+   *   `scripts/cdp-stage2-backfill.ts` の 1 本だけ（`BACKFILL_ONLY_BASES` が
+   *   その約束を型と実行時の両方で持つ）。既存の liff_id_token / line_account_link に
+   *   混ぜないのは、後から「この人はどう結ばれたのか」を監査する読み手を誤らせないため。
+   */
+  "legacy_ledger_backfill",
 ] as const;
 
 export type LinkBasis = (typeof LINK_BASES)[number];
+
+/**
+ * ランタイムの連携経路が使ってはいけない basis。
+ *
+ * 写し取り専用の語彙を route が使い始めると、「新しく検証した」と「昔そう記録されて
+ * いた」の区別が消える。型では防げない（どちらも `LinkBasis`）ので、名前で 1 か所に
+ * 集めて、テスト（tests/unit/cdp-subject-links.test.ts）がランタイム経路の
+ * 呼び出しを機械的に固定する。
+ */
+export const BACKFILL_ONLY_BASES: ReadonlySet<LinkBasis> = new Set<LinkBasis>([
+  "legacy_ledger_backfill",
+]);
 
 /** link を足せなかった理由。**理由なしで戻る枝を作らない**（T-12）。 */
 export type LinkSkipReason =
