@@ -274,8 +274,30 @@ async function countLinks(client: pg.Client): Promise<number> {
   return r.rows[0].n as number;
 }
 
+/**
+ * tx の外での 047 の実在状態。
+ *
+ * ⚠ 「ROLLBACK 後に 047 の関数が **無い**」を期待にしないこと。初版はそう書いたが、
+ *   047 を本当に適用した環境（staging に適用したあと / 将来の本番）では 13 件すべて
+ *   PASS した後に恒久 fail する。この検査が見たいのは「047 が未適用か既適用か」では
+ *   なく「**このテストが環境を変えていないか**」なので、実行前の状態を控えて
+ *   実行後と突き合わせる。
+ */
+async function backfillFnExists(client: pg.Client): Promise<boolean> {
+  const r = await client.query(
+    `SELECT to_regproc('public.cdp_stage2_backfill_candidates') IS NOT NULL AS present`,
+  );
+  return r.rows[0].present === true;
+}
+
 async function run(client: pg.Client) {
   const rows = buildLegacy();
+
+  // tx を開ける前の実在状態を控える（後で「変わっていない」ことを言うため）。
+  const presentBefore = await backfillFnExists(client);
+  console.log(
+    `[env] tx 開始前の 047 の適用状態: ${presentBefore ? "適用済み" : "未適用"}（この状態を変えないことを最後に確認する）`,
+  );
 
   console.log("\n=== migration 040 / 041 / 042 / 043 / 044 / 047 を tx 内で適用（最後に ROLLBACK）===");
   await client.query("BEGIN");
@@ -458,10 +480,18 @@ async function run(client: pg.Client) {
   await client.query("ROLLBACK");
   console.log("  [OK] ROLLBACK 完了（合成データも migration も DB に残っていない）");
 
-  // ROLLBACK が効いたことを確かめる（tx の外で 047 の関数が消えていること）。
-  const gone = await client.query(`SELECT to_regproc('public.cdp_stage2_backfill_candidates') IS NULL AS gone`);
-  assertTrue(gone.rows[0].gone === true, "ROLLBACK 後も 047 の関数が残っている");
-  console.log("  [OK] tx 外で 047 の関数は存在しない（staging を汚していない）");
+  // ROLLBACK が効いたことを確かめる ＝ **実行前の状態に戻っている**こと。
+  // 047 が未適用の環境では「無いまま」、適用済みの環境では「在るまま」が正解で、
+  // どちらでも「このテストが環境を変えていない」ことを同じ 1 本で言える。
+  const presentAfter = await backfillFnExists(client);
+  assertEqual(
+    presentAfter,
+    presentBefore,
+    `ROLLBACK 後に 047 の適用状態が変わっている（前=${presentBefore} 後=${presentAfter}）`,
+  );
+  console.log(
+    `  [OK] tx 外の 047 の適用状態は実行前と同じ（${presentAfter ? "適用済み" : "未適用"}）— このテストは環境を変えていない`,
+  );
 }
 
 async function main() {
