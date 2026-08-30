@@ -17,7 +17,7 @@ import {
   getCrossChannelMessages,
 } from "../lib/supabase";
 import { resolveUnifiedUserId } from "../lib/identity";
-import { resolveCanonicalUserRefs, lineSeed } from "../lib/cdp/canonical";
+import { resolveCanonicalFromSeeds, lineSeed, lineLoginSeed } from "../lib/cdp/canonical";
 import {
   handleTeaMenuFlow,
   fetchSellingTeas,
@@ -1076,9 +1076,14 @@ async function handleTextMessage(
   // 「どの user_id を読むか」（canonical.userRefs）の 2 つだけ。canonical 側が
   // 落ちても resolved:false で戻るので、そのときは旧解決だけの従来動作になる。
   // 2 本の引きは独立なので直列にしない（応答時間を増やさない）。
+  //
+  // canonical の種は **2 本** 渡す（2026-08-30 の本番切断の手当て）。同じ LINE の人でも
+  // 「トークの userId（line_messaging_uid）」と「LINE ログインの sub（line_login_uid）」は
+  // 別 kind で並置されているため、片方だけで引くと Web で LINE ログインした人の
+  // セッションが連結成分から漏れる。理由は lib/cdp/canonical.ts の lineLoginSeed 参照。
   const [identity, canonical] = await Promise.all([
     resolveUnifiedUserId(supabase, lineUserId, "line"),
-    resolveCanonicalUserRefs(supabase, lineSeed(lineUserId)),
+    resolveCanonicalFromSeeds(supabase, [lineSeed(lineUserId), lineLoginSeed(lineUserId)]),
   ]);
   const effectiveUserId = identity.unifiedUserId;
   // LINE webhook の userId は LINE 署名で検証済み（src/lib/line.ts の署名検証を通っている）。
@@ -1212,9 +1217,10 @@ async function handleImageMessage(
 
   // Identity Resolver: unified_user_id を解決
   // ★11（C-1）: テキストと同じく canonical 解決を並べて引く（上の handleTextMessage 参照）。
+  // 種を 2 本渡す理由も同じ（lib/cdp/canonical.ts の lineLoginSeed）。
   const [identity, canonical] = await Promise.all([
     resolveUnifiedUserId(supabase, lineUserId, "line"),
-    resolveCanonicalUserRefs(supabase, lineSeed(lineUserId)),
+    resolveCanonicalFromSeeds(supabase, [lineSeed(lineUserId), lineLoginSeed(lineUserId)]),
   ]);
   const effectiveUserId = identity.unifiedUserId;
   const crossChannel = identity.isLinked || canonical.linked;

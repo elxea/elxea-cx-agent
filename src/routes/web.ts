@@ -18,6 +18,8 @@ import {
 import {
   validateSessionId,
   validateShopifyCustomerId,
+  validateLineMessagingUserId,
+  normalizeShopifyCustomerId,
   checkRateLimit,
   getClientIp,
 } from "../lib/web-auth";
@@ -31,7 +33,16 @@ import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from ".
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
 import { behaviorEventType } from "../lib/cdp/event-vocabulary";
 import { recordCustomerEvent } from "../lib/cdp/events-gateway";
-import { resolveCanonicalUserRefs, webSeed } from "../lib/cdp/canonical";
+import {
+  resolveCanonicalUserRefs,
+  resolveCanonicalFromSeeds,
+  webSeed,
+  shopifySeed,
+  lineSeed,
+  lineLoginSeed,
+} from "../lib/cdp/canonical";
+import { appendSubjectLink, logLinkAppend } from "../lib/cdp/subject-links";
+import type { ObservedIdentifier } from "../lib/cdp/subjects";
 import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
@@ -90,9 +101,93 @@ export function effectiveEventUserId(
  *   横断を開くのに、web 側はここで `&& trusted` を要求する。LINE の userId は webhook 署名で
  *   真正性が検証済みなのに対し、web の session_id は「知っているだけ」の弱い証明だから。
  *   この非対称を消す（web も canonical だけで開く）と SEC-3 の fail-closed が壊れる。
+ *
+ * ★11 の web 版（2026-08-30）: 第 1 引数には旧台帳の `identity.isLinked` **だけ**ではなく
+ *   `identity.isLinked || canonical.linked` を渡す。LIFF / Account Link で連携した人は
+ *   旧台帳（user_identity_map.line_user_id）に行が無いので、旧台帳だけを見ていると
+ *   **ログイン済みでも横断が永久に開かない**。緩めていないのは `trusted`（信頼経路の
+ *   要求）であり、SEC-3 の fail-closed はそのまま残っている。
  */
 export function crossChannelHistoryAllowed(isLinked: boolean, trusted: boolean): boolean {
   return isLinked && trusted;
+}
+
+/** 信頼経路で確定している「この人の鍵」たち。canonical 解決と link 追記の両方が使う。 */
+export interface VerifiedWebIdentity {
+  /** ブラウザの会話 ID（UUID）。 */
+  sessionId: string;
+  /** サーバ検証済み Shopify 顧客 ID（GID / 数値のどちらでも可）。未ログインなら undefined。 */
+  shopifyCustomerId?: string;
+  /** サーバ検証済み LINE userId。LINE ログインで入っている人だけ付く。 */
+  lineUserId?: string;
+}
+
+/**
+ * canonical 解決に渡す種を組み立てる。
+ *
+ * session_id 1 本だけで引くと、**その session が誰かに結ばれた履歴がまだ無い間**は
+ * 何も返らない（本番で実際にこうなっていた）。信頼経路で本人が確定しているなら、
+ * 顧客番号・LINE userId という「人そのものの鍵」も種にしてよい。どれか 1 本でも
+ * 連結成分に届けば、そこから同じ人の鍵が全部引ける。
+ *
+ * LINE は 2 kind とも入れる（トークの userId と LINE ログインの sub が別 kind で
+ * 並置されているため。lib/cdp/canonical.ts の lineLoginSeed 参照）。
+ */
+export function canonicalSeedsForWeb(identity: VerifiedWebIdentity): ObservedIdentifier[] {
+  const seeds: ObservedIdentifier[] = [webSeed(identity.sessionId)];
+
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) seeds.push(shopifySeed(normalized.numericId));
+  }
+  if (identity.lineUserId) {
+    seeds.push(lineLoginSeed(identity.lineUserId));
+    seeds.push(lineSeed(identity.lineUserId));
+  }
+  return seeds;
+}
+
+/**
+ * 「この web セッションはこの人のもの」を subject_links に 1 行足す。**never throw**。
+ *
+ * ─ なぜ要るか ─
+ *   web の発言は `conversations.user_id = session_id` で保存される。LINE 側が
+ *   それを読めるのは session_id が連結成分に入っているときだけだが、session_id を
+ *   人に結ぶ経路は「Web で LINE ログインした瞬間」しか無かった。ログイン済みの人が
+ *   新しいタブ（＝新しい session_id）で話すと、その発言は **どこからも辿れない**。
+ *
+ * ─ 何を主張するか ─
+ *   basis は `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した
+ *   経路）。呼び出し側は信頼経路（X-API-Key 検証済み + サーバ確定の identity）でのみ
+ *   呼ぶこと。ブラウザ自己申告で呼べば、他人のセッションを自分に結べてしまう。
+ *
+ * 顧客番号がある人はそちらに結ぶ（LINE のトーク側は既に顧客番号と結ばれているので
+ * 1 本で両チャネルに届く）。顧客番号が無い（LINE ログインだけ）人は LINE 側に結ぶ。
+ */
+export async function bindWebSessionToOwner(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  identity: VerifiedWebIdentity,
+): Promise<void> {
+  const owner = ownerSeedFor(identity);
+  if (!owner) return;
+
+  const result = await appendSubjectLink(supabase, {
+    left: webSeed(identity.sessionId),
+    right: owner,
+    basis: "anonymous_promotion",
+    observedBy: "web-chat",
+  });
+  logLinkAppend("web-chat", "anonymous_promotion", result);
+}
+
+/** 結ぶ相手（人そのものの鍵）。無ければ結ばない＝匿名のまま。 */
+function ownerSeedFor(identity: VerifiedWebIdentity): ObservedIdentifier | null {
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) return shopifySeed(normalized.numericId);
+  }
+  if (identity.lineUserId) return lineLoginSeed(identity.lineUserId);
+  return null;
 }
 
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
@@ -120,14 +215,19 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   }
 
   // リクエストボディのパース
-  let body: { message?: string; session_id?: string; shopify_customer_id?: string };
+  let body: {
+    message?: string;
+    session_id?: string;
+    shopify_customer_id?: string;
+    line_user_id?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { message, session_id, shopify_customer_id } = body;
+  const { message, session_id, shopify_customer_id, line_user_id } = body;
 
   // session_id バリデーション
   const sessionError = validateSessionId(session_id);
@@ -139,6 +239,16 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   const shopifyError = validateShopifyCustomerId(shopify_customer_id);
   if (shopifyError) {
     return c.json({ error: shopifyError }, 400);
+  }
+
+  // line_user_id バリデーション（optional）。
+  //   web-app が **サーバ確定値**（暗号化 cookie の復号結果 = LINE 署名済み id_token の sub）
+  //   として渡す。ブラウザ自己申告は下の trusted 判定で捨てるので、ここは形式ゲート。
+  if (line_user_id !== undefined && validateLineMessagingUserId(line_user_id)) {
+    return c.json(
+      { error: "line_user_id must be a LINE userId (U followed by 32 hex chars)" },
+      400,
+    );
   }
 
   // message バリデーション
@@ -162,34 +272,62 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   let embedding: number[];
   let identityIsLinked = false;
 
-  // [SEC-B] shopify_customer_id は「サーバ経由（X-API-Key 検証済み）」のときだけ信頼する。
-  // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 web セッション扱いにする。
-  const trustedCustomerId = isTrustedServerCaller(c) ? shopify_customer_id : undefined;
+  // [SEC-B] 自己申告の identity は「サーバ経由（X-API-Key 検証済み）」のときだけ信頼する。
+  // ブラウザ直叩き（X-API-Key 無し）は無視し、匿名 web セッション扱いにする。
+  const trusted = isTrustedServerCaller(c);
+  const trustedCustomerId = trusted ? shopify_customer_id : undefined;
+  const trustedLineUserId = trusted ? line_user_id : undefined;
 
   try {
     const identity = trustedCustomerId
       ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
-    // [SEC-3] クロスチャネル個人データ（別チャネル履歴・連携済みプロファイル）は
-    // ライブ検証済みの信頼経路（trustedCustomerId 由来）のときだけ開く。生の
-    // web_session_id 一致（isLinked）だけでは開かない（fail-closed・多層防御）。
-    const crossChannelAllowed = crossChannelHistoryAllowed(
-      identity.isLinked,
-      !!trustedCustomerId,
-    );
-    identityIsLinked = crossChannelAllowed;
 
     // CDP 統合 Stage 2: canonical 解決（subject_links の連結成分）で「同じ人の鍵」を引く。
     //
-    // ⚠ [SEC-3] のゲート（crossChannelAllowed）は **一切緩めない**。canonical が
-    //   できるのは「既に横断してよいと決まった人について、読む user_id を増やす」ことだけで、
-    //   横断してよいかの判断には関与しない。LINE 側と非対称なのは意図的で、web の
-    //   session_id は「知っているだけ」の弱い証明だから（crossChannelHistoryAllowed の
-    //   コメント参照）。この 1 行を消せば Stage 2 以前の読み出しに戻る。
-    const canonical = crossChannelAllowed
-      ? await resolveCanonicalUserRefs(supabase, webSeed(sessionId))
-      : { userRefs: [] as string[] };
+    // ⚠ [SEC-3] の fail-closed（信頼経路でなければ絶対に横断しない）は **一切緩めない**。
+    //   下の `trusted &&` がそれで、生の web_session_id 一致だけでは今も開かない。
+    //
+    // ★11 の web 版（2026-08-30 の本番切断の手当て）: LINE 側は
+    //   `identity.isLinked || canonical.linked` なのに、web 側は旧台帳の
+    //   `identity.isLinked` だけを見ていた。LIFF / Account Link で連携した人は
+    //   customer_linkages と subject_links にしか行が無く、`user_identity_map.line_user_id`
+    //   は null のままなので、**ログイン済みでも横断が永久に開かない**。旧台帳しか見て
+    //   いない非対称を、LINE 側と同じ形に揃える（信頼経路の要求は残したまま）。
+    const canonical = trusted
+      ? await resolveCanonicalFromSeeds(supabase, canonicalSeedsForWeb({
+          sessionId,
+          shopifyCustomerId: trustedCustomerId,
+          lineUserId: trustedLineUserId,
+        }))
+      : { linked: false, userRefs: [] as string[] };
+
+    const crossChannelAllowed = crossChannelHistoryAllowed(
+      identity.isLinked || canonical.linked,
+      trusted,
+    );
+    identityIsLinked = crossChannelAllowed;
+
+    // この session を「本人の鍵」として連結成分に載せる（追記 1 行・never throw）。
+    //
+    // ─ なぜ要るか（2026-08-30 の本番切断の本丸）─
+    //   web の発言は `conversations.user_id = session_id` で保存される（下の saveMessage）。
+    //   ところが session_id を人に結びつける経路は「Web で LINE ログインした瞬間の
+    //   `identity.link-line`」しか無く、**ログイン済みの人が新しいタブで話した分は
+    //   どの連結成分にも入らない**。結果、LINE 側から読むと存在しないのと同じになる。
+    //   ログイン済み（＝信頼経路で本人が確定している）なら、その場で 1 行足して
+    //   「このセッションはこの人のもの」を残す。basis は既存の語彙
+    //   `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した経路）。
+    if (trusted) {
+      c.executionCtx.waitUntil(
+        bindWebSessionToOwner(supabase, {
+          sessionId,
+          shopifyCustomerId: trustedCustomerId,
+          lineUserId: trustedLineUserId,
+        }),
+      );
+    }
 
     console.log("[web] step=pre-parallel");
     const [, fetchedHistory, emb] = await withTimeout(
@@ -210,7 +348,18 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
               sessionId,
               canonical.userRefs,
             )
-          : getRecentMessages(supabase, effectiveUserId, "web"),
+          : /* 横断しないときも **書いた鍵で読む**。web の発言は session_id で保存される
+               のに、ここは長らく effectiveUserId（連携済みなら Shopify 顧客 GID）で
+               読んでいた。両者がずれると履歴が毎ターン 0 件になり、**同じ画面の
+               2 つ前の自分の発言すら見えない**（2026-08-30 の本番で実際にこうなった:
+               「花の香りの紅茶が好き」→ 24 秒後の「覚えておいて」に対して
+               「何を覚えますか？」と聞き返している）。
+               2 つが同じ（＝匿名の人）なら往復を増やさず従来どおり 1 本で引く。
+               ずれている人だけ channel を web に固定して両方の鍵で引く（channel 固定
+               なので横断ではない — LINE 側の発言は 1 件も入らない）。 */
+            effectiveUserId === sessionId
+              ? getRecentMessages(supabase, sessionId, "web")
+              : getCrossChannelMessages(supabase, effectiveUserId, "web", 30, 3000, sessionId),
         createEmbedding(processedMessage, c.env),
       ]),
       TIMEOUT_PRE_PARALLEL_MS,

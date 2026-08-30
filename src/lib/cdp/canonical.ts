@@ -138,6 +138,90 @@ export function lineSeed(lineUserId: string): ObservedIdentifier {
   return { kind: "line_messaging_uid", value: lineUserId };
 }
 
+/**
+ * LINE Login（OIDC の sub）の鍵。**トークの userId と同じ値でも別 kind** で並置されている
+ * （migration 040 / `identity.link-line` のコメント参照）。
+ *
+ * ─ なぜ「別 kind なのに同じ人」として読むのか（2026-08-30 の本番切断の根因）─
+ *
+ *   `identity.link-line`（Web で LINE ログインした人の匿名セッション昇格）は
+ *   `web_session_id ↔ line_login_uid` を結ぶ。一方 LINE の webhook は
+ *   `line_messaging_uid` を種にして canonical を引く。**同じ LINE の人なのに
+ *   連結成分が 2 つに割れる**ので、サイトのチャットで話した内容が LINE 側から
+ *   一生見えない。実際に本番でこう割れていた:
+ *
+ *     成分 A（webhook から見える）: line_messaging_uid ─ shopify_customer_id …
+ *     成分 B（Web から見える）    : web_session_id ─ line_login_uid
+ *
+ *   LINE の userId 名前空間はプロバイダ単位で一意なので、**同じ生値** が両 kind に
+ *   現れたらそれは同じ人である。ここではその事実を **読むときだけ** 使う
+ *   （`resolveCanonicalFromSeeds` で両方の種を引いて和を取る）。DB に新しい
+ *   「同じ人だ」の主張を書き足すわけではないので、SEC-1 / J-4 の判断は動かない。
+ */
+export function lineLoginSeed(lineUserId: string): ObservedIdentifier {
+  return { kind: "line_login_uid", value: lineUserId };
+}
+
+/**
+ * 複数の鍵から連結成分を引き、**和を取って** 1 つの解決として返す。
+ *
+ * 1 鍵だけで引くと「同じ人なのに種の選び方で見える範囲が変わる」ことが起きる
+ * （上の `lineLoginSeed` のコメントにある本番の割れ方がまさにそれ）。呼び出し側が
+ * 手元に持っている真正性の確かな鍵を **全部** 渡せば、どれか 1 本でも人に届いていれば
+ * 読める。
+ *
+ * - `resolved` … 1 つでも解決できたか
+ * - `linked`   … 1 つでも「同じ人だ」の判断を持っていたか
+ * - `userRefs` … 重複を除いた和（`maxRefs` で頭打ち。切ったら `truncated`）
+ *
+ * **決して throw しない**（各 seed の解決が never throw なので、和も never throw）。
+ * 種を 1 本も渡さなければ `resolved:false` で戻る（＝旧 join だけで読む）。
+ */
+export async function resolveCanonicalFromSeeds(
+  supabase: SupabaseClient,
+  seeds: ObservedIdentifier[],
+  maxRefs: number = CANONICAL_MAX_REFS,
+): Promise<CanonicalResolution> {
+  if (seeds.length === 0) return UNRESOLVED("no_seeds");
+
+  const resolutions = await Promise.all(
+    seeds.map((seed) => resolveCanonicalUserRefs(supabase, seed, maxRefs)),
+  );
+
+  const usable = resolutions.filter((r) => r.resolved);
+  if (usable.length === 0) {
+    // 全部落ちた / 誰にも届かなかった。理由は最初のものを代表として返す（無言で戻らない）。
+    return UNRESOLVED(resolutions[0]?.reason ?? "not_found");
+  }
+
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  let truncated = false;
+  for (const r of usable) {
+    if (r.truncated) truncated = true;
+    for (const value of r.userRefs) {
+      if (seen.has(value)) continue;
+      if (refs.length >= maxRefs) {
+        truncated = true;
+        break;
+      }
+      seen.add(value);
+      refs.push(value);
+    }
+  }
+
+  const linkCount = usable.reduce((acc, r) => acc + (r.linkCount ?? 0), 0);
+  return {
+    resolved: true,
+    linked: usable.some((r) => r.linked),
+    userRefs: refs,
+    canonicalId: usable.find((r) => r.canonicalId)?.canonicalId,
+    memberCount: usable.reduce((acc, r) => acc + (r.memberCount ?? 0), 0),
+    linkCount,
+    truncated,
+  };
+}
+
 /** Web の人の鍵（session_id）。 */
 export function webSeed(sessionId: string): ObservedIdentifier {
   return { kind: "web_session_id", value: sessionId };

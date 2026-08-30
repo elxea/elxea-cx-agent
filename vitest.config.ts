@@ -52,6 +52,11 @@ export default defineConfig({
           NOTION_SET_MENU_DB_ID: "e2e-mock-set-menu-db",
           // AI（tea/welcome/linkage 動線では未使用だが型充足のためダミー）。
           ANTHROPIC_API_KEY: "e2e-mock-anthropic-key",
+          // web-app proxy の共有鍵（モック値）。これが無いと `isTrustedServerCaller` が
+          //   常に false になり、**「ログイン済みの人が Web で話す」経路をテストできない**
+          //   ＝ 2026-08-30 の本番切断がそのまま素通りする。実鍵は決して置かない
+          //   （assert-not-prod の prod マーカー検査も通る無害な文字列）。
+          SYNC_API_SECRET: "e2e-mock-sync-api-secret",
           // roji 最初のアンケートの停止スイッチ。動線17 を検証するため **テストでは ON** にする。
           //   これは送信フラグではない（アンケートは返信のみで LINE 送信系 API を呼ばない）ので
           //   assert-not-prod の assertSendDisabled の対象外。実送信はゼロのまま。
