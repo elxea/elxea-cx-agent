@@ -234,19 +234,34 @@ export async function throughGateway<T>(
   return result;
 }
 
+/** Shopify 顧客 GID。web の userRef にはこの形が混ざって来る（下記参照）。 */
+const SHOPIFY_CUSTOMER_GID = /^gid:\/\/shopify\/Customer\/(\d+)$/;
+
 /**
  * 「LINE / Web のどちらの人か」から identity_edges の kind を決める。
  *
  * 既存の 5 経路はどれも `channel: "line" | "web"` で人を区別しているので、
  * 変換をここ 1 か所に置く（各経路が自前で分岐すると、増えたときにずれる）。
+ *
+ * ⚠ channel だけでは kind は決まらない（2026-08-30 の本番で実害）。
+ *   `recordBehaviorEvent` に渡る web の userRef は **session_id とは限らない**:
+ *   連携済みの人では routes/web.ts が `effectiveUserId`（= Shopify 顧客 GID）を渡す。
+ *   そのまま `web_session_id` として書くと、**顧客番号が「web セッション」という
+ *   名前の鍵で登録され、誰とも結ばれない主体が 1 つ増える**。実際に本番の
+ *   identity_edges には `web_session_id = "gid://shopify/Customer/…"` の孤立行が
+ *   できていた（chat_started 由来）。値の形を見て正しい kind に落とす。
  */
 export function identifierForChannel(
   channel: string,
   userRef: string,
 ): ObservedIdentifier {
-  return channel === "web"
-    ? { kind: "web_session_id", value: userRef }
-    : { kind: "line_messaging_uid", value: userRef };
+  if (channel !== "web") return { kind: "line_messaging_uid", value: userRef };
+
+  const gid = SHOPIFY_CUSTOMER_GID.exec(userRef);
+  // 顧客番号は数値へ寄せる（subject-links / canonical が使う正規形と揃える）。
+  if (gid) return { kind: "shopify_customer_id", value: gid[1] };
+
+  return { kind: "web_session_id", value: userRef };
 }
 
 /** 元の書き込みの返り値を LegacyOutcome に読む（void は "ok"）。 */

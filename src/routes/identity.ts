@@ -26,6 +26,7 @@ import {
   normalizeShopifyCustomerId,
 } from "../lib/web-auth";
 import { requireSyncApiKey } from "../lib/sync-auth";
+import { verifySessionProof } from "../lib/chat-session";
 import {
   upsertCustomerLinkage,
   getLinkageStatus,
@@ -149,6 +150,7 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
     email?: string | null;
     display_name?: string | null;
     session_id?: string | null;
+    session_proof?: string | null;
   };
   try {
     body = await c.req.json();
@@ -156,7 +158,41 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { line_user_id, email, display_name, session_id } = body;
+  const { line_user_id, email, display_name, session_proof } = body;
+
+  /* [SEC-3 前提 / QA 指摘 P1] 匿名セッションの昇格は **サーバ発行の session_id** に限る。
+   *
+   * ここは「この session は自分のものだ」と宣言して会話を丸ごと自分に移し、
+   * subject_links に恒久的な結び付きまで残す、最も強い口である。ところが
+   * session_id の出どころは web-app の cookie で、それは **ブラウザが JS で書ける**
+   * ものだった。つまり他人の UUID を自分の cookie に入れて LINE ログインするだけで、
+   * 他人の匿名セッションを恒久的に奪い、本来の持ち主を締め出せた。
+   *
+   * 署名が確かめられない session_id は **無かったことにする**（昇格も link も行わない）。
+   * 連携そのもの（LINE ログイン）は成立させる — 巻き添えでログインを壊さない。 */
+  const chatSessionSecret = (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET;
+  const claimedSessionId = typeof body.session_id === "string" ? body.session_id : null;
+  const sessionProven =
+    claimedSessionId !== null &&
+    (await verifySessionProof(claimedSessionId, session_proof, chatSessionSecret));
+
+  /* 移行モード（鍵をまだ配っていない間）: この PR 以前とまったく同じ挙動に倒す。
+     ここを「検証できないから昇格しない」に倒すと、鍵が入るまでの間、匿名で
+     話していた人が LINE ログインしても会話が引き継がれなくなる（既存機能の停止）。
+     露出はこの PR 以前と同じで、増えない。理由は lib/chat-session.ts の移行モード。 */
+  const migrationMode = !chatSessionSecret || chatSessionSecret.trim() === "";
+  const session_id = sessionProven || migrationMode ? claimedSessionId : null;
+
+  if (claimedSessionId !== null && !sessionProven) {
+    console.warn(
+      "[identity/link-line] session not proven:",
+      JSON.stringify({
+        route: "identity.link-line",
+        // 移行中なのか、署名が合わなかったのかを区別できるようにする（T-12）。
+        mode: migrationMode ? "migration_secret_unset" : "rejected",
+      }),
+    );
+  }
 
   if (!line_user_id || typeof line_user_id !== "string") {
     return c.json({ error: "line_user_id is required" }, 400);

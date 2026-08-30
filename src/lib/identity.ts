@@ -349,11 +349,22 @@ export async function linkLineByEmail(
  *
  * @param shopifyCustomerId Shopify Customer GID (例: gid://shopify/Customer/12345)
  * @param sessionId Web session UUID
+ * @param bindSession この session_id を identity 行に束縛してよいか (既定 true)。
+ *
+ *   [SEC-3 書き込み側 / QA 指摘 2026-08-30] proxy は session_id の **所有を検証しない**
+ *   (ブラウザの cookie をそのまま転送する)。よってログイン済みの A が他人 B の
+ *   session_id を送れる。そのまま下の 3. を通すと **B の session_id が A の identity 行に
+ *   束縛され**、以後 getCrossChannelMessages が legacy.web_session_id 経由で
+ *   B の会話を A の読み出し集合に混ぜる。
+ *
+ *   呼び出し側が「この session は別人のものだ」と判定できたときは false を渡すこと。
+ *   顧客 ID から解決するところまでは行い、session の束縛だけを見送る (fail-closed)。
  */
 export async function resolveWithShopifyCustomerId(
   supabase: SupabaseClient,
   shopifyCustomerId: string,
   sessionId: string,
+  bindSession = true,
 ): Promise<IdentityResult> {
   try {
     // 1. shopify_customer_id で既存レコードを検索
@@ -388,6 +399,17 @@ export async function resolveWithShopifyCustomerId(
         unifiedUserId: existing.unified_user_id,
         originalUserId: sessionId,
         isLinked: !!existing.line_user_id,
+      };
+    }
+
+    /* [SEC-3] 別人の session だと分かっているときは、ここから先の **束縛を一切行わない**。
+       顧客 ID を unified_user_id として返すだけに留める (会話の保存・読み出しは
+       呼び出し側が顧客 ID で行うので、本人の体験は落ちない)。 */
+    if (!bindSession) {
+      return {
+        unifiedUserId: shopifyCustomerId,
+        originalUserId: sessionId,
+        isLinked: false,
       };
     }
 

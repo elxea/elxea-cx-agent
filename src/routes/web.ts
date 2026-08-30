@@ -18,6 +18,8 @@ import {
 import {
   validateSessionId,
   validateShopifyCustomerId,
+  validateLineMessagingUserId,
+  normalizeShopifyCustomerId,
   checkRateLimit,
   getClientIp,
 } from "../lib/web-auth";
@@ -26,12 +28,22 @@ import {
   resolveWithShopifyCustomerId,
 } from "../lib/identity";
 import { isValidSyncApiKey } from "../lib/sync-auth";
+import { resolveUsableSessionId } from "../lib/chat-session";
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
 import { behaviorEventType } from "../lib/cdp/event-vocabulary";
 import { recordCustomerEvent } from "../lib/cdp/events-gateway";
-import { resolveCanonicalUserRefs, webSeed } from "../lib/cdp/canonical";
+import {
+  resolveCanonicalUserRefs,
+  resolveCanonicalFromSeeds,
+  webSeed,
+  shopifySeed,
+  lineSeed,
+  lineLoginSeed,
+} from "../lib/cdp/canonical";
+import { appendSubjectLink, logLinkAppend } from "../lib/cdp/subject-links";
+import type { ObservedIdentifier } from "../lib/cdp/subjects";
 import { runPreferencePipeline } from "../lib/preference-pipeline";
 
 /** 入力テキストの最大文字数 */
@@ -82,17 +94,199 @@ export function effectiveEventUserId(
  * データを開かない。
  *
  * 開いてよいのは「ライブ検証済みの信頼経路」＝サーバ経由（X-API-Key 検証済み）で
- * かつ検証済み Shopify セッション由来の customer_id が付いているとき（trusted=true）
+ * **かつサーバ確定の本人 ID（Shopify 顧客 ID または LINE userId）が付いているとき**
  * だけに限定する（fail-closed）。生の web_session_id 一致には依拠しない。
  * webChatHistoryHandler の `ownsIdentity` ゲートと同じ精神の多層防御。
+ *
+ * ⚠ 第 2 引数に「共有鍵があるか」だけを渡してはいけない。proxy は session_id の
+ *   **所有を検証しない**（ブラウザの cookie をそのまま転送する）ので、鍵だけを条件に
+ *   すると、ログアウト中のブラウザが他人の session_id を送るだけでその人の横断履歴に
+ *   届く。呼び出し側は `hasVerifiedIdentity` を渡すこと。
+ *   LINE userId を customer_id と同格に扱うのは、どちらも web-app がサーバ側で確定した
+ *   値（暗号化 cookie の復号結果 = LINE 署名済み id_token の sub）だからで、
+ *   ブラウザ自己申告はこの経路に入らない（上の trusted 判定で捨てられる）。
  *
  * B-2（非対称の理由・意図的に現状維持）: LINE 側は `identity.isLinked || canonical.linked` で
  *   横断を開くのに、web 側はここで `&& trusted` を要求する。LINE の userId は webhook 署名で
  *   真正性が検証済みなのに対し、web の session_id は「知っているだけ」の弱い証明だから。
  *   この非対称を消す（web も canonical だけで開く）と SEC-3 の fail-closed が壊れる。
+ *
+ * ★11 の web 版（2026-08-30）: 第 1 引数には旧台帳の `identity.isLinked` **だけ**ではなく
+ *   `identity.isLinked || canonical.linked` を渡す。LIFF / Account Link で連携した人は
+ *   旧台帳（user_identity_map.line_user_id）に行が無いので、旧台帳だけを見ていると
+ *   **ログイン済みでも横断が永久に開かない**。緩めていないのは `trusted`（信頼経路の
+ *   要求）であり、SEC-3 の fail-closed はそのまま残っている。
  */
 export function crossChannelHistoryAllowed(isLinked: boolean, trusted: boolean): boolean {
   return isLinked && trusted;
+}
+
+/** 信頼経路で確定している「この人の鍵」たち。canonical 解決と link 追記の両方が使う。 */
+export interface VerifiedWebIdentity {
+  /** ブラウザの会話 ID（UUID）。 */
+  sessionId: string;
+  /** サーバ検証済み Shopify 顧客 ID（GID / 数値のどちらでも可）。未ログインなら undefined。 */
+  shopifyCustomerId?: string;
+  /** サーバ検証済み LINE userId。LINE ログインで入っている人だけ付く。 */
+  lineUserId?: string;
+}
+
+/**
+ * この session_id が既に **誰のものとして** 記録されているか。
+ *
+ * - `unowned` … まだ誰にも結ばれていない（主体が無い / link が 0 本）。結んでよい。
+ * - `own`     … 既にこの人の連結成分にいる。結び直す必要は無いが、種に入れてよい。
+ * - `foreign` … **別人**の連結成分にいる。種に入れても結んでもいけない。
+ */
+export type WebSessionOwnership = "unowned" | "own" | "foreign";
+
+/** この人を指す「人そのものの鍵」の生値。連結成分の識別子と突き合わせる。 */
+function ownerIdentifierValues(identity: VerifiedWebIdentity): string[] {
+  const values: string[] = [];
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) values.push(normalized.numericId);
+  }
+  if (identity.lineUserId) values.push(identity.lineUserId);
+  return values;
+}
+
+/**
+ * session_id の既存の持ち主を引く。**決して throw しない**（引けなければ fail-closed）。
+ *
+ * ─ なぜ要るか（QA 指摘 2026-08-30・書き込み側の乗っ取り）─
+ *
+ *   proxy は `session_id` の **所有を検証しない**。ブラウザの cookie をそのまま
+ *   転送するだけなので、ログイン済みの A が他人 B の session_id を送れてしまう。
+ *   これを素通しすると 2 つ壊れる:
+ *
+ *     (1) 読み  — B の連結成分が A の履歴に和され、A が B の会話を読める
+ *     (2) 書き  — `subject_links` に「B の session は A のもの」が **永続追記** される
+ *
+ *   (2) のほうが重い。一度書けば以後ずっと B の発言が A に流れ続けるうえ、
+ *   link は追記専用なので取り消せない。よって **結ぶ前に既存の持ち主を必ず確かめる**。
+ *
+ * ─ 判定 ─
+ *   session_id で連結成分を引き、`linked`（同じ人だという判断が 1 本以上ある）なのに
+ *   その成分に自分の鍵が 1 つも無ければ **別人のもの**と見なす。
+ *   link が 0 本なら誰のものでもないので結んでよい（初対面の session がこれ）。
+ *   RPC が落ちた等で判定できないときは `foreign` に倒す（推測で他人の棚を開けない）。
+ */
+export async function resolveWebSessionOwnership(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  identity: VerifiedWebIdentity,
+): Promise<WebSessionOwnership> {
+  const owned = ownerIdentifierValues(identity);
+  if (owned.length === 0) return "foreign"; // 本人が確定していない＝結ぶ相手がいない
+
+  const component = await resolveCanonicalUserRefs(supabase, webSeed(identity.sessionId));
+
+  // まだ主体が無い / 解決できなかった。
+  if (!component.resolved) {
+    /* `not_found` は「この session はまだ誰の記録にも出てきていない」＝安全に結べる。
+       それ以外（RPC 失敗・想定外の形）は **判定できなかった** のであって
+       「誰のものでもない」ではない。fail-closed で結ばない。 */
+    return component.reason === "not_found" ? "unowned" : "foreign";
+  }
+
+  // 主体はあるが「同じ人だ」の判断が 1 本も無い＝まだ誰のものでもない。
+  if (!component.linked) return "unowned";
+
+  return component.userRefs.some((ref) => owned.includes(ref)) ? "own" : "foreign";
+}
+
+/**
+ * canonical 解決に渡す種を組み立てる。
+ *
+ * session_id 1 本だけで引くと、**その session が誰かに結ばれた履歴がまだ無い間**は
+ * 何も返らない（本番で実際にこうなっていた）。信頼経路で本人が確定しているなら、
+ * 顧客番号・LINE userId という「人そのものの鍵」も種にしてよい。どれか 1 本でも
+ * 連結成分に届けば、そこから同じ人の鍵が全部引ける。
+ *
+ * LINE は 2 kind とも入れる（トークの userId と LINE ログインの sub が別 kind で
+ * 並置されているため。lib/cdp/canonical.ts の lineLoginSeed 参照）。
+ *
+ * ⚠ **別人のものと分かっている session_id は種に入れない**（QA 指摘 2026-08-30）。
+ *   入れると、他人の session_id を送るだけでその人の連結成分が自分の読み出し集合に
+ *   和されてしまう。人そのものの鍵（顧客番号 / LINE userId）だけで引けば、
+ *   自分の履歴は従来どおり読めるので機能は落ちない。
+ */
+export function canonicalSeedsForWeb(
+  identity: VerifiedWebIdentity,
+  ownership: WebSessionOwnership,
+): ObservedIdentifier[] {
+  const seeds: ObservedIdentifier[] = ownership === "foreign" ? [] : [webSeed(identity.sessionId)];
+
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) seeds.push(shopifySeed(normalized.numericId));
+  }
+  if (identity.lineUserId) {
+    seeds.push(lineLoginSeed(identity.lineUserId));
+    seeds.push(lineSeed(identity.lineUserId));
+  }
+  return seeds;
+}
+
+/**
+ * 「この web セッションはこの人のもの」を subject_links に 1 行足す。**never throw**。
+ *
+ * ─ なぜ要るか ─
+ *   web の発言は `conversations.user_id = session_id` で保存される。LINE 側が
+ *   それを読めるのは session_id が連結成分に入っているときだけだが、session_id を
+ *   人に結ぶ経路は「Web で LINE ログインした瞬間」しか無かった。ログイン済みの人が
+ *   新しいタブ（＝新しい session_id）で話すと、その発言は **どこからも辿れない**。
+ *
+ * ─ 何を主張するか ─
+ *   basis は `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した
+ *   経路）。呼び出し側は信頼経路（X-API-Key 検証済み + サーバ確定の identity）でのみ
+ *   呼ぶこと。ブラウザ自己申告で呼べば、他人のセッションを自分に結べてしまう。
+ *
+ * 顧客番号がある人はそちらに結ぶ（LINE のトーク側は既に顧客番号と結ばれているので
+ * 1 本で両チャネルに届く）。顧客番号が無い（LINE ログインだけ）人は LINE 側に結ぶ。
+ *
+ * ⚠ **`unowned` のときしか結ばない**（QA 指摘 2026-08-30・書き込み側の乗っ取り）。
+ *   proxy は session_id の所有を検証しないので、この歯が無いと「他人の session_id を
+ *   送るだけで、その session が自分のものとして **永続的に** 記録される」。
+ *   link は追記専用で取り消せないため、ここが最後の歯になる。
+ */
+export async function bindWebSessionToOwner(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  identity: VerifiedWebIdentity,
+  ownership: WebSessionOwnership,
+): Promise<void> {
+  if (ownership !== "unowned") {
+    /* `own` は既に結ばれているので足すものが無い。`foreign` は結んではいけない。
+       後者は「起きたこと」なので必ず 1 行残す（T-12: 無言で捨てない）。 */
+    if (ownership === "foreign") {
+      console.warn(
+        "[cdp/link] not appended:",
+        JSON.stringify({ route: "web-chat", reason: "session_owned_by_other_subject" }),
+      );
+    }
+    return;
+  }
+
+  const owner = ownerSeedFor(identity);
+  if (!owner) return;
+
+  const result = await appendSubjectLink(supabase, {
+    left: webSeed(identity.sessionId),
+    right: owner,
+    basis: "anonymous_promotion",
+    observedBy: "web-chat",
+  });
+  logLinkAppend("web-chat", "anonymous_promotion", result);
+}
+
+/** 結ぶ相手（人そのものの鍵）。無ければ結ばない＝匿名のまま。 */
+function ownerSeedFor(identity: VerifiedWebIdentity): ObservedIdentifier | null {
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) return shopifySeed(normalized.numericId);
+  }
+  if (identity.lineUserId) return lineLoginSeed(identity.lineUserId);
+  return null;
 }
 
 /** 前処理（保存+履歴+Embedding）のタイムアウト（ミリ秒） */
@@ -120,14 +314,20 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   }
 
   // リクエストボディのパース
-  let body: { message?: string; session_id?: string; shopify_customer_id?: string };
+  let body: {
+    message?: string;
+    session_id?: string;
+    session_proof?: string;
+    shopify_customer_id?: string;
+    line_user_id?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { message, session_id, shopify_customer_id } = body;
+  const { message, session_id, session_proof, shopify_customer_id, line_user_id } = body;
 
   // session_id バリデーション
   const sessionError = validateSessionId(session_id);
@@ -141,12 +341,41 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: shopifyError }, 400);
   }
 
+  // line_user_id バリデーション（optional）。
+  //   web-app が **サーバ確定値**（暗号化 cookie の復号結果 = LINE 署名済み id_token の sub）
+  //   として渡す。ブラウザ自己申告は下の trusted 判定で捨てるので、ここは形式ゲート。
+  if (line_user_id !== undefined && validateLineMessagingUserId(line_user_id)) {
+    return c.json(
+      { error: "line_user_id must be a LINE userId (U followed by 32 hex chars)" },
+      400,
+    );
+  }
+
   // message バリデーション
   if (typeof message !== "string" || message.trim().length === 0) {
     return c.json({ error: "message is required" }, 400);
   }
 
-  const sessionId = session_id as string;
+  /* [SEC-3 前提] `session_id` は **サーバが発行したものだけ** を鍵として使う。
+     ブラウザ自作の UUID をそのまま鍵にしていたのが P1/P2/P3（他人の session を
+     奪う・読む・書き込む）に共通する前提だった。署名が確かめられないときは
+     その場限りの ID にすり替える（応答は止めない）。理由は lib/chat-session.ts。 */
+  const claimedSessionId = session_id as string;
+  const sessionResolution = await resolveUsableSessionId({
+    claimedSessionId,
+    proof: session_proof,
+    trusted: isTrustedServerCaller(c),
+    secret: (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
+  });
+  if (!sessionResolution.proven) {
+    // 無言で捨てない（T-12）。生の session_id は出さない。
+    console.warn(
+      "[web] session not proven:",
+      JSON.stringify({ route: "api/chat", reason: sessionResolution.reason }),
+    );
+  }
+  const sessionId = sessionResolution.sessionId;
+
   let processedMessage = message.trim();
   if (processedMessage.length > MAX_MESSAGE_LENGTH) {
     processedMessage = processedMessage.slice(0, MAX_MESSAGE_LENGTH);
@@ -162,34 +391,89 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   let embedding: number[];
   let identityIsLinked = false;
 
-  // [SEC-B] shopify_customer_id は「サーバ経由（X-API-Key 検証済み）」のときだけ信頼する。
-  // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 web セッション扱いにする。
-  const trustedCustomerId = isTrustedServerCaller(c) ? shopify_customer_id : undefined;
+  // [SEC-B] 自己申告の identity は「サーバ経由（X-API-Key 検証済み）」のときだけ信頼する。
+  // ブラウザ直叩き（X-API-Key 無し）は無視し、匿名 web セッション扱いにする。
+  const trusted = isTrustedServerCaller(c);
+  const trustedCustomerId = trusted ? shopify_customer_id : undefined;
+  const trustedLineUserId = trusted ? line_user_id : undefined;
+
+  /* [SEC-3] 「ライブ検証済みの信頼経路」= サーバ経由 **かつ** 検証済みの本人 ID が
+     付いていること。共有鍵だけでは足りない。
+     鍵だけを条件にすると、ログアウト中のブラウザが他人の session_id を proxy 経由で
+     送るだけで、その session が属する人の横断履歴に届いてしまう（proxy は session_id の
+     所有を検証しない）。本人 ID を要求すれば「いま誰として話しているか」がサーバで
+     確定している状態に限定できる。
+     Shopify 顧客 ID **または** LINE userId のどちらでもよい（どちらもサーバ確定値）。
+     元は customer_id 限定だったが、LINE ログインの人が identity を持てなかったのが
+     今回の障害なので、同格の証明として LINE userId を並べる。 */
+  const hasVerifiedIdentity = !!(trustedCustomerId || trustedLineUserId);
 
   try {
+    /* [SEC-3 書き込み側] この session_id が既に **別人のもの** として記録されていないかを
+       **identity 解決より先に** 確かめる。proxy は session_id の所有を検証しない
+       (ブラウザの cookie をそのまま転送する) ので、ログイン済みの A が他人 B の
+       session_id を送れてしまう。確かめずに進むと 3 つ壊れる:
+         (1) 旧台帳 — B の session_id が A の identity 行に束縛される
+         (2) 読み   — B の連結成分が A の読み出し集合に和される
+         (3) 新台帳 — 「B の session は A のもの」が subject_links に **永続追記** される
+       (3) は追記専用で取り消せない。以下の 3 か所すべてでこの判定を効かせる。 */
+    const verifiedIdentity: VerifiedWebIdentity = {
+      sessionId,
+      shopifyCustomerId: trustedCustomerId,
+      lineUserId: trustedLineUserId,
+    };
+    const sessionOwnership: WebSessionOwnership = hasVerifiedIdentity
+      ? await resolveWebSessionOwnership(supabase, verifiedIdentity)
+      : "foreign";
+    /** 別人の session は「知っているだけ」なので、読み書きのどの経路にも通さない。 */
+    const sessionIsOwn = sessionOwnership !== "foreign";
+
     const identity = trustedCustomerId
-      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
+      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId, sessionIsOwn)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
-    // [SEC-3] クロスチャネル個人データ（別チャネル履歴・連携済みプロファイル）は
-    // ライブ検証済みの信頼経路（trustedCustomerId 由来）のときだけ開く。生の
-    // web_session_id 一致（isLinked）だけでは開かない（fail-closed・多層防御）。
-    const crossChannelAllowed = crossChannelHistoryAllowed(
-      identity.isLinked,
-      !!trustedCustomerId,
-    );
-    identityIsLinked = crossChannelAllowed;
 
     // CDP 統合 Stage 2: canonical 解決（subject_links の連結成分）で「同じ人の鍵」を引く。
     //
-    // ⚠ [SEC-3] のゲート（crossChannelAllowed）は **一切緩めない**。canonical が
-    //   できるのは「既に横断してよいと決まった人について、読む user_id を増やす」ことだけで、
-    //   横断してよいかの判断には関与しない。LINE 側と非対称なのは意図的で、web の
-    //   session_id は「知っているだけ」の弱い証明だから（crossChannelHistoryAllowed の
-    //   コメント参照）。この 1 行を消せば Stage 2 以前の読み出しに戻る。
-    const canonical = crossChannelAllowed
-      ? await resolveCanonicalUserRefs(supabase, webSeed(sessionId))
-      : { userRefs: [] as string[] };
+    // ⚠ [SEC-3] の fail-closed（信頼経路でなければ絶対に横断しない）は **一切緩めない**。
+    //   下の `trusted &&` がそれで、生の web_session_id 一致だけでは今も開かない。
+    //
+    // ★11 の web 版（2026-08-30 の本番切断の手当て）: LINE 側は
+    //   `identity.isLinked || canonical.linked` なのに、web 側は旧台帳の
+    //   `identity.isLinked` だけを見ていた。LIFF / Account Link で連携した人は
+    //   customer_linkages と subject_links にしか行が無く、`user_identity_map.line_user_id`
+    //   は null のままなので、**ログイン済みでも横断が永久に開かない**。旧台帳しか見て
+    //   いない非対称を、LINE 側と同じ形に揃える（信頼経路の要求は残したまま）。
+    const canonical = hasVerifiedIdentity
+      ? await resolveCanonicalFromSeeds(
+          supabase,
+          canonicalSeedsForWeb(verifiedIdentity, sessionOwnership),
+        )
+      : { linked: false, userRefs: [] as string[] };
+
+    const crossChannelAllowed = crossChannelHistoryAllowed(
+      identity.isLinked || canonical.linked,
+      hasVerifiedIdentity,
+    );
+    identityIsLinked = crossChannelAllowed;
+
+    // この session を「本人の鍵」として連結成分に載せる（追記 1 行・never throw）。
+    //
+    // ─ なぜ要るか（2026-08-30 の本番切断の本丸）─
+    //   web の発言は `conversations.user_id = session_id` で保存される（下の saveMessage）。
+    //   ところが session_id を人に結びつける経路は「Web で LINE ログインした瞬間の
+    //   `identity.link-line`」しか無く、**ログイン済みの人が新しいタブで話した分は
+    //   どの連結成分にも入らない**。結果、LINE 側から読むと存在しないのと同じになる。
+    //   ログイン済み（＝信頼経路で本人が確定している）なら、その場で 1 行足して
+    //   「このセッションはこの人のもの」を残す。basis は既存の語彙
+    //   `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した経路）。
+    /* 署名が確かめられた session だけを人に結ぶ。すり替えた使い捨て ID を結ぶと
+       subject_links に一度きりのゴミ行が積み上がるだけで、誰の役にも立たない。 */
+    if (hasVerifiedIdentity && sessionResolution.proven) {
+      c.executionCtx.waitUntil(
+        bindWebSessionToOwner(supabase, verifiedIdentity, sessionOwnership),
+      );
+    }
 
     console.log("[web] step=pre-parallel");
     const [, fetchedHistory, emb] = await withTimeout(
@@ -207,10 +491,25 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
               undefined,
               30,
               3000,
-              sessionId,
+              /* [SEC-3] 別人の session はチャネル横断の読み出し集合に入れない。
+                 ここに生の session_id を渡すと、canonical の種から外しても
+                 `unionCrossChannelUserIds` が結局それを足してしまう
+                 (他人の session_id を送るだけで、その人の LINE 会話まで読める)。 */
+              sessionIsOwn ? sessionId : undefined,
               canonical.userRefs,
             )
-          : getRecentMessages(supabase, effectiveUserId, "web"),
+          : /* 横断しないときも **書いた鍵で読む**。web の発言は session_id で保存される
+               のに、ここは長らく effectiveUserId（連携済みなら Shopify 顧客 GID）で
+               読んでいた。両者がずれると履歴が毎ターン 0 件になり、**同じ画面の
+               2 つ前の自分の発言すら見えない**（2026-08-30 の本番で実際にこうなった:
+               「花の香りの紅茶が好き」→ 24 秒後の「覚えておいて」に対して
+               「何を覚えますか？」と聞き返している）。
+               2 つが同じ（＝匿名の人）なら往復を増やさず従来どおり 1 本で引く。
+               ずれている人だけ channel を web に固定して両方の鍵で引く（channel 固定
+               なので横断ではない — LINE 側の発言は 1 件も入らない）。 */
+            effectiveUserId === sessionId
+              ? getRecentMessages(supabase, sessionId, "web")
+              : getCrossChannelMessages(supabase, effectiveUserId, "web", 30, 3000, sessionId),
         createEmbedding(processedMessage, c.env),
       ]),
       TIMEOUT_PRE_PARALLEL_MS,
@@ -338,7 +637,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
  * レスポンス: { messages: [...], is_linked: boolean, total_count: number, limit: number, offset: number }
  */
 export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
-  const sessionId = c.req.query("session_id");
+  const claimedSessionId = c.req.query("session_id");
   const channelFilter = c.req.query("channel") as "line" | "web" | undefined;
   const keyword = c.req.query("keyword") ?? null;
   const dateFrom = c.req.query("from") ?? null;
@@ -346,10 +645,27 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const limitParam = c.req.query("limit");
   const offsetParam = c.req.query("offset");
 
-  const sessionError = validateSessionId(sessionId);
+  const sessionError = validateSessionId(claimedSessionId);
   if (sessionError) {
     return c.json({ error: sessionError }, 400);
   }
+
+  /* [SEC-3 前提] 履歴の読み出しも、**サーバが発行した session_id** でしか行わない。
+     ここが素通しだと「他人の session_id を query に入れるだけでその人の Web 会話が
+     読める」(QA 指摘 P2) がそのまま残る。理由は lib/chat-session.ts。 */
+  const sessionResolution = await resolveUsableSessionId({
+    claimedSessionId: claimedSessionId as string,
+    proof: c.req.query("session_proof"),
+    trusted: isTrustedServerCaller(c),
+    secret: (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
+  });
+  if (!sessionResolution.proven) {
+    console.warn(
+      "[web] session not proven:",
+      JSON.stringify({ route: "api/chat/history", reason: sessionResolution.reason }),
+    );
+  }
+  const sessionId = sessionResolution.sessionId;
 
   // channel パラメータのバリデーション
   if (channelFilter && channelFilter !== "line" && channelFilter !== "web") {
