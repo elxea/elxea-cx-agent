@@ -1,0 +1,719 @@
+{
+  "$comment": [
+    "CDP 受入スイートの正本 — 「どんな機能があり、何が確認できれば動作証明か」の一覧。",
+    "",
+    "この表が機能の側の正本である。テストの一覧はテストの言葉で書かれていて、機能の",
+    "言葉では書かれていない。ここで翻訳する。scripts/ops/cdp-acceptance.mjs はこれを",
+    "読んで走らせるだけで、機能名を 1 つも持たない (持つと足し忘れが表に出ない)。",
+    "",
+    "機能を足したら features に 1 行足す。検査を紐づけないまま足すと判定が GAP になり、",
+    "表に「未カバー」として出続ける — 隠せないようにしてある。",
+    "",
+    "設計の正本: /Users/setaka/github/circl/agents/circl-boss/deliverables/cdp-design-final-20260828.md",
+    "挙動の契約: docs/cdp-events-gateway-contract.md",
+    "テストプラン: docs/cdp-test-plan.md"
+  ],
+  "tiers": {
+    "static": {
+      "label": "静的検査 (型・撤去 ratchet)",
+      "requires_env": [],
+      "ci": true
+    },
+    "unit": {
+      "label": "単体 (ネットワーク不使用)",
+      "requires_env": [],
+      "ci": true
+    },
+    "hermetic": {
+      "label": "ハーメティック (Worker をインメモリ起動)",
+      "requires_env": [],
+      "ci": true
+    },
+    "crossrepo": {
+      "label": "2 リポ突合 (送る側 web-app を読む)",
+      "requires_env": [],
+      "requires_repo": "../elxea-web-app",
+      "requires_repo_file": "lib/cdp/behavior-fact.ts",
+      "ci": false,
+      "requires_repo_env": "ELXEA_WEB_APP_PATH"
+    },
+    "db-readonly": {
+      "label": "正本 DB 読み取り (既定 = 本番・書き込み不可で接続)",
+      "requires_env": [
+        "SUPABASE_URL",
+        "SUPABASE_DB_PASSWORD"
+      ],
+      "ci": false
+    },
+    "db-write": {
+      "label": "DB 書込往復 (実行環境は Boss が CDP_DB_TARGET で指定)",
+      "requires_env": [
+        "CDP_DB_TARGET"
+      ],
+      "ci": false
+    },
+    "analytics": {
+      "label": "解析リポ (elxea-cdp・ネットワーク不使用)",
+      "requires_env": [],
+      "requires_repo": "../elxea-cdp",
+      "requires_repo_file": "l0-ingest.mjs",
+      "ci": false,
+      "requires_repo_env": "ELXEA_CDP_PATH"
+    }
+  },
+  "checks": {
+    "static.typecheck": {
+      "tier": "static",
+      "cmd": [
+        "pnpm",
+        "exec",
+        "tsc",
+        "-p",
+        "tsconfig.ci.json",
+        "--noEmit"
+      ],
+      "timeout_sec": 300
+    },
+    "static.ratchet": {
+      "tier": "static",
+      "cmd": [
+        "node",
+        "scripts/ops/check-ratchet.mjs",
+        "--check"
+      ],
+      "timeout_sec": 120
+    },
+    "unit.gateway": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-events-gateway.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.subject-links": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-subject-links.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.stage2-backfill": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-stage2-backfill.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.export": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-export.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.stage4-segment": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-stage4-segment.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.ratchet-mechanism": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/check-ratchet.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "hermetic.gateway-flow": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow19-cdp-events-gateway.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.http-surface": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow20-cdp-http-surface.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.firestore-gate": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/e6-firestore-gate.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.survey-flow": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow17-roji-survey.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.diagnosis-funnel": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow18-diagnosis-funnel-durability.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.linkage-carryover": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow9-linkage-carryover-karte.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "crossrepo.vocabulary": {
+      "tier": "crossrepo",
+      "cwd": ".",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-crossrepo-vocabulary.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "db.invariants": {
+      "tier": "db-readonly",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-invariants-readonly.db.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "dbw.append-only": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-append-only.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.stage2-canonical": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-stage2-canonical.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.stage2-backfill": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-stage2-backfill.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.stage3-readout": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-stage3-l0-readout.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.stage4-l1": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-stage4-l1.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.erasure-registry": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-erasure-registry.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "dbw.erasure-all-stores": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/roji-erasure.db.test.ts"
+      ],
+      "timeout_sec": 420
+    },
+    "analytics.l0-ingest": {
+      "tier": "analytics",
+      "cmd": [
+        "node",
+        "--test",
+        "tests/l0-ingest.test.mjs"
+      ],
+      "timeout_sec": 180
+    },
+    "analytics.report-l0": {
+      "tier": "analytics",
+      "cmd": [
+        "node",
+        "--test",
+        "tests/report-l0.test.mjs"
+      ],
+      "timeout_sec": 180
+    }
+  },
+  "features": [
+    {
+      "id": "F-01",
+      "area": "事実の収集 (L0)",
+      "name": "出来事を書く口が 1 本に寄っている",
+      "criteria": "5 経路が gateway を通り、応答も返り値も変わらず L0 に 1 行積まれる",
+      "checks": [
+        "unit.gateway",
+        "hermetic.gateway-flow",
+        "static.ratchet"
+      ]
+    },
+    {
+      "id": "F-02",
+      "area": "事実の収集 (L0)",
+      "name": "知らない出来事を捨てない",
+      "criteria": "未知の event_type / channel でも schema_ok=false で保存され、応答は従来どおり",
+      "checks": [
+        "unit.gateway",
+        "hermetic.gateway-flow"
+      ]
+    },
+    {
+      "id": "F-03",
+      "area": "事実の収集 (L0)",
+      "name": "同じ出来事を 2 回受けても 1 行にしかならない",
+      "criteria": "冪等キーが効き、同一注文の persona が二重加算されない",
+      "checks": [
+        "unit.gateway",
+        "hermetic.gateway-flow",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-04",
+      "area": "事実の収集 (L0)",
+      "name": "積めなかったときは必ず理由が残る",
+      "criteria": "未連携・未設定で無言 return する枝が無く、理由付きで数えられる (T-12)",
+      "checks": [
+        "unit.gateway",
+        "hermetic.gateway-flow",
+        "hermetic.firestore-gate"
+      ]
+    },
+    {
+      "id": "F-05",
+      "area": "事実の収集 (L0)",
+      "name": "L0 の行に生の識別子が入らない",
+      "criteria": "冪等キー・payload に生 LINE userId / email が現れない (E5 / SEC-1)",
+      "checks": [
+        "unit.gateway",
+        "hermetic.gateway-flow"
+      ]
+    },
+    {
+      "id": "F-06",
+      "area": "事実の収集 (L0)",
+      "name": "出来事を送る口が鍵なしで開かない",
+      "criteria": "POST /api/events が鍵なし・誤鍵・秘密未設定のいずれでも 401",
+      "checks": [
+        "hermetic.http-surface"
+      ]
+    },
+    {
+      "id": "F-07",
+      "area": "事実の収集 (L0)",
+      "name": "アンケートの答えが同じ口へ流れる",
+      "criteria": "survey の回答が L0 に積まれ、会話の応答は変わらない",
+      "checks": [
+        "hermetic.survey-flow",
+        "unit.gateway"
+      ]
+    },
+    {
+      "id": "F-08",
+      "area": "事実の収集 (L0)",
+      "name": "診断の答えが同じ口へ流れる",
+      "criteria": "diagnosis の回答が L0 に積まれ、途中離脱しても積んだ分は残る",
+      "checks": [
+        "hermetic.diagnosis-funnel",
+        "crossrepo.vocabulary"
+      ]
+    },
+    {
+      "id": "F-09",
+      "area": "事実の収集 (L0)",
+      "name": "2 リポの語彙が食い違わない",
+      "criteria": "web-app が送る event_type / channel / identifier_kind を cx-agent が全部受理する (D3 / D4)",
+      "checks": [
+        "crossrepo.vocabulary"
+      ]
+    },
+    {
+      "id": "F-10",
+      "area": "人の同一性",
+      "name": "主体を発行できる (匿名の 1 歩目から)",
+      "criteria": "subject_id は ULID・発行制・無意味。同じ鍵からは同じ主体しか出ない",
+      "checks": [
+        "unit.gateway",
+        "dbw.append-only",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-11",
+      "area": "人の同一性",
+      "name": "1 つの鍵が 2 人の主体に結ばれない",
+      "criteria": "identity_edges_uniq が 2 列。並行発行でも 1 つに収束する (MID-1)",
+      "checks": [
+        "db.invariants",
+        "dbw.append-only"
+      ]
+    },
+    {
+      "id": "F-12",
+      "area": "人の同一性",
+      "name": "連携が追記 1 行で表現される",
+      "criteria": "subject_links に basis 付きで 1 行追記。向きは正規化され重複しない",
+      "checks": [
+        "unit.subject-links",
+        "dbw.append-only",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-13",
+      "area": "人の同一性",
+      "name": "メール等値で人を結ばない",
+      "criteria": "basis='email_equality' が型で拒否され、email_hash では主体を引けない (SEC-1)",
+      "checks": [
+        "unit.gateway",
+        "unit.subject-links",
+        "dbw.append-only",
+        "crossrepo.vocabulary"
+      ]
+    },
+    {
+      "id": "F-14",
+      "area": "人の同一性",
+      "name": "1 人に 2 本目の LINE を結ばない",
+      "criteria": "J-4 の基数制約が DB 側で効く",
+      "checks": [
+        "db.invariants",
+        "dbw.append-only"
+      ]
+    },
+    {
+      "id": "F-15",
+      "area": "人の同一性",
+      "name": "連携は書き換えられない (追記専用)",
+      "criteria": "edges / links / events / subjects の UPDATE・DELETE が消去経路以外から失敗する (E4)",
+      "checks": [
+        "db.invariants",
+        "dbw.append-only"
+      ]
+    },
+    {
+      "id": "F-16",
+      "area": "人の同一性",
+      "name": "LINE とメアドの人が 1 人として解決される (3 経路)",
+      "criteria": "LIFF / Account Link / 匿名昇格の新旧解決が合成データ N≥20 で 100% 一致",
+      "checks": [
+        "dbw.stage2-canonical",
+        "unit.subject-links"
+      ]
+    },
+    {
+      "id": "F-17",
+      "area": "人の同一性",
+      "name": "連携済みの人の LINE 会話が統合ビューに出る",
+      "criteria": "横断読み出しが canonical 経由になり、旧 join で見えた分を 1 つも落とさない (★11)",
+      "checks": [
+        "unit.subject-links",
+        "dbw.stage2-canonical",
+        "hermetic.linkage-carryover"
+      ]
+    },
+    {
+      "id": "F-18",
+      "area": "人の同一性",
+      "name": "コード以前に成立していた連携も追記 1 行として写し取れる",
+      "criteria": "旧台帳からの backfill が parity を緑にし、不変条件を 1 つも迂回しない (047)",
+      "checks": [
+        "unit.stage2-backfill",
+        "dbw.stage2-backfill"
+      ]
+    },
+    {
+      "id": "F-19",
+      "area": "解釈 (L1)",
+      "name": "カルテが 1 冊になり、L0 から全再計算できる",
+      "criteria": "保存した解釈と、いま畳み直したものが一致する (E8')",
+      "checks": [
+        "dbw.stage4-l1",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-20",
+      "area": "解釈 (L1)",
+      "name": "「もういらない」「安全に関する申告」が割当に実効",
+      "criteria": "除外は点数で覆らない。安全申告は減らす方向に畳まない",
+      "checks": [
+        "unit.stage4-segment",
+        "dbw.stage4-l1"
+      ]
+    },
+    {
+      "id": "F-21",
+      "area": "解釈 (L1)",
+      "name": "期間別の内訳を持てる",
+      "criteria": "persona_windows が暦の月 (JST) で切られ、Σ ≤ 合計の不変条件を守る",
+      "checks": [
+        "dbw.stage4-l1"
+      ]
+    },
+    {
+      "id": "F-22",
+      "area": "配信",
+      "name": "配信の宛先を SQL 1 本で出せる",
+      "criteria": "新旧の宛先が一致 (合成 N=24・連携/未連携/友だち解除を含む)。全件スキャン 3 本の置き換え",
+      "checks": [
+        "unit.stage4-segment",
+        "dbw.stage4-l1"
+      ]
+    },
+    {
+      "id": "F-23",
+      "area": "配信",
+      "name": "shadow は配信の挙動を 1 つも変えない",
+      "criteria": "shadow では旧が決めた宛先がそのまま返り、cdp では引けなければ送らない (fail-closed)",
+      "checks": [
+        "unit.stage4-segment"
+      ]
+    },
+    {
+      "id": "F-24",
+      "area": "配信",
+      "name": "未連携の人にも宛先が立つ",
+      "criteria": "delivery_identity が L1 から派生し、生 LINE userId の唯一の置き場になる (T-9)",
+      "checks": [
+        "dbw.stage4-l1",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-25",
+      "area": "解析",
+      "name": "解析が L0 を取りに来る口が開いている",
+      "criteria": "3 つの GET が読み取り専用で、生 LINE userId / email_hash を 1 つも返さない",
+      "checks": [
+        "unit.export",
+        "dbw.stage3-readout"
+      ]
+    },
+    {
+      "id": "F-26",
+      "area": "解析",
+      "name": "解析の口が鍵なしで開かない",
+      "criteria": "3 つの GET が鍵なし・誤鍵・秘密未設定のいずれでも 401",
+      "checks": [
+        "hermetic.http-surface"
+      ]
+    },
+    {
+      "id": "F-27",
+      "area": "解析",
+      "name": "日の境界が JST で揃っている",
+      "criteria": "TypeScript 側と SQL 側の日境界が 1 秒もずれない (E8' の突合軸)",
+      "checks": [
+        "unit.export",
+        "dbw.stage3-readout"
+      ]
+    },
+    {
+      "id": "F-28",
+      "area": "解析",
+      "name": "取り込みが冪等で、途中で落ちても取りこぼさない",
+      "criteria": "同じ範囲を 2 回取り込んでも二重にならず、watermark が進む",
+      "checks": [
+        "analytics.l0-ingest"
+      ]
+    },
+    {
+      "id": "F-29",
+      "area": "解析",
+      "name": "2 つの L0 が同じ数を持っている",
+      "criteria": "Supabase と SQLite の日次件数が突合され、食い違いが検知される (E8')",
+      "checks": [
+        "analytics.l0-ingest",
+        "dbw.stage3-readout"
+      ]
+    },
+    {
+      "id": "F-30",
+      "area": "解析",
+      "name": "3 指標が L0 から出る",
+      "criteria": "M3 捕捉率・入口別 CVR・継続率が L0 由来で計算される",
+      "checks": [
+        "analytics.report-l0"
+      ]
+    },
+    {
+      "id": "F-31",
+      "area": "消去 (GDPR)",
+      "name": "消去が「人の記録の置き場」を取りこぼしていない",
+      "criteria": "人を指す表はすべて消去の列挙に載っているか、載せない理由が宣言されている (R10')",
+      "checks": [
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-32",
+      "area": "消去 (GDPR)",
+      "name": "消去が列挙されたすべての置き場に及ぶ",
+      "criteria": "消したあと、列挙された表に 1 行も残らず residue が clean",
+      "checks": [
+        "dbw.erasure-registry",
+        "dbw.erasure-all-stores",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-33",
+      "area": "消去 (GDPR)",
+      "name": "消去は追記専用の唯一の例外である",
+      "criteria": "消去経路だけが例外を開け、関数を抜けると閉じる。開ける関数は 1 つだけ (E4 例外表)",
+      "checks": [
+        "db.invariants",
+        "dbw.append-only"
+      ]
+    },
+    {
+      "id": "F-34",
+      "area": "消去 (GDPR)",
+      "name": "消した人が復活しない",
+      "criteria": "退役した主体に出来事・鍵・解釈を足せず、同じ冪等キーでも新しい主体に付く",
+      "checks": [
+        "dbw.erasure-registry",
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-35",
+      "area": "消去 (GDPR)",
+      "name": "消去が 4 つ目のストア (解析) にも届く",
+      "criteria": "forgetPerson に入口があり、消したあと再取込で復活しない (suppression)",
+      "checks": [
+        "analytics.l0-ingest"
+      ]
+    },
+    {
+      "id": "F-36",
+      "area": "消去 (GDPR)",
+      "name": "どの ID から消しても結果が同じ",
+      "criteria": "未連携 / 連携済み / 両方の記録を持つ人のいずれでも消え方が対称",
+      "checks": [
+        "dbw.erasure-all-stores"
+      ]
+    },
+    {
+      "id": "F-37",
+      "area": "機械強制・観測",
+      "name": "接続先が未設定なら起動を拒否する",
+      "criteria": "Firebase 未設定・不一致で入口ゲートが閉じる (E6'・silent no-op 縮退の廃止)",
+      "checks": [
+        "hermetic.firestore-gate"
+      ]
+    },
+    {
+      "id": "F-38",
+      "area": "機械強制・観測",
+      "name": "撤去の進捗が CI に固定されている",
+      "criteria": "ratchet が両方向 (増えたら落ちる / 減ったのに枠が残っていても落ちる) で効く (R8)",
+      "checks": [
+        "static.ratchet",
+        "unit.ratchet-mechanism"
+      ]
+    },
+    {
+      "id": "F-39",
+      "area": "機械強制・観測",
+      "name": "設計が要求する配線が正本の DB に実在する",
+      "criteria": "トリガ 10 本・一意制約・SQL 関数 17 本が本番に在る (migration 当て忘れ検知)",
+      "checks": [
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-40",
+      "area": "機械強制・観測",
+      "name": "新旧一致の観測が空虚合格しない",
+      "criteria": "1 本も比べていない日を「一致した日」と言わない (parity の判定)",
+      "checks": [
+        "unit.stage4-segment",
+        "unit.stage2-backfill",
+        "dbw.stage3-readout"
+      ]
+    },
+    {
+      "id": "F-41",
+      "area": "機械強制・観測",
+      "name": "正本のデータ自体が不変条件を守っている",
+      "criteria": "退役者の残骸ゼロ・孤児ゼロ・1 鍵 1 主体・link の向き正規化が実データで成立",
+      "checks": [
+        "db.invariants"
+      ]
+    },
+    {
+      "id": "F-42",
+      "area": "機械強制・観測",
+      "name": "型が通る (退行の下限)",
+      "criteria": "CI の型検査が緑",
+      "checks": [
+        "static.typecheck"
+      ]
+    }
+  ]
+}

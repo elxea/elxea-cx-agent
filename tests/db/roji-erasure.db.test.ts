@@ -86,7 +86,9 @@ SELECT
   (SELECT count(*)::int FROM dormant_reengagement_log WHERE line_user_id = ANY($2)) AS dormant_reengagement_log,
   (SELECT count(*)::int FROM marche_activation_log    WHERE line_user_id = ANY($2)) AS marche_activation_log,
   (SELECT count(*)::int FROM account_link_nonces      WHERE shopify_customer_id = ANY($1)) AS account_link_nonces,
-  (SELECT count(*)::int FROM customer_profiles        WHERE line_user_id = ANY($2) OR shopify_customer_id = ANY($1)) AS customer_profiles,
+  -- customer_profiles は migration 039 で表ごと廃止（死蔵・本番 0 行）。
+  -- 数える対象がもう無いので枝ごと外す。残しておくと「表が無い」で
+  -- 検査全体が落ち、消去の対称性そのものが検査されない状態になる。
   (SELECT count(*)::int FROM customer_linkages        WHERE line_user_id = ANY($2) OR shopify_customer_id = ANY($1)) AS customer_linkages,
   (SELECT count(*)::int FROM user_identity_map        WHERE line_user_id = ANY($2) OR line_login_user_id = ANY($2)
                                                           OR shopify_customer_id = ANY($1)) AS user_identity_map,
@@ -166,11 +168,7 @@ async function seedPerson(
        VALUES ($1, current_date, false, true, 'TEST-ERASE 送信下書きの本文')`,
       [line],
     );
-    await client.query(
-      `INSERT INTO customer_profiles (line_user_id, shopify_customer_id, email, display_name)
-       VALUES ($1,$2,'test-erase@example.invalid','TEST-ERASE')`,
-      [line, shopify ?? null],
-    );
+    // customer_profiles への投入は migration 039 の表廃止に伴い削除。
   }
 
   if (shopify) {

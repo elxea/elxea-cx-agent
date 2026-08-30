@@ -108,6 +108,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:hermetic
 
+      # CDP 受入スイート — 「どの **機能** が緑か」を機能 ID ごとに一覧で出す。
+      #
+      # 新規ジョブは作らず hermetic-e2e に相乗りさせる。理由:
+      #   (1) このステップが走らせるのは static / unit / hermetic の 3 層で、
+      #       いずれも秘密不要・ネットワーク不使用。hermetic-e2e と前提が同じ
+      #   (2) 上の pnpm test:hermetic と検査対象は重なるが、**出力の粒度が違う**。
+      #       test:hermetic は「テストが通ったか」、こちらは「機能が動くか」を出す。
+      #       落ちたときに読む人が見るのは後者なので、両方出す価値がある
+      #
+      # DB 層 / 解析リポ / 2 リポ突合は --tier で除外する（判定は PARTIAL / SKIP に
+      # なるが CI は落ちない）。CI を落とす条件は「PR が壊した」に限りたい。秘密や
+      # 隣のリポジトリが無いことは PR の責任ではなく、それで赤くすると赤の意味が
+      # 薄まってやがて誰も見なくなる。除外した層は受入時に人が回す
+      # （手順は docs/cdp-test-plan.md §4・§6）。
+      - name: CDP 受入スイート (機能別 PASS/FAIL)
+        run: pnpm test:cdp:acceptance:ci
+
   # 会話シナリオ E2E（tests/e2e/run-e2e.ts）は push ゲートに置かない。手動 workflow_dispatch 専用。
   #
   # 理由（握りつぶしではなく配置換え）:
