@@ -33,6 +33,7 @@ import worker from "../../src/index";
 import { getHermetic, type Hermetic } from "../lib/hermetic";
 import { dispatchLineWebhook, settle } from "../lib/webhook";
 import { messageEvent, synthLineUserId } from "../lib/synthetic";
+import { signSessionId } from "../../src/lib/chat-session";
 
 /** サイトのチャットで伝える好み（LINE 側には一度も書いていない）。 */
 const WEB_UTTERANCE = "花の香りの紅茶が好きです。";
@@ -230,12 +231,25 @@ async function sayOnWeb(opts: {
   trusted: boolean;
   shopifyCustomerId?: string;
   lineUserId?: string;
+  /**
+   * 送る `session_proof`。
+   *
+   * 省略時は `sessionId` の正しい署名を付ける (= 自分の session を正規に持ち回る人)。
+   * `null` を渡すと **署名を付けない** (= 他人の session_id を名乗るだけの攻撃者。
+   * 共有秘密を持たないので、他人の UUID に対する正しい署名は作れない)。
+   */
+  proof?: string | null;
 }): Promise<number> {
   const body: Record<string, unknown> = { message: opts.text, session_id: opts.sessionId };
   const headers: Record<string, string> = { "content-type": "application/json" };
 
   if (opts.trusted) {
     headers["X-API-Key"] = String(env.SYNC_API_SECRET);
+    const proof =
+      opts.proof === undefined
+        ? await signSessionId(opts.sessionId, String(env.CHAT_SESSION_SECRET))
+        : opts.proof;
+    if (proof !== null) body.session_proof = proof;
     if (opts.shopifyCustomerId) body.shopify_customer_id = opts.shopifyCustomerId;
     if (opts.lineUserId) body.line_user_id = opts.lineUserId;
   }

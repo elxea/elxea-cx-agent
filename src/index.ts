@@ -219,6 +219,18 @@ export type Env = {
   // Sync
   SYNC_API_SECRET?: string;
   /**
+   * Web チャットの `session_id` が **自分たちの発行したものか** を確かめる HMAC 鍵。
+   * **SYNC_API_SECRET とは別鍵**。
+   *
+   * 同期の鍵は「この呼び出しは web-app からだ」しか言わない。session_id が本物かは
+   * 別の問いで、ここを同じ鍵にすると片方が漏れたときに両方の意味が同時に失われる。
+   * 署名の形式・理由は src/lib/chat-session.ts が正本（web-app 側と 1 対 1）。
+   *
+   * 未設定でもチャットは止まらない（session_id を鍵として使わない = その場限りの
+   * 会話になる）。理由は resolveUsableSessionId のコメント参照。
+   */
+  CHAT_SESSION_SECRET?: string;
+  /**
    * 「記録を消す」の入口（POST /api/erase）専用の秘密。
    * SYNC_API_SECRET とは別に持つ。同期の鍵が漏れても消去は撃てないようにするため。
    */

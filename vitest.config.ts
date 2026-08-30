@@ -57,6 +57,10 @@ export default defineConfig({
           //   ＝ 2026-08-30 の本番切断がそのまま素通りする。実鍵は決して置かない
           //   （assert-not-prod の prod マーカー検査も通る無害な文字列）。
           SYNC_API_SECRET: "e2e-mock-sync-api-secret",
+          // session_id が「サーバ発行のものか」を確かめる HMAC 鍵（モック値）。
+          //   これが無いと署名検証が常に落ち、**他人の session_id を名乗る攻撃を
+          //   テストで再現できない**（全部 fail-closed に倒れて緑になってしまう）。
+          CHAT_SESSION_SECRET: "e2e-mock-chat-session-secret",
           // roji 最初のアンケートの停止スイッチ。動線17 を検証するため **テストでは ON** にする。
           //   これは送信フラグではない（アンケートは返信のみで LINE 送信系 API を呼ばない）ので
           //   assert-not-prod の assertSendDisabled の対象外。実送信はゼロのまま。

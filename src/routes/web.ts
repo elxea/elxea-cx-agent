@@ -28,6 +28,7 @@ import {
   resolveWithShopifyCustomerId,
 } from "../lib/identity";
 import { isValidSyncApiKey } from "../lib/sync-auth";
+import { resolveUsableSessionId } from "../lib/chat-session";
 import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
@@ -316,6 +317,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   let body: {
     message?: string;
     session_id?: string;
+    session_proof?: string;
     shopify_customer_id?: string;
     line_user_id?: string;
   };
@@ -325,7 +327,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { message, session_id, shopify_customer_id, line_user_id } = body;
+  const { message, session_id, session_proof, shopify_customer_id, line_user_id } = body;
 
   // session_id バリデーション
   const sessionError = validateSessionId(session_id);
@@ -354,7 +356,26 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "message is required" }, 400);
   }
 
-  const sessionId = session_id as string;
+  /* [SEC-3 前提] `session_id` は **サーバが発行したものだけ** を鍵として使う。
+     ブラウザ自作の UUID をそのまま鍵にしていたのが P1/P2/P3（他人の session を
+     奪う・読む・書き込む）に共通する前提だった。署名が確かめられないときは
+     その場限りの ID にすり替える（応答は止めない）。理由は lib/chat-session.ts。 */
+  const claimedSessionId = session_id as string;
+  const sessionResolution = await resolveUsableSessionId({
+    claimedSessionId,
+    proof: session_proof,
+    trusted: isTrustedServerCaller(c),
+    secret: (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
+  });
+  if (!sessionResolution.proven) {
+    // 無言で捨てない（T-12）。生の session_id は出さない。
+    console.warn(
+      "[web] session not proven:",
+      JSON.stringify({ route: "api/chat", reason: sessionResolution.reason }),
+    );
+  }
+  const sessionId = sessionResolution.sessionId;
+
   let processedMessage = message.trim();
   if (processedMessage.length > MAX_MESSAGE_LENGTH) {
     processedMessage = processedMessage.slice(0, MAX_MESSAGE_LENGTH);
@@ -446,7 +467,9 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     //   ログイン済み（＝信頼経路で本人が確定している）なら、その場で 1 行足して
     //   「このセッションはこの人のもの」を残す。basis は既存の語彙
     //   `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した経路）。
-    if (hasVerifiedIdentity) {
+    /* 署名が確かめられた session だけを人に結ぶ。すり替えた使い捨て ID を結ぶと
+       subject_links に一度きりのゴミ行が積み上がるだけで、誰の役にも立たない。 */
+    if (hasVerifiedIdentity && sessionResolution.proven) {
       c.executionCtx.waitUntil(
         bindWebSessionToOwner(supabase, verifiedIdentity, sessionOwnership),
       );
@@ -614,7 +637,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
  * レスポンス: { messages: [...], is_linked: boolean, total_count: number, limit: number, offset: number }
  */
 export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
-  const sessionId = c.req.query("session_id");
+  const claimedSessionId = c.req.query("session_id");
   const channelFilter = c.req.query("channel") as "line" | "web" | undefined;
   const keyword = c.req.query("keyword") ?? null;
   const dateFrom = c.req.query("from") ?? null;
@@ -622,10 +645,27 @@ export async function webChatHistoryHandler(c: Context<{ Bindings: Env }>) {
   const limitParam = c.req.query("limit");
   const offsetParam = c.req.query("offset");
 
-  const sessionError = validateSessionId(sessionId);
+  const sessionError = validateSessionId(claimedSessionId);
   if (sessionError) {
     return c.json({ error: sessionError }, 400);
   }
+
+  /* [SEC-3 前提] 履歴の読み出しも、**サーバが発行した session_id** でしか行わない。
+     ここが素通しだと「他人の session_id を query に入れるだけでその人の Web 会話が
+     読める」(QA 指摘 P2) がそのまま残る。理由は lib/chat-session.ts。 */
+  const sessionResolution = await resolveUsableSessionId({
+    claimedSessionId: claimedSessionId as string,
+    proof: c.req.query("session_proof"),
+    trusted: isTrustedServerCaller(c),
+    secret: (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
+  });
+  if (!sessionResolution.proven) {
+    console.warn(
+      "[web] session not proven:",
+      JSON.stringify({ route: "api/chat/history", reason: sessionResolution.reason }),
+    );
+  }
+  const sessionId = sessionResolution.sessionId;
 
   // channel パラメータのバリデーション
   if (channelFilter && channelFilter !== "line" && channelFilter !== "web") {
