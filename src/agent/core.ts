@@ -43,10 +43,102 @@ import { recordEscalation } from "../lib/alerts";
 import { applyBrandGuard } from "../lib/brand-guard";
 import { formatTeaLabel } from "../lib/brand-copy";
 
+/**
+ * Anthropic クライアントを作る。
+ *
+ * `fetch` を **遅延束縛**（呼ぶたびに globalThis から引き直す）で渡すのが要点。
+ * SDK の既定は import 時点の globalThis.fetch を掴むため、テストが後から敷いたモックを
+ * すり抜けて **実 API へ出てしまう**（ハーメティックの穴。2026-08-30 に動線20 の追加で実測）。
+ * 遅延束縛にすればモックが確実に効く。本番挙動は変わらない
+ * （Workers 上では globalThis.fetch が標準の fetch のままで、経路も回数も同じ）。
+ */
+function createAnthropicClient(env: Env): Anthropic {
+  return new Anthropic({
+    apiKey: env.ANTHROPIC_API_KEY,
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
+      globalThis.fetch(input, init)) as typeof fetch,
+  });
+}
+
 type Message = {
   role: "user" | "assistant";
   content: string;
+  /**
+   * B-3: その発言がどのチャネルで交わされたか（conversations.channel の生値）。
+   *
+   * getCrossChannelMessages / getRecentMessages はどちらも `channel` を選択して返すが、
+   * これまでプロンプト整形時に捨てていた。捨てていると、LINE と Web の会話が混ざった履歴を
+   * 見た AI が「どこで伺った話か」を言えず、混同するか黙るかのどちらかになる。
+   */
+  channel?: string;
 };
+
+/**
+ * B-3: 会話履歴のチャネルを、お客様に向けて言うときの言い方に直す。
+ *
+ * ここは AI が本文で使う言葉になるので、内部語（"web" / "line" の生値）を漏らさない。
+ * 未知のチャネルは null を返す（推測でラベルを作らない）。
+ */
+const CHANNEL_LABELS: Record<string, string> = {
+  line: "LINE",
+  web: "サイトのチャット",
+};
+
+export function channelLabel(channel: string | null | undefined): string | null {
+  if (typeof channel !== "string" || channel === "") return null;
+  return CHANNEL_LABELS[channel] ?? null;
+}
+
+/** 履歴に現れるチャネルの生値（重複なし・順序は初出順）。 */
+export function historyChannels(history: Message[]): string[] {
+  const seen: string[] = [];
+  for (const m of history) {
+    if (typeof m.channel === "string" && m.channel !== "" && !seen.includes(m.channel)) {
+      seen.push(m.channel);
+    }
+  }
+  return seen;
+}
+
+/**
+ * B-3: 履歴が 2 つ以上のチャネルにまたがっているか（＝チャネル名を添える価値があるか）。
+ *
+ * 単一チャネルしかない人（大多数）ではラベルを一切足さない。プロンプトの見た目を
+ * 変えるのは「本当に横断している人」だけに限る（既存の会話体験を動かさないため）。
+ */
+export function historySpansChannels(history: Message[]): boolean {
+  return historyChannels(history).map(channelLabel).filter((l) => l !== null).length > 1;
+}
+
+/**
+ * B-3: 会話履歴を Claude のメッセージ列へ変換する。
+ *
+ * 履歴が複数チャネルにまたがるときだけ、各発言の頭に `[LINE]` / `[サイトのチャット]` を付ける。
+ * これで AI は「LINE で伺った」「サイトのチャットで伺った」と言い分けられる。
+ * 印の意味は buildCrossChannelNote がシステム側で説明する（印そのものは本文に出させない）。
+ */
+export function buildHistoryMessages(history: Message[]): Anthropic.MessageParam[] {
+  const labelled = historySpansChannels(history);
+  return history.map((m) => {
+    const label = labelled ? channelLabel(m.channel) : null;
+    return {
+      role: m.role as "user" | "assistant",
+      content: label ? `[${label}] ${m.content}` : m.content,
+    };
+  });
+}
+
+/**
+ * B-3: 上のチャネル印の読み方をシステムプロンプトに 1 ブロックだけ足す。
+ * 単一チャネルの人には空文字を返す（プロンプトを 1 文字も変えない）。
+ */
+export function buildCrossChannelNote(history: Message[]): string {
+  if (!historySpansChannels(history)) return "";
+  const labels = historyChannels(history)
+    .map(channelLabel)
+    .filter((l): l is string => l !== null);
+  return `\n\n## 会話履歴のチャネル表示\n過去の発言の先頭にある [${labels.join("] / [")}] は、その発言がどこで交わされた会話かを示す内部の印です（お客様の画面には出ていません）。\n- 以前の話に触れるときは「${labels[0]}で伺った」のように、どこでの会話かを添えて自然に参照してください。\n- 印そのもの（角括弧の表記）を返答本文に書いてはいけません。`;
+}
 
 type AgentResult = {
   response: string;
@@ -158,7 +250,7 @@ export async function runAgent(
     ratingUserRef?: string;
   },
 ): Promise<AgentResult> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const client = createAnthropicClient(env);
   const supabase = createSupabaseClient(env);
   const t0 = Date.now();
 
@@ -279,62 +371,11 @@ export async function runAgent(
   const personaFragment = buildPersonaPromptFragment(personaPrimary);
 
   // customerContext: 顧客固有データ（personaFragment は第1ブロックでキャッシュするため除外）
-  let customerContext = "";
-  if (customerProfile) {
-    const parts: string[] = [];
-
-    // 紐付け済みフラグ: Agent にリピーター向け対応を促す
-    if (isLinked) {
-      parts.push("紐付け状態: LINE・Web アカウント連携済み（リピーターとして対応）");
-    }
-
-    if (customerProfile.displayName) {
-      parts.push(`顧客名: ${customerProfile.displayName}`);
-    }
-    if (customerProfile.membershipTier && customerProfile.membershipTier !== "none") {
-      parts.push(`会員ランク: ${customerProfile.membershipTier}`);
-    }
-    if (customerProfile.depthLevel) {
-      parts.push(`茶の経験レベル: ${customerProfile.depthLevel}`);
-    }
-
-    // TasteProfile: 紐付け済み顧客の嗜好データを詳細に注入
-    if (customerProfile.tasteProfile) {
-      const tp = customerProfile.tasteProfile;
-      if (tp.preferredCategories?.length) {
-        parts.push(`好みのカテゴリ: ${tp.preferredCategories.join(", ")}`);
-      }
-      if (tp.flavorPreferences?.length) {
-        parts.push(`好みのフレーバー: ${tp.flavorPreferences.join(", ")}`);
-      }
-      if (tp.scenePref) {
-        parts.push(`好みのシーン: ${tp.scenePref}`);
-      }
-    }
-
-    // PersonaProfile: スコア詳細も注入（紐付け済みの場合のみ）
-    if (isLinked && customerProfile.persona) {
-      const ps = customerProfile.persona;
-      if (ps.scores) {
-        parts.push(
-          `ペルソナスコア: serenity=${ps.scores.serenity}, explorer=${ps.scores.explorer}, sensory=${ps.scores.sensory}`,
-        );
-      }
-      if (ps.lastUpdated) {
-        parts.push(`ペルソナ最終更新: ${ps.lastUpdated}`);
-      }
-    }
-
-    if (parts.length > 0) {
-      customerContext = `\n\n## 顧客データ\n${parts.join("\n")}`;
-      if (isLinked) {
-        customerContext += "\n\n**注意**: この顧客はアカウント連携済みです。過去の好みや購入履歴を踏まえたパーソナライズされた提案をしてください。名前で呼びかけ、以前の会話内容を自然に参照してください。\n\n**プロファイル活用ルール**:\n- 好みのカテゴリやフレーバーが記録されている場合、「前回、〇〇がお好みとのことでしたね」のように自然に参照する\n- プロファイルが空の場合は無理に参照せず、通常通り対応する\n- 好みの情報は押し付けではなく、提案の精度向上に使う";
-      }
-    }
-  } else if (isLinked) {
-    // 紐付け済みだが Firestore プロファイルが未作成のケース
-    customerContext = "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
-  }
+  //
+  // B-1: ここは runAgentStreaming と同じ buildCustomerContext を呼ぶ（以前は同内容を写経していた）。
+  //   連携済み向けの「以前の会話内容を自然に参照してください」という指示はこの 1 か所が正本で、
+  //   2 箇所に分かれていると片方だけ直って挙動がずれる。
+  const customerContext = buildCustomerContext(customerProfile, isLinked);
 
   // 入力言語検出: 英語など非日本語の場合、応答言語を強制するリマインダーを生成
   const languageReminder = detectLanguageReminder(userMessage);
@@ -351,13 +392,11 @@ export async function runAgent(
     firestoreCustomerId,
   });
 
-  // 会話履歴を Claude のメッセージ形式に変換
-  const messages: Anthropic.MessageParam[] = [
-    ...conversationHistory.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    })),
-  ];
+  // B-3: 履歴が複数チャネルにまたがるときだけ、印の読み方をシステム側に足す。
+  const crossChannelNote = buildCrossChannelNote(conversationHistory);
+
+  // 会話履歴を Claude のメッセージ形式に変換（B-3: 横断時のみチャネル印を付ける）
+  const messages: Anthropic.MessageParam[] = [...buildHistoryMessages(conversationHistory)];
 
   // 画像付きメッセージの場合、multimodal content を構築
   if (options?.imageContent) {
@@ -412,7 +451,7 @@ export async function runAgent(
           },
           {
             type: "text" as const,
-            text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext,
+            text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext,
           },
         ],
         // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
@@ -684,7 +723,7 @@ export async function runAgentStreaming(
     ratingUserRef?: string;
   },
 ): Promise<StreamingAgentMeta> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const client = createAnthropicClient(env);
   const supabase = createSupabaseClient(env);
   const t0 = Date.now();
 
@@ -763,6 +802,8 @@ export async function runAgentStreaming(
   const personaFragment = buildPersonaPromptFragment(personaPrimary);
   const customerContext = buildCustomerContext(customerProfile, isLinked);
   const languageReminder = detectLanguageReminder(userMessage);
+  // B-3: 履歴が複数チャネルにまたがるときだけ、印の読み方をシステム側に足す。
+  const crossChannelNote = buildCrossChannelNote(conversationHistory);
 
   // A-1 文脈接続: positive/neutral な事実 + 境界 4 ルールを注入する断片（fail-safe・空可）。
   const personalizationBlock = await buildPersonalizationBlock({
@@ -776,10 +817,8 @@ export async function runAgentStreaming(
     firestoreCustomerId,
   });
 
-  // メッセージ構築
-  const messages: Anthropic.MessageParam[] = [
-    ...conversationHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
-  ];
+  // メッセージ構築（B-3: 横断時のみチャネル印を付ける）
+  const messages: Anthropic.MessageParam[] = [...buildHistoryMessages(conversationHistory)];
   if (options?.imageContent) {
     messages.push({ role: "user", content: [
       { type: "image" as const, source: { type: "base64" as const, media_type: options.imageContent.mediaType, data: options.imageContent.base64 } },
@@ -806,7 +845,7 @@ export async function runAgentStreaming(
       // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
       // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
       { type: "text" as const, text: systemPrompt(env), cache_control: { type: "ephemeral" as const } },
-      { type: "text" as const, text: personaFragment + languageReminder + customerContext + personalizationBlock + knowledgeContext },
+      { type: "text" as const, text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext },
     ],
     // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
     tools: (() => {
@@ -994,8 +1033,12 @@ export async function runAgentStreaming(
 
 /**
  * 顧客プロファイルからコンテキスト文字列を構築する。
+ *
+ * B-1: `isLinked` はここ（＝プロンプトの文言）だけに効くフラグで、**どのデータを読むかは
+ *   一切決めていない**（customerProfile は呼び出し前に別経路で取得済み）。連携済みの人に
+ *   true を渡しても「存在しないキーでカルテを引く」ことは起きない。
  */
-function buildCustomerContext(customerProfile: CustomerProfile | null, isLinked: boolean): string {
+export function buildCustomerContext(customerProfile: CustomerProfile | null, isLinked: boolean): string {
   if (customerProfile) {
     const parts: string[] = [];
     if (isLinked) parts.push("紐付け状態: LINE・Web アカウント連携済み（リピーターとして対応）");
@@ -1021,7 +1064,11 @@ function buildCustomerContext(customerProfile: CustomerProfile | null, isLinked:
       return ctx;
     }
   } else if (isLinked) {
-    return "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みですが、詳細プロファイルはまだありません。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
+    // B-1: ここが「連携はしているが Firestore カルテがまだ無い人」の枝で、LIFF / Account Link で
+    //   連携したばかりの人はほぼ全員ここに来る。以前はこの枝にだけ「以前の会話内容を自然に
+    //   参照してください」が無く、履歴が目の前にあるのに AI が「覚えていない」と否認していた。
+    //   カルテの有無は記憶の有無ではないので、参照の指示はカルテがなくても出す。
+    return "\n\n## 顧客データ\n紐付け状態: LINE・Web アカウント連携済み（プロファイル未作成）\n\n**注意**: この顧客はアカウント連携済みです。詳細プロファイルはまだありませんが、上の会話履歴には別のチャネルでのやり取りも含まれています。以前の会話内容を自然に参照してください（履歴にあることを「覚えていない」「確認できない」と否定しないこと）。会話の中から好みを自然に探り、リピーターとして丁寧に対応してください。";
   }
   return "";
 }
