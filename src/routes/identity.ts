@@ -170,19 +170,27 @@ export async function identityLinkLineHandler(c: Context<{ Bindings: Env }>) {
    *
    * 署名が確かめられない session_id は **無かったことにする**（昇格も link も行わない）。
    * 連携そのもの（LINE ログイン）は成立させる — 巻き添えでログインを壊さない。 */
+  const chatSessionSecret = (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET;
   const claimedSessionId = typeof body.session_id === "string" ? body.session_id : null;
   const sessionProven =
     claimedSessionId !== null &&
-    (await verifySessionProof(
-      claimedSessionId,
-      session_proof,
-      (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
-    ));
-  const session_id = sessionProven ? claimedSessionId : null;
+    (await verifySessionProof(claimedSessionId, session_proof, chatSessionSecret));
+
+  /* 移行モード（鍵をまだ配っていない間）: この PR 以前とまったく同じ挙動に倒す。
+     ここを「検証できないから昇格しない」に倒すと、鍵が入るまでの間、匿名で
+     話していた人が LINE ログインしても会話が引き継がれなくなる（既存機能の停止）。
+     露出はこの PR 以前と同じで、増えない。理由は lib/chat-session.ts の移行モード。 */
+  const migrationMode = !chatSessionSecret || chatSessionSecret.trim() === "";
+  const session_id = sessionProven || migrationMode ? claimedSessionId : null;
+
   if (claimedSessionId !== null && !sessionProven) {
     console.warn(
-      "[identity/link-line] session not proven; skipping anonymous promotion:",
-      JSON.stringify({ route: "identity.link-line" }),
+      "[identity/link-line] session not proven:",
+      JSON.stringify({
+        route: "identity.link-line",
+        // 移行中なのか、署名が合わなかったのかを区別できるようにする（T-12）。
+        mode: migrationMode ? "migration_secret_unset" : "rejected",
+      }),
     );
   }
 

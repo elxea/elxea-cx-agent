@@ -22,7 +22,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { signSessionId, verifySessionProof } from "../../src/lib/chat-session";
+import {
+  resolveUsableSessionId,
+  signSessionId,
+  verifySessionProof,
+} from "../../src/lib/chat-session";
 
 /** vitest.config.ts の bindings と同じモック鍵。 */
 const SECRET = "e2e-mock-chat-session-secret";
@@ -68,5 +72,68 @@ describe("hermetic L1 — 動線23: 署名の相互運用 (web-app ↔ cx-agent)
     expect(await verifySessionProof(SESSION_ID, EXPECTED_FROM_WEB_APP, undefined)).toBe(false);
     expect(await verifySessionProof(SESSION_ID, EXPECTED_FROM_WEB_APP, "   ")).toBe(false);
     expect(await verifySessionProof(SESSION_ID, null, SECRET)).toBe(false);
+  });
+});
+
+/**
+ * 移行モード — 鍵が 4 箇所に行き渡る前にこのコードが本番に出たときの挙動。
+ *
+ * 鍵の配布とデプロイは人手の手順なので、順序が前後する前提で作る。ここを
+ * 「検証できないから使わない」に倒すと **全員の会話が毎ターン白紙になる**
+ * (データは漏れないが、記憶という機能が丸ごと落ちる)。よって鍵が無い間は
+ * この PR 以前とまったく同じ挙動に倒す — 露出は増えない。
+ *
+ * ただし `proven` は false のままにして、**人に結ぶ追記 (P1 の入口) はしない**。
+ * 検証できない session を恒久的に誰かのものにすることは移行中もしない。
+ */
+describe("移行モード (CHAT_SESSION_SECRET 未設定)", () => {
+  const CLAIMED = "33333333-4444-4555-8666-777777777001";
+
+  it("鍵が無い間は、名乗られた session_id をそのまま使う (会話が白紙にならない)", async () => {
+    const r = await resolveUsableSessionId({
+      claimedSessionId: CLAIMED,
+      proof: null,
+      trusted: true,
+      secret: undefined,
+    });
+    expect(r.sessionId, "鍵が無いだけで会話 ID がすり替わると、全員の記憶が飛ぶ").toBe(CLAIMED);
+    expect(r.reason).toBe("secret_unset_migration");
+  });
+
+  it("移行中でも proven は立てない (人に結ぶ追記はしない = P1 の入口は開けない)", async () => {
+    const r = await resolveUsableSessionId({
+      claimedSessionId: CLAIMED,
+      proof: null,
+      trusted: true,
+      secret: "   ", // 空白だけ = 未設定と同じ
+    });
+    expect(r.proven, "検証できない session を恒久的に誰かのものにしてはいけない").toBe(false);
+  });
+
+  it("鍵を入れた後は移行モードに落ちない (署名が無ければ使い捨てにすり替える)", async () => {
+    const r = await resolveUsableSessionId({
+      claimedSessionId: CLAIMED,
+      proof: null,
+      trusted: true,
+      secret: SECRET,
+      mintEphemeral: () => "ephemeral-id",
+    });
+    expect(r.sessionId, "鍵があるのに未署名の session_id が通っている").toBe("ephemeral-id");
+    expect(r.proven).toBe(false);
+    expect(r.reason).toBe("proof_absent");
+  });
+
+  it("信頼できない呼び出しは、鍵の有無に関わらず名乗りを使わない", async () => {
+    for (const secret of [undefined, SECRET]) {
+      const r = await resolveUsableSessionId({
+        claimedSessionId: CLAIMED,
+        proof: null,
+        trusted: false,
+        secret,
+        mintEphemeral: () => "ephemeral-id",
+      });
+      expect(r.sessionId, `secret=${String(secret)}`).toBe("ephemeral-id");
+      expect(r.proven).toBe(false);
+    }
   });
 });

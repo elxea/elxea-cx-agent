@@ -140,8 +140,21 @@ export async function resolveUsableSessionId(input: {
     return { sessionId: mint(), proven: false, reason: "untrusted_caller" };
   }
   if (!secret || normalizeSecret(secret) === "") {
-    // 設定事故。**無検証で通さない**が、応答は止めない。
-    return { sessionId: mint(), proven: false, reason: "secret_unset" };
+    /* ─ 移行モード（鍵をまだ配っていない間）─ Boss 判断 2026-08-31
+     *
+     *   鍵が 4 箇所に行き渡る前にこのコードが本番に出る可能性がある。そのとき
+     *   「検証できないから使わない」に倒すと、**全員の会話が毎ターン白紙になる**
+     *   （データは漏れないが、記憶という機能が丸ごと落ちる）。鍵の配布と
+     *   デプロイは人手の手順なので、順序が前後する前提で作る。
+     *
+     *   よって鍵が無い間は **この PR 以前とまったく同じ挙動**（名乗られた
+     *   session_id をそのまま使う）に倒す。露出はこの PR 以前と同じで、増えない。
+     *   `proven: false` は返すので、**人に結ぶ追記（P1 の入口）は行われない** —
+     *   検証できない session を恒久的に誰かのものにすることは、移行中もしない。
+     *
+     *   ⚠ この分岐に落ちている間は P1/P2/P3 が閉じていない。鍵を入れるまでが
+     *     移行期間であることを 1 行ログで必ず可視化する（呼び出し側が出す）。 */
+    return { sessionId: claimedSessionId, proven: false, reason: "secret_unset_migration" };
   }
   if (!(await verifySessionProof(claimedSessionId, proof, secret))) {
     return { sessionId: mint(), proven: false, reason: proof ? "proof_mismatch" : "proof_absent" };
