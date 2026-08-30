@@ -145,6 +145,32 @@ describe("isValidSyncApiKey (pure)", () => {
   it("一致 → true", () => {
     assertEqual(isValidSyncApiKey(TEST_SECRET, TEST_SECRET), true);
   });
+
+  /* ── 2026-08-30 の本番障害の再発防止 ───────────────────────────────────
+   *
+   * web-app は `lib/config/spec.ts` の `optionalTrimmed()` で読むので **必ず
+   * trim 済みの値を送る**。こちら側が生の値と `===` で突き合わせていたため、
+   * Worker の secret に末尾改行が 1 文字混ざった瞬間、どう試しても一致しない
+   * 401 が生まれ、連携が全経路で落ちた（`wrangler secret put` に echo を使うと
+   * 改行が付く）。両側 trim して比較する。 */
+  it("Worker 側 secret の末尾改行を吸収する（送信側は trim 済み）", () => {
+    assertEqual(isValidSyncApiKey(TEST_SECRET, `${TEST_SECRET}\n`), true);
+    assertEqual(isValidSyncApiKey(TEST_SECRET, `${TEST_SECRET}\r\n`), true);
+    assertEqual(isValidSyncApiKey(TEST_SECRET, ` ${TEST_SECRET} `), true);
+  });
+
+  it("呼び出し側の余分な空白も吸収する（対称にする）", () => {
+    assertEqual(isValidSyncApiKey(`${TEST_SECRET}\n`, TEST_SECRET), true);
+  });
+
+  it("空白だけが同じでも中身が違えば拒否する（認証は緩めない）", () => {
+    assertEqual(isValidSyncApiKey(`${TEST_SECRET}x`, `${TEST_SECRET}\n`), false);
+    assertEqual(isValidSyncApiKey(" ", " "), false); // trim 後が空 = secret 無しと同義
+  });
+
+  it("中身の空白は落とさない（trim は前後だけ）", () => {
+    assertEqual(isValidSyncApiKey("ab cd", "abcd"), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -191,12 +217,24 @@ describe("requireSyncApiKey -- 拒否を必ずログに残す", () => {
     assertTrue(warns[0].includes("reason=key-absent"), `got: ${warns[0]}`);
   });
 
-  it("鍵の不一致 → reason=key-mismatch（ローテートの片側漏れ・改行混入）", () => {
+  /* この検査は以前 `apiKey: TEST_SECRET + "\n"` を「不一致」の例として使っていた。
+   * つまり **2026-08-30 の障害そのものを正しい挙動として固定していた**。改行の
+   * 混入は運用事故であって鍵の違いではないので、いまは trim で吸収する
+   * （`isValidSyncApiKey (pure)` に移した）。ここが見るのは「本当に違う鍵」。 */
+  it("鍵の不一致 → reason=key-mismatch（ローテートの片側漏れ）", () => {
     const { warns } = warnsFrom({
-      apiKey: `${TEST_SECRET}\n`,
+      apiKey: "a-different-secret-entirely",
       secret: TEST_SECRET,
     });
     assertTrue(warns[0].includes("reason=key-mismatch"), `got: ${warns[0]}`);
+  });
+
+  it("改行が混ざっただけの鍵は、そもそも拒否されない（ログも出ない）", () => {
+    const { warns } = warnsFrom({
+      apiKey: TEST_SECRET,
+      secret: `${TEST_SECRET}\n`,
+    });
+    assertEqual(warns.length, 0, "通ったのだから拒否ログは出ない");
   });
 
   it("どの route で弾いたかが分かる", () => {
