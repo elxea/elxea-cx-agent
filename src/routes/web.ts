@@ -85,6 +85,11 @@ export function effectiveEventUserId(
  * かつ検証済み Shopify セッション由来の customer_id が付いているとき（trusted=true）
  * だけに限定する（fail-closed）。生の web_session_id 一致には依拠しない。
  * webChatHistoryHandler の `ownsIdentity` ゲートと同じ精神の多層防御。
+ *
+ * B-2（非対称の理由・意図的に現状維持）: LINE 側は `identity.isLinked || canonical.linked` で
+ *   横断を開くのに、web 側はここで `&& trusted` を要求する。LINE の userId は webhook 署名で
+ *   真正性が検証済みなのに対し、web の session_id は「知っているだけ」の弱い証明だから。
+ *   この非対称を消す（web も canonical だけで開く）と SEC-3 の fail-closed が壊れる。
  */
 export function crossChannelHistoryAllowed(isLinked: boolean, trusted: boolean): boolean {
   return isLinked && trusted;

@@ -1129,14 +1129,16 @@ async function handleTextMessage(
     env,
     // A-1: 評価・入口の直読みは生の lineUserId をキーにする（product_ratings.user_ref と一致）。
     //
-    // ⚠ ここは `crossChannel` ではなく `identity.isLinked` のまま（Stage 2 の意図的な範囲）。
-    //   runAgent の isLinked は「連携済み向けの個別最適を開くか」で、その読み出しは
-    //   effectiveUserId（= unified_user_id）をキーにする。canonical で横断読みが開いても
-    //   effectiveUserId は Stage 2 では変わらない（旧解決のまま）ので、ここだけ true に
-    //   すると存在しないキーでカルテを引きにいく。カルテ側を canonical に寄せるのは
-    //   Stage 3（persons.subject_id 1:1）。★11 が言っている断線は会話履歴のことなので、
-    //   Stage 2 で直すのは上の history だけでよい。
-    { isLinked: identity.isLinked, ratingUserRef: lineUserId },
+    // B-1（★11 の残り）: ここは履歴ゲートと同じ `crossChannel` を渡す。
+    //   以前は `identity.isLinked` のままで、「Stage 2 でここを true にすると存在しない
+    //   キーでカルテを引く」と説明されていた。これは事実誤認だった: runAgent の isLinked は
+    //   buildCustomerContext（＝プロンプトの文言）にしか効かず、読み出しキーには一切
+    //   使われていない（customerProfile はこのフラグと無関係に customer_linkages 経由で
+    //   取得済み）。src/agent/core.ts の buildCustomerContext のコメント参照。
+    //   このズレの実害: subject_links だけで連携している人（LIFF / Account Link 経由）は
+    //   履歴はプロンプトに入るのに「連携済み・以前の会話内容を自然に参照してください」の
+    //   指示が出ず、AI が目の前にある履歴を「覚えていない」と否認していた。
+    { isLinked: crossChannel, ratingUserRef: lineUserId },
   );
 
   // Quick Reply を LINE 形式に変換する。
@@ -1255,7 +1257,8 @@ async function handleImageMessage(
     effectiveUserId,
     "line",
     env,
-    { isLinked: identity.isLinked, imageContent, ratingUserRef: lineUserId },
+    // B-1: テキストと同じく履歴ゲート（crossChannel）に揃える。理由は handleTextMessage 側のコメント参照。
+    { isLinked: crossChannel, imageContent, ratingUserRef: lineUserId },
   );
 
   // 応答送信と保存を並列実行（本文は reply〔無料〕で送る）
