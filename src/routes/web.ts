@@ -131,6 +131,70 @@ export interface VerifiedWebIdentity {
 }
 
 /**
+ * この session_id が既に **誰のものとして** 記録されているか。
+ *
+ * - `unowned` … まだ誰にも結ばれていない（主体が無い / link が 0 本）。結んでよい。
+ * - `own`     … 既にこの人の連結成分にいる。結び直す必要は無いが、種に入れてよい。
+ * - `foreign` … **別人**の連結成分にいる。種に入れても結んでもいけない。
+ */
+export type WebSessionOwnership = "unowned" | "own" | "foreign";
+
+/** この人を指す「人そのものの鍵」の生値。連結成分の識別子と突き合わせる。 */
+function ownerIdentifierValues(identity: VerifiedWebIdentity): string[] {
+  const values: string[] = [];
+  if (identity.shopifyCustomerId) {
+    const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
+    if ("numericId" in normalized) values.push(normalized.numericId);
+  }
+  if (identity.lineUserId) values.push(identity.lineUserId);
+  return values;
+}
+
+/**
+ * session_id の既存の持ち主を引く。**決して throw しない**（引けなければ fail-closed）。
+ *
+ * ─ なぜ要るか（QA 指摘 2026-08-30・書き込み側の乗っ取り）─
+ *
+ *   proxy は `session_id` の **所有を検証しない**。ブラウザの cookie をそのまま
+ *   転送するだけなので、ログイン済みの A が他人 B の session_id を送れてしまう。
+ *   これを素通しすると 2 つ壊れる:
+ *
+ *     (1) 読み  — B の連結成分が A の履歴に和され、A が B の会話を読める
+ *     (2) 書き  — `subject_links` に「B の session は A のもの」が **永続追記** される
+ *
+ *   (2) のほうが重い。一度書けば以後ずっと B の発言が A に流れ続けるうえ、
+ *   link は追記専用なので取り消せない。よって **結ぶ前に既存の持ち主を必ず確かめる**。
+ *
+ * ─ 判定 ─
+ *   session_id で連結成分を引き、`linked`（同じ人だという判断が 1 本以上ある）なのに
+ *   その成分に自分の鍵が 1 つも無ければ **別人のもの**と見なす。
+ *   link が 0 本なら誰のものでもないので結んでよい（初対面の session がこれ）。
+ *   RPC が落ちた等で判定できないときは `foreign` に倒す（推測で他人の棚を開けない）。
+ */
+export async function resolveWebSessionOwnership(
+  supabase: ReturnType<typeof createSupabaseClient>,
+  identity: VerifiedWebIdentity,
+): Promise<WebSessionOwnership> {
+  const owned = ownerIdentifierValues(identity);
+  if (owned.length === 0) return "foreign"; // 本人が確定していない＝結ぶ相手がいない
+
+  const component = await resolveCanonicalUserRefs(supabase, webSeed(identity.sessionId));
+
+  // まだ主体が無い / 解決できなかった。
+  if (!component.resolved) {
+    /* `not_found` は「この session はまだ誰の記録にも出てきていない」＝安全に結べる。
+       それ以外（RPC 失敗・想定外の形）は **判定できなかった** のであって
+       「誰のものでもない」ではない。fail-closed で結ばない。 */
+    return component.reason === "not_found" ? "unowned" : "foreign";
+  }
+
+  // 主体はあるが「同じ人だ」の判断が 1 本も無い＝まだ誰のものでもない。
+  if (!component.linked) return "unowned";
+
+  return component.userRefs.some((ref) => owned.includes(ref)) ? "own" : "foreign";
+}
+
+/**
  * canonical 解決に渡す種を組み立てる。
  *
  * session_id 1 本だけで引くと、**その session が誰かに結ばれた履歴がまだ無い間**は
@@ -140,9 +204,17 @@ export interface VerifiedWebIdentity {
  *
  * LINE は 2 kind とも入れる（トークの userId と LINE ログインの sub が別 kind で
  * 並置されているため。lib/cdp/canonical.ts の lineLoginSeed 参照）。
+ *
+ * ⚠ **別人のものと分かっている session_id は種に入れない**（QA 指摘 2026-08-30）。
+ *   入れると、他人の session_id を送るだけでその人の連結成分が自分の読み出し集合に
+ *   和されてしまう。人そのものの鍵（顧客番号 / LINE userId）だけで引けば、
+ *   自分の履歴は従来どおり読めるので機能は落ちない。
  */
-export function canonicalSeedsForWeb(identity: VerifiedWebIdentity): ObservedIdentifier[] {
-  const seeds: ObservedIdentifier[] = [webSeed(identity.sessionId)];
+export function canonicalSeedsForWeb(
+  identity: VerifiedWebIdentity,
+  ownership: WebSessionOwnership,
+): ObservedIdentifier[] {
+  const seeds: ObservedIdentifier[] = ownership === "foreign" ? [] : [webSeed(identity.sessionId)];
 
   if (identity.shopifyCustomerId) {
     const normalized = normalizeShopifyCustomerId(identity.shopifyCustomerId);
@@ -171,11 +243,29 @@ export function canonicalSeedsForWeb(identity: VerifiedWebIdentity): ObservedIde
  *
  * 顧客番号がある人はそちらに結ぶ（LINE のトーク側は既に顧客番号と結ばれているので
  * 1 本で両チャネルに届く）。顧客番号が無い（LINE ログインだけ）人は LINE 側に結ぶ。
+ *
+ * ⚠ **`unowned` のときしか結ばない**（QA 指摘 2026-08-30・書き込み側の乗っ取り）。
+ *   proxy は session_id の所有を検証しないので、この歯が無いと「他人の session_id を
+ *   送るだけで、その session が自分のものとして **永続的に** 記録される」。
+ *   link は追記専用で取り消せないため、ここが最後の歯になる。
  */
 export async function bindWebSessionToOwner(
   supabase: ReturnType<typeof createSupabaseClient>,
   identity: VerifiedWebIdentity,
+  ownership: WebSessionOwnership,
 ): Promise<void> {
+  if (ownership !== "unowned") {
+    /* `own` は既に結ばれているので足すものが無い。`foreign` は結んではいけない。
+       後者は「起きたこと」なので必ず 1 行残す（T-12: 無言で捨てない）。 */
+    if (ownership === "foreign") {
+      console.warn(
+        "[cdp/link] not appended:",
+        JSON.stringify({ route: "web-chat", reason: "session_owned_by_other_subject" }),
+      );
+    }
+    return;
+  }
+
   const owner = ownerSeedFor(identity);
   if (!owner) return;
 
@@ -298,8 +388,27 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   const hasVerifiedIdentity = !!(trustedCustomerId || trustedLineUserId);
 
   try {
+    /* [SEC-3 書き込み側] この session_id が既に **別人のもの** として記録されていないかを
+       **identity 解決より先に** 確かめる。proxy は session_id の所有を検証しない
+       (ブラウザの cookie をそのまま転送する) ので、ログイン済みの A が他人 B の
+       session_id を送れてしまう。確かめずに進むと 3 つ壊れる:
+         (1) 旧台帳 — B の session_id が A の identity 行に束縛される
+         (2) 読み   — B の連結成分が A の読み出し集合に和される
+         (3) 新台帳 — 「B の session は A のもの」が subject_links に **永続追記** される
+       (3) は追記専用で取り消せない。以下の 3 か所すべてでこの判定を効かせる。 */
+    const verifiedIdentity: VerifiedWebIdentity = {
+      sessionId,
+      shopifyCustomerId: trustedCustomerId,
+      lineUserId: trustedLineUserId,
+    };
+    const sessionOwnership: WebSessionOwnership = hasVerifiedIdentity
+      ? await resolveWebSessionOwnership(supabase, verifiedIdentity)
+      : "foreign";
+    /** 別人の session は「知っているだけ」なので、読み書きのどの経路にも通さない。 */
+    const sessionIsOwn = sessionOwnership !== "foreign";
+
     const identity = trustedCustomerId
-      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
+      ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId, sessionIsOwn)
       : await resolveUnifiedUserId(supabase, sessionId, "web");
     effectiveUserId = identity.unifiedUserId;
 
@@ -315,11 +424,10 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     //   は null のままなので、**ログイン済みでも横断が永久に開かない**。旧台帳しか見て
     //   いない非対称を、LINE 側と同じ形に揃える（信頼経路の要求は残したまま）。
     const canonical = hasVerifiedIdentity
-      ? await resolveCanonicalFromSeeds(supabase, canonicalSeedsForWeb({
-          sessionId,
-          shopifyCustomerId: trustedCustomerId,
-          lineUserId: trustedLineUserId,
-        }))
+      ? await resolveCanonicalFromSeeds(
+          supabase,
+          canonicalSeedsForWeb(verifiedIdentity, sessionOwnership),
+        )
       : { linked: false, userRefs: [] as string[] };
 
     const crossChannelAllowed = crossChannelHistoryAllowed(
@@ -340,11 +448,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     //   `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した経路）。
     if (hasVerifiedIdentity) {
       c.executionCtx.waitUntil(
-        bindWebSessionToOwner(supabase, {
-          sessionId,
-          shopifyCustomerId: trustedCustomerId,
-          lineUserId: trustedLineUserId,
-        }),
+        bindWebSessionToOwner(supabase, verifiedIdentity, sessionOwnership),
       );
     }
 
@@ -364,7 +468,11 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
               undefined,
               30,
               3000,
-              sessionId,
+              /* [SEC-3] 別人の session はチャネル横断の読み出し集合に入れない。
+                 ここに生の session_id を渡すと、canonical の種から外しても
+                 `unionCrossChannelUserIds` が結局それを足してしまう
+                 (他人の session_id を送るだけで、その人の LINE 会話まで読める)。 */
+              sessionIsOwn ? sessionId : undefined,
               canonical.userRefs,
             )
           : /* 横断しないときも **書いた鍵で読む**。web の発言は session_id で保存される

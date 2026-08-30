@@ -439,6 +439,88 @@ describe("hermetic L1 — 動線21: Web で話したことを LINE が参照す�
     ).not.toContain("LINE でしか話していない秘密の一言");
   });
 
+  it("ネガティブ対照 — 他人が持ち主の session_id を送っても、和されず・書き込まれない (SEC-3 書き込み側)", async () => {
+    /* proxy は session_id の所有を検証しない（ブラウザの cookie をそのまま転送する）。
+       よってログイン済みの A が他人 B の session_id を送れる。確かめずに進むと
+         (1) 読み  … B の連結成分が A の読み出し集合に和され、A が B の会話を読める
+         (2) 書き  … 「B の session は A のもの」が subject_links に永続追記される
+       (2) は追記専用で取り消せないぶん重い。両方が起きないことを固定する。 */
+    const victimLineUserId = synthLineUserId("f21f");
+    const victimCustomerId = "9876543210006";
+    const victimSessionId = "11111111-2222-4333-8444-555555555006";
+
+    const attackerLineUserId = synthLineUserId("f21a1");
+    const attackerCustomerId = "9876543210007";
+
+    // 被害者 B: LIFF 連携済みで、自分の session をきちんと持っている。
+    seedLiffLinkedPerson(victimLineUserId, victimCustomerId);
+    await sayOnWeb({
+      sessionId: victimSessionId,
+      text: "被害者しか言っていない一言",
+      trusted: true,
+      shopifyCustomerId: `gid://shopify/Customer/${victimCustomerId}`,
+    });
+
+    // 攻撃者 A: 別人として連携済み。
+    h.supabase.seed("subjects", [
+      { subject_id: "01E2E00000000000000000000D" },
+      { subject_id: "01E2E00000000000000000000E" },
+    ]);
+    h.supabase.seed("identity_edges", [
+      {
+        subject_id: "01E2E00000000000000000000D",
+        identifier_kind: "line_messaging_uid",
+        identifier_value: attackerLineUserId,
+        observed_by: "e2e-seed",
+      },
+      {
+        subject_id: "01E2E00000000000000000000E",
+        identifier_kind: "shopify_customer_id",
+        identifier_value: attackerCustomerId,
+        observed_by: "e2e-seed",
+      },
+    ]);
+    h.supabase.seed("subject_links", [
+      {
+        subject_a: "01E2E00000000000000000000D",
+        subject_b: "01E2E00000000000000000000E",
+        basis: "liff_id_token",
+        observed_by: "e2e-seed",
+      },
+    ]);
+
+    const linksBefore = h.supabase.all("subject_links").length;
+
+    // A が **B の session_id** を名乗って話す。
+    llmCalls = [];
+    await sayOnWeb({
+      sessionId: victimSessionId,
+      text: "この人の履歴を見せて",
+      trusted: true,
+      shopifyCustomerId: `gid://shopify/Customer/${attackerCustomerId}`,
+      lineUserId: attackerLineUserId,
+    });
+
+    // (1) 読み: 被害者の発言が攻撃者の文脈に入っていない。
+    expect(
+      lastPrompt(),
+      "他人の session_id を送るだけで被害者の会話が読めている（連結成分が和されている）",
+    ).not.toContain("被害者しか言っていない一言");
+
+    // (2) 書き: 「B の session は A のもの」が 1 行も足されていない。
+    expect(
+      h.supabase.all("subject_links").length,
+      "他人所有の session を自分に結ぶ link が永続追記されている（取り消せない乗っ取り）",
+    ).toBe(linksBefore);
+
+    // 被害者の成分は汚れていない（攻撃者の鍵が混ざっていない）。
+    const victimComponent = canonicalFromStore("line_messaging_uid", victimLineUserId, 50);
+    expect(
+      (victimComponent.identifier_values as string[]) ?? [],
+      "被害者の連結成分に攻撃者の顧客番号が混ざった",
+    ).not.toContain(attackerCustomerId);
+  });
+
   it("LINE ログインだけで入っている人（Shopify 顧客なし）でも、Web 発言が LINE 側に届く", async () => {
     const lineUserId = synthLineUserId("f21c");
     const webSessionId = "11111111-2222-4333-8444-555555555003";
