@@ -18,8 +18,11 @@ import {
   BACKFILL_ONLY_BASES,
   orderPair,
   classifyLinkError,
+  appendSubjectLink,
+  type LinkAppendResult,
 } from "../../src/lib/cdp/subject-links";
 import { readResolution } from "../../src/lib/cdp/canonical";
+import { newSubjectId } from "../../src/lib/cdp/ulid";
 import { unionCrossChannelUserIds } from "../../src/lib/supabase";
 
 let total = 0;
@@ -30,6 +33,18 @@ function it(name: string, fn: () => void) {
   total++;
   try {
     fn();
+    passed++;
+    console.log(`  [PASS] ${name}`);
+  } catch (e) {
+    failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+    console.log(`  [FAIL] ${name}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+/** it の async 版（appendSubjectLink は Promise を返すため）。 */
+async function itAsync(name: string, fn: () => Promise<void>) {
+  total++;
+  try {
+    await fn();
     passed++;
     console.log(`  [PASS] ${name}`);
   } catch (e) {
@@ -137,6 +152,112 @@ it("消去済みの主体を結ぼうとした失敗は retired_subject", () => 
     "retired が別の名前になっている",
   );
 });
+
+console.log("\n=== 追記の失敗は連携を巻き戻さない（Stage 2 の並走条件）===");
+
+/* ここで固定するのは Stage 2 の中心の約束である。
+ *
+ * 連携（customer_linkages への書き込み）は appendSubjectLink を呼ぶ**前に**
+ * 成立している。したがって link の追記が何を理由に落ちても、HTTP 応答も
+ * LINE への返信も変わってはならない。この関数が 1 度でも throw すると、
+ * 呼び出し側（identity.ts / account-link.ts）の未処理 rejection になり、
+ * 「連携は台帳に入っているのに、お客さまには失敗と表示される」という
+ * **一番たちの悪い壊れ方**を作る。
+ *
+ * J-4 と retired は DB のトリガが実際に投げてくる 2 つで、どちらも
+ * 「過去に作られた行と衝突した」ときに出る。過去のテストで作られた主体が
+ * 残っている本番でこそ踏む経路なので、理由付きで静かに戻ることを固定する。 */
+const SUBJECT_LEFT = newSubjectId();
+const SUBJECT_RIGHT = newSubjectId();
+
+async function appendWith(dbError: unknown): Promise<LinkAppendResult> {
+  /* resolveOrIssueSubject は identity_edges / subjects を引くので、
+     その 2 つには成功を返し、subject_links の書き込みだけを失敗させる。 */
+  const supabase = {
+    from(table: string) {
+      if (table === "subject_links") {
+        return {
+          upsert: () =>
+            dbError instanceof Error
+              ? Promise.reject(dbError)
+              : Promise.resolve({ error: dbError }),
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                eq: () => ({ limit: () => Promise.resolve({ data: [], error: null }) }),
+              }),
+            }),
+          }),
+        };
+      }
+      /* identity_edges: **鍵ごとに別の主体**が既に振られている体にする
+         （発行経路を通らせず、かつ same_subject にも落とさない）。
+         主体 ID は ULID 形式でなければ `isSubjectId` に弾かれるので実物を使う。 */
+      return {
+        select: () => ({
+          eq: () => ({
+            eq: (_col: string, value: string) => ({
+              limit: () =>
+                Promise.resolve({
+                  data: [{ subject_id: value.startsWith("U") ? SUBJECT_LEFT : SUBJECT_RIGHT }],
+                  error: null,
+                }),
+            }),
+          }),
+        }),
+        insert: () => Promise.resolve({ error: null }),
+        upsert: () => Promise.resolve({ error: null }),
+      };
+    },
+  };
+
+  return appendSubjectLink(supabase as never, {
+    left: { kind: "line_messaging_uid", value: "U0123456789abcdef0123456789abcdef" },
+    right: { kind: "shopify_customer_id", value: "1234567890" },
+    basis: "liff_id_token",
+    observedBy: "identity.link-liff",
+  });
+}
+
+await (async () => {
+  await itAsync("J-4 で落ちても throw せず j4_conflict を返す", async () => {
+    const r = await appendWith({
+      code: "23514",
+      message: "J-4 violation: 1 人の Shopify 顧客に複数の LINE を…",
+    });
+    assertTrue(r.ok === false, "J-4 なのに成功を名乗っている");
+    assertEqual(r.ok === false ? r.reason : "", "j4_conflict", "理由が J-4 でない");
+  });
+
+  await itAsync("retired subject で落ちても throw せず retired_subject を返す", async () => {
+    const r = await appendWith({
+      message: "retired subject: 消去済みの主体を結び直すことはできない",
+    });
+    assertTrue(r.ok === false, "retired なのに成功を名乗っている");
+    assertEqual(r.ok === false ? r.reason : "", "retired_subject", "理由が retired でない");
+  });
+
+  /* ドライバが例外を投げる形（ネットワーク断・PostgREST の想定外応答）でも
+     同じ。ここが throw に戻ると waitUntil の未処理 rejection になる。 */
+  await itAsync("ドライバが例外を投げても握って insert_failed に畳む", async () => {
+    const r = await appendWith(new Error("boom"));
+    assertTrue(r.ok === false, "例外なのに成功を名乗っている");
+    assertEqual(r.ok === false ? r.reason : "", "insert_failed", "理由が insert_failed でない");
+  });
+
+  /* 理由なしで戻る枝を作らない（T-12）。数えられない失敗は突合から漏れる。 */
+  await itAsync("どの失敗にも必ず理由が付く", async () => {
+    for (const e of [
+      { code: "23514", message: "J-4 violation" },
+      { message: "retired subject" },
+      { message: "something else entirely" },
+      new Error("boom"),
+    ]) {
+      const r = await appendWith(e);
+      assertTrue(r.ok === false && typeof r.reason === "string" && r.reason.length > 0, "理由が無い失敗がある");
+    }
+  });
+})();
 
 console.log("\n=== RPC の戻りの読み方（壊れた形を中途半端に読まない）===");
 

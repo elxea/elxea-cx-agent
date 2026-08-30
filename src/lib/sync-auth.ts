@@ -28,7 +28,50 @@ export function isValidSyncApiKey(
   // fail-closed: サーバに secret が無ければ、どんな入力でも拒否する
   if (!secret) return false;
   if (!providedKey) return false;
-  return providedKey === secret;
+
+  const expected = normalizeSecret(secret);
+  /* 空白だけの secret は「未設定」と同じ。trim した結果が空になったものを
+     突き合わせに使うと、空白 1 文字を送れば通ってしまう。 */
+  if (expected === "") return false;
+
+  return constantTimeEquals(normalizeSecret(providedKey), expected);
+}
+
+/**
+ * 比較の前に両側の前後空白を落とす。
+ *
+ * ## なぜ trim するのか（2026-08-30 の本番障害の再発防止）
+ *
+ * 呼び出し元の web-app は `lib/config/spec.ts` で `SYNC_API_SECRET` を
+ * `optionalTrimmed()` として読む ＝ **送る側は必ず trim 済み**。ところがこちらは
+ * 生の値と `===` で突き合わせていた。この非対称のせいで、Worker 側の secret に
+ * 末尾改行が 1 文字混ざるだけで **どう頑張っても一致しない 401** が生まれる。
+ * `wrangler secret put` に `echo` を使うと改行が付くので、これは操作ミスというより
+ * 待ち構えている落とし穴である（2026-08-22 の LINE Channel Secret 障害と同型で、
+ * `lib/env.ts` の `readSecretEnvTrimmed` は web-app 側で同じ結論に達している）。
+ *
+ * ⚠ これは認証を緩めない。落とすのは前後の空白だけで、共有秘密が空白だけ違う 2 つの
+ *   値を持つことに意味は無い（むしろ事故の形でしかない）。中身が 1 文字でも違えば
+ *   従来どおり拒否する。
+ */
+function normalizeSecret(value: string): string {
+  return value.trim();
+}
+
+/**
+ * 長さと内容を、**入力に依存しない時間で**突き合わせる。
+ *
+ * `===` は最初の不一致文字で打ち切るため、比較に掛かった時間が「どこまで合っていたか」
+ * を漏らす。共有秘密の照合でそれを残す理由が無いので、全文字を必ず走査する形にする。
+ * 長さの違いも早期 return せず、xor に畳んでから 1 回だけ判定する。
+ */
+function constantTimeEquals(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
 }
 
 /**
