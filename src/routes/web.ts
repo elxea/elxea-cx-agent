@@ -93,9 +93,17 @@ export function effectiveEventUserId(
  * データを開かない。
  *
  * 開いてよいのは「ライブ検証済みの信頼経路」＝サーバ経由（X-API-Key 検証済み）で
- * かつ検証済み Shopify セッション由来の customer_id が付いているとき（trusted=true）
+ * **かつサーバ確定の本人 ID（Shopify 顧客 ID または LINE userId）が付いているとき**
  * だけに限定する（fail-closed）。生の web_session_id 一致には依拠しない。
  * webChatHistoryHandler の `ownsIdentity` ゲートと同じ精神の多層防御。
+ *
+ * ⚠ 第 2 引数に「共有鍵があるか」だけを渡してはいけない。proxy は session_id の
+ *   **所有を検証しない**（ブラウザの cookie をそのまま転送する）ので、鍵だけを条件に
+ *   すると、ログアウト中のブラウザが他人の session_id を送るだけでその人の横断履歴に
+ *   届く。呼び出し側は `hasVerifiedIdentity` を渡すこと。
+ *   LINE userId を customer_id と同格に扱うのは、どちらも web-app がサーバ側で確定した
+ *   値（暗号化 cookie の復号結果 = LINE 署名済み id_token の sub）だからで、
+ *   ブラウザ自己申告はこの経路に入らない（上の trusted 判定で捨てられる）。
  *
  * B-2（非対称の理由・意図的に現状維持）: LINE 側は `identity.isLinked || canonical.linked` で
  *   横断を開くのに、web 側はここで `&& trusted` を要求する。LINE の userId は webhook 署名で
@@ -278,6 +286,17 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
   const trustedCustomerId = trusted ? shopify_customer_id : undefined;
   const trustedLineUserId = trusted ? line_user_id : undefined;
 
+  /* [SEC-3] 「ライブ検証済みの信頼経路」= サーバ経由 **かつ** 検証済みの本人 ID が
+     付いていること。共有鍵だけでは足りない。
+     鍵だけを条件にすると、ログアウト中のブラウザが他人の session_id を proxy 経由で
+     送るだけで、その session が属する人の横断履歴に届いてしまう（proxy は session_id の
+     所有を検証しない）。本人 ID を要求すれば「いま誰として話しているか」がサーバで
+     確定している状態に限定できる。
+     Shopify 顧客 ID **または** LINE userId のどちらでもよい（どちらもサーバ確定値）。
+     元は customer_id 限定だったが、LINE ログインの人が identity を持てなかったのが
+     今回の障害なので、同格の証明として LINE userId を並べる。 */
+  const hasVerifiedIdentity = !!(trustedCustomerId || trustedLineUserId);
+
   try {
     const identity = trustedCustomerId
       ? await resolveWithShopifyCustomerId(supabase, trustedCustomerId, sessionId)
@@ -295,7 +314,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     //   customer_linkages と subject_links にしか行が無く、`user_identity_map.line_user_id`
     //   は null のままなので、**ログイン済みでも横断が永久に開かない**。旧台帳しか見て
     //   いない非対称を、LINE 側と同じ形に揃える（信頼経路の要求は残したまま）。
-    const canonical = trusted
+    const canonical = hasVerifiedIdentity
       ? await resolveCanonicalFromSeeds(supabase, canonicalSeedsForWeb({
           sessionId,
           shopifyCustomerId: trustedCustomerId,
@@ -305,7 +324,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
 
     const crossChannelAllowed = crossChannelHistoryAllowed(
       identity.isLinked || canonical.linked,
-      trusted,
+      hasVerifiedIdentity,
     );
     identityIsLinked = crossChannelAllowed;
 
@@ -319,7 +338,7 @@ export async function webChatHandler(c: Context<{ Bindings: Env }>) {
     //   ログイン済み（＝信頼経路で本人が確定している）なら、その場で 1 行足して
     //   「このセッションはこの人のもの」を残す。basis は既存の語彙
     //   `anonymous_promotion`（認証済みの本人がこのセッションを自分だと申告した経路）。
-    if (trusted) {
+    if (hasVerifiedIdentity) {
       c.executionCtx.waitUntil(
         bindWebSessionToOwner(supabase, {
           sessionId,

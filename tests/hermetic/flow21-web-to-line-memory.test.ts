@@ -399,6 +399,46 @@ describe("hermetic L1 — 動線21: Web で話したことを LINE が参照す�
     ).not.toContain(WEB_UTTERANCE);
   });
 
+  it("ネガティブ対照 — 共有鍵はあるが本人が確定していない呼び出しでは横断しない (SEC-3)", async () => {
+    /* proxy は session_id の**所有**を検証しない（ブラウザの cookie をそのまま渡す）。
+       よって「共有鍵がある」だけで横断を開くと、ログアウト中のブラウザが他人の
+       session_id を送るだけでその人の横断履歴に届く。本人 ID（顧客番号 or LINE
+       userId）がサーバで確定していることまでを条件にする。 */
+    const lineUserId = synthLineUserId("f21e");
+    const shopifyNumericId = "9876543210005";
+    const webSessionId = "11111111-2222-4333-8444-555555555005";
+
+    seedLiffLinkedPerson(lineUserId, shopifyNumericId);
+
+    // 本人の発言を先に作り、この session を本人の鍵として成分に載せる。
+    await sayOnWeb({
+      sessionId: webSessionId,
+      text: WEB_UTTERANCE,
+      trusted: true,
+      shopifyCustomerId: `gid://shopify/Customer/${shopifyNumericId}`,
+    });
+
+    // LINE 側に、web からは見えてはいけない発言を残す。
+    h.supabase.seed("conversations", [
+      {
+        user_id: lineUserId,
+        channel: "line",
+        role: "user",
+        content: "LINE でしか話していない秘密の一言",
+        created_at: "2026-08-01T00:30:00Z",
+      },
+    ]);
+
+    // 共有鍵はあるが identity を名乗らない呼び出し（= 誰として話しているか不明）。
+    llmCalls = [];
+    await sayOnWeb({ sessionId: webSessionId, text: WEB_FOLLOWUP, trusted: true });
+
+    expect(
+      lastPrompt(),
+      "本人が確定していない呼び出しに LINE 側の履歴が出ている（session_id を知っているだけで開いている）",
+    ).not.toContain("LINE でしか話していない秘密の一言");
+  });
+
   it("LINE ログインだけで入っている人（Shopify 顧客なし）でも、Web 発言が LINE 側に届く", async () => {
     const lineUserId = synthLineUserId("f21c");
     const webSessionId = "11111111-2222-4333-8444-555555555003";
