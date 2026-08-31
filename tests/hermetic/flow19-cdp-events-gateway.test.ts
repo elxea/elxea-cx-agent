@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import worker from "../../src/index";
 import { installHermeticFetch, type Hermetic } from "../lib/hermetic";
+import { signSessionId } from "../../src/lib/chat-session";
 
 let h: Hermetic;
 
@@ -42,13 +43,32 @@ afterEach(() => {
 /** validateSessionId が UUID v4 を要求するため、形の合う固定値を使う。 */
 const SESSION = "9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
 
+/**
+ * `/api/chat/event` を **本番と同じ形**（web-app proxy 経由）で叩く。
+ *
+ * ⚠ 2026-08-31 以降、この口は署名付き session しか鍵として受け付けない
+ *   （`resolveEventIdentity` / lib/chat-session.ts）。以前この helper は
+ *   X-API-Key も署名も付けずに叩いていたが、それは **本番に存在しない経路**
+ *   （ブラウザ直叩き）であり、いまは fail-closed で積まれない。
+ *   gateway そのものを見るこのファイルの主張を保つため、helper 側を
+ *   本番の形（X-API-Key + session_proof）に揃える。
+ *   署名なし・偽署名・信頼経路でない場合の挙動は flow25 が固定する。
+ */
 async function postChatEvent(body: Record<string, unknown>): Promise<Response> {
+  const sessionId = String(body.session_id ?? "");
+  const signed: Record<string, unknown> = { ...body };
+  if (sessionId && signed.session_proof === undefined) {
+    signed.session_proof = await signSessionId(sessionId, String(env.CHAT_SESSION_SECRET));
+  }
   const ctx = createExecutionContext();
   const res = await worker.fetch(
     new Request("https://example.com/api/chat/event", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: {
+        "content-type": "application/json",
+        "X-API-Key": String(env.SYNC_API_SECRET),
+      },
+      body: JSON.stringify(signed),
     }),
     env,
     ctx,

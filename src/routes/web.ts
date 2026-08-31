@@ -33,7 +33,7 @@ import { withTimeout } from "../lib/utils";
 import { recordResponseTime, recordApiError, sendNegativeFeedbackAlert } from "../lib/alerts";
 import { recordBehaviorEvent, type BehaviorAction, type BehaviorEventMetadata } from "../lib/firestore";
 import { behaviorEventType } from "../lib/cdp/event-vocabulary";
-import { recordCustomerEvent } from "../lib/cdp/events-gateway";
+import { identifierForChannel, recordCustomerEvent } from "../lib/cdp/events-gateway";
 import {
   resolveCanonicalUserRefs,
   resolveCanonicalFromSeeds,
@@ -81,6 +81,79 @@ export function effectiveEventUserId(
   sessionId: string,
 ): string {
   return trusted && shopifyCustomerId ? shopifyCustomerId : sessionId;
+}
+
+/** 行動イベントを「誰の出来事として積むか」の結論。 */
+export type EventIdentityDecision =
+  | {
+      record: true;
+      userId: string;
+      /** なぜその鍵を使ってよいと判断したか（1 行ログに出す）。 */
+      via: "verified_customer" | "proven_session" | "secret_unset_migration";
+    }
+  | { record: false; reason: "session_not_proven" };
+
+/**
+ * [SEC-3 書き込み側] `POST /api/chat/event` が **どの鍵で** 出来事を積むかを決める純粋関数。
+ *
+ * ─ 何が開いていたか ─
+ *
+ *   `/api/chat` と `/api/chat/history` と `/api/identity/link-line` は
+ *   `session_id` の署名（src/lib/chat-session.ts）を確かめるようになったが、
+ *   **行動イベントの口だけが素通し**だった。`session_id` は誰でも名乗れるので、
+ *   他人の session_id を body に入れるだけで **その人の行動ログに書き込める**
+ *   （＝ 好みタイプ・セグメント・配信対象が他人の入力で動く）。
+ *
+ * ─ なぜ「使い捨て ID にすり替える」ではなく「積まない」なのか ─
+ *
+ *   兄弟の 3 経路は、署名が確かめられないとき `resolveUsableSessionId` が
+ *   **その場限りの session_id** を発行し、応答自体は続ける。会話には
+ *   「返事を返す」という止められない仕事があるからである。
+ *
+ *   この口にはその仕事が無い。fire-and-forget の記録専用で、返す値も `{success:true}`
+ *   だけ。ここで使い捨て ID を採ると、L0 gateway が **1 リクエストにつき主体を 1 つ
+ *   発行する**（resolveOrIssueSubject）ので、外から叩くだけで
+ *   「誰とも結ばれない主体」を無限に積める。それは 2026-08-30 に本番で実際に起きた
+ *   壊れ方（identity_edges の孤立行）を、こちらから量産する形になる。
+ *   よってこの口の fail-closed は **書かないこと** で表す。
+ *
+ * ─ 判定の順序（上ほど強い証明）─
+ *
+ *   1. trusted かつ サーバ確定の Shopify 顧客 ID がある
+ *        → その顧客 ID を鍵にする。session の署名は要らない（[SEC-B] と同じ理屈で、
+ *          鍵そのものがサーバ側で確定しており、他人の行動ログを指しようがない）。
+ *          ここを署名必須にすると、共有鍵が片側だけずれた日に **ログイン済みの人の
+ *          行動ログまで全滅**する（commit 7d0118d の再演）。
+ *   2. session の署名が確かめられた
+ *        → その session_id を鍵にする（従来の主経路）。
+ *   3. Worker 側に CHAT_SESSION_SECRET が無い（移行モード）
+ *        → **この変更以前とまったく同じ挙動**。名乗られた session_id をそのまま使う。
+ *          露出は以前と同じで、増えない（chat-session.ts の移行モードと同じ判断）。
+ *   4. それ以外（署名なし / 署名不一致 / 信頼経路でない）
+ *        → 積まない。理由は 1 行ログと応答の `reason` に残す（無言 skip を作らない / T-12）。
+ */
+export function resolveEventIdentity(input: {
+  /** X-API-Key 検証済みのサーバ間呼び出しか。 */
+  trusted: boolean;
+  /** web-app がサーバ側で確定した Shopify 顧客 ID（ブラウザ自己申告はここに来ない）。 */
+  shopifyCustomerId: string | null | undefined;
+  /** ブラウザ／proxy が名乗ってきた session_id。 */
+  claimedSessionId: string;
+  /** `resolveUsableSessionId` の結論。 */
+  session: { sessionId: string; proven: boolean; reason?: string };
+}): EventIdentityDecision {
+  if (input.trusted && input.shopifyCustomerId) {
+    return { record: true, userId: input.shopifyCustomerId, via: "verified_customer" };
+  }
+  if (input.session.proven) {
+    return { record: true, userId: input.session.sessionId, via: "proven_session" };
+  }
+  if (input.session.reason === "secret_unset_migration") {
+    // 移行モードでは `resolveUsableSessionId` が名乗られた値をそのまま返す。
+    // 念のため claimed を使い、「すり替えた使い捨て ID を積む」枝が生まれないようにする。
+    return { record: true, userId: input.claimedSessionId, via: "secret_unset_migration" };
+  }
+  return { record: false, reason: "session_not_proven" };
 }
 
 /**
@@ -1186,12 +1259,17 @@ const VALID_WEB_EVENTS: BehaviorAction[] = [
  * POST /api/chat/event
  *
  * Web アプリからの行動イベントを Firestore に記録する。
- * リクエストボディ: { session_id, action, metadata?: { productId?, contentId?, ... } }
- * レスポンス: { success: true }
+ * リクエストボディ: { session_id, session_proof?, action, metadata?: { productId?, contentId?, ... } }
+ * レスポンス: { success: true } / 積まなかったときは { success: true, recorded: false, reason }
+ *
+ * ⚠ `session_id` は **サーバが発行したものだけ** を鍵として使う。判定は
+ *   `resolveEventIdentity`（このファイル）と `resolveUsableSessionId`（lib/chat-session.ts）。
+ *   /api/chat・/api/chat/history・/api/identity/link-line と同じ検証を通す。
  */
 export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
   let body: {
     session_id?: string;
+    session_proof?: string;
     shopify_customer_id?: string;
     action?: string;
     metadata?: BehaviorEventMetadata;
@@ -1202,7 +1280,7 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { session_id, shopify_customer_id, action, metadata } = body;
+  const { session_id, session_proof, shopify_customer_id, action, metadata } = body;
 
   // バリデーション
   const sessionError = validateSessionId(session_id);
@@ -1211,6 +1289,34 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
   }
 
   const supabase = createSupabaseClient(c.env);
+
+  /* [SEC-3 書き込み側] 行動ログの口も署名を確かめる。ここだけ素通しだと
+     「他人の session_id を body に入れるだけでその人の行動ログに書ける」が残る。
+     判定の意味と、使い捨て ID にすり替えない理由は resolveEventIdentity のコメント。 */
+  const trusted = isTrustedServerCaller(c);
+  const sessionResolution = await resolveUsableSessionId({
+    claimedSessionId: session_id as string,
+    proof: session_proof,
+    trusted,
+    secret: (c.env as { CHAT_SESSION_SECRET?: string }).CHAT_SESSION_SECRET,
+  });
+  const identityDecision = resolveEventIdentity({
+    trusted,
+    shopifyCustomerId: shopify_customer_id,
+    claimedSessionId: session_id as string,
+    session: sessionResolution,
+  });
+  if (!identityDecision.record || identityDecision.via !== "proven_session") {
+    // 無言で通さない・無言で捨てない（T-12）。生の session_id は出さない。
+    console.warn(
+      "[web] session not proven:",
+      JSON.stringify({
+        route: "api/chat/event",
+        reason: sessionResolution.reason,
+        outcome: identityDecision.record ? identityDecision.via : "dropped",
+      }),
+    );
+  }
 
   if (!action || !VALID_WEB_EVENTS.includes(action as BehaviorAction)) {
     // E1「出来事は捨てない」— **語彙に無い action でも L0 には積む**。
@@ -1224,14 +1330,21 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
     //     E1 が守りたいのは出来事が消えることで、それは積んだ時点で守られている。
     //     400 を落とすのは語彙が L0 の登録簿へ一本化されたあと（Stage 4）。進捗は
     //     ratchet `event-vocabulary-drop-sites`（1 → 0）が固定する。
-    if (action && session_id) {
+    //
+    // ⚠ 署名が確かめられていない呼び出しは、語彙違反の記録も積まない。ここを開けたまま
+    //   にすると「未知の action を送るだけで他人の鍵の L0 に行を作れる」経路が残り、
+    //   閉じたはずの穴が語彙違反側に付け替わるだけになる。応答は 400 のまま変えない。
+    if (action && session_id && identityDecision.record) {
       const occurredAt = new Date().toISOString();
+      const rejectedUserId = identityDecision.userId;
       c.executionCtx.waitUntil(
         recordCustomerEvent(supabase, {
           // 形が壊れている値はここで落ちる（gateway が理由付きで数える）。
           eventType: behaviorEventType(action),
           channel: "web",
-          identifier: { kind: "web_session_id", value: session_id },
+          // 値の形から正しい kind に落とす（顧客番号を web_session_id として
+          // 登録し孤立主体を作った 2026-08-30 の事故と同じ形を作らない）。
+          identifier: identifierForChannel("web", rejectedUserId),
           dedupe: `rejected@${occurredAt}`,
           source: "cx-agent.web-chat-event",
           occurredAt,
@@ -1242,14 +1355,17 @@ export async function webChatEventHandler(c: Context<{ Bindings: Env }>) {
     return c.json({ error: `Invalid action. Valid actions: ${VALID_WEB_EVENTS.join(", ")}` }, 400);
   }
 
+  if (!identityDecision.record) {
+    // fail-closed: 誰の出来事か確定できないものは積まない。応答コードは 200 のまま
+    // （この口は fire-and-forget の契約で、クライアントは再送も分岐もしない）。
+    // 「積まなかった」ことは応答にも 1 行ログにも残す（黙って success と言わない）。
+    return c.json({ success: true, recorded: false, reason: identityDecision.reason });
+  }
+
   // fire-and-forget で記録（レスポンスをブロックしない）
   // [SEC-B] shopify_customer_id はサーバ経由（X-API-Key 検証済み）のときだけ identity として採用する。
   // ブラウザ自己申告（X-API-Key 無し）の customer_id は無視し、匿名 session_id に紐付ける。
-  const userId = effectiveEventUserId(
-    isTrustedServerCaller(c),
-    shopify_customer_id,
-    session_id as string,
-  );
+  const userId = identityDecision.userId;
 
   c.executionCtx.waitUntil(
     recordBehaviorEvent(
