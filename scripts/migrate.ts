@@ -422,6 +422,25 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
     idempotent: true,
     specs: [{ kind: "function", func: "cdp_stage2_backfill_candidates" }],
   },
+
+  /* 048: 「5 営業日一致」を数えられるようにする（CDP 統合 Stage 2 / §6-1 の完了条件）。
+   *      観測の結果を 1 日 1 行で残す表と、書き手・読み口。
+   *
+   * 044 と違って sentinel がある（新しい表と関数を作る version なので、実在確認で
+   * 「当たっているか」を言える）。cdp_stage2_parity は 043 が作ったものなので
+   * sentinel には使えない（実在しても 043 版かもしれない — 044 と同じ理由）。 */
+  "048_cdp_stage2_parity_snapshots": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "cdp_stage2_parity_snapshots" },
+      { kind: "index", index: "cdp_stage2_parity_snapshots_recent" },
+      { kind: "function", func: "cdp_is_business_day" },
+      { kind: "function", func: "cdp_parity_snapshot_guard" },
+      { kind: "function", func: "cdp_stage2_parity_snapshot" },
+      { kind: "function", func: "cdp_stage2_parity_streak" },
+      { kind: "rls", table: "cdp_stage2_parity_snapshots" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

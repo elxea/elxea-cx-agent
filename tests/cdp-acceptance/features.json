@@ -110,6 +110,15 @@
       ],
       "timeout_sec": 180
     },
+    "unit.stage2-parity-snapshot": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-stage2-parity-snapshot.test.ts"
+      ],
+      "timeout_sec": 180
+    },
     "unit.export": {
       "tier": "unit",
       "cmd": [
@@ -154,6 +163,16 @@
         "vitest",
         "run",
         "tests/hermetic/flow20-cdp-http-surface.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "hermetic.stage2-parity-snapshot": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow24-cdp-stage2-parity-snapshot.test.ts"
       ],
       "timeout_sec": 300
     },
@@ -296,6 +315,15 @@
         "tests/report-l0.test.mjs"
       ],
       "timeout_sec": 180
+    },
+    "dbw.stage2-parity-snapshot": {
+      "tier": "db-write",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/db/cdp-stage2-parity-snapshot.db.test.ts"
+      ],
+      "timeout_sec": 420
     }
   },
   "features": [
@@ -690,11 +718,14 @@
       "id": "F-40",
       "area": "機械強制・観測",
       "name": "新旧一致の観測が空虚合格しない",
-      "criteria": "1 本も比べていない日を「一致した日」と言わない (parity の判定)",
+      "criteria": "1 本も比べていない日を「一致した日」と言わない。観測が日ごとに残り、連続 5 営業日を数えられる (parity の判定 + 保存)",
       "checks": [
         "unit.stage4-segment",
         "unit.stage2-backfill",
-        "dbw.stage3-readout"
+        "unit.stage2-parity-snapshot",
+        "hermetic.stage2-parity-snapshot",
+        "dbw.stage3-readout",
+        "dbw.stage2-parity-snapshot"
       ]
     },
     {

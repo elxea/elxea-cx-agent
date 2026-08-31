@@ -1054,6 +1054,11 @@ export default {
         //   アカウント上限 5 本を使い切っている（wrangler.toml のコメント参照）ので、
         //   既存の日次同期に同居させる。外部送信ゼロ・never throw。
         //   一致していない日は in_agreement=false が 1 行に残る（探しにいかなくても済む形）。
+        //   ⚠ 048: ログ 1 行だけでは「連続 5 営業日」を後から数えられない（Worker の
+        //     ログは保持期間が短く、連続営業日かも機械で言えない）。この呼び出しは
+        //     cdp_stage2_parity_snapshot() を叩き、**その日の 1 行を DB に残す**ように
+        //     なった。書くのはこの観測表だけで、突合の対象データには一切触れない。
+        //     同じ日に 2 回走っても 1 行のまま（SQL 側の ON CONFLICT で冪等）。
         runStage2Parity(env)
           .then((result) => {
             console.log("Scheduled CDP stage2 parity completed:", JSON.stringify(result));
