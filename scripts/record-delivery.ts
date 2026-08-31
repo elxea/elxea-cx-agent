@@ -6,6 +6,14 @@
  * 器: `src/db/migrations/038_tea_delivery_ledger.sql`（本スクリプトは DDL を実行しない）
  * 規則の本体: `src/lib/delivery-ledger.ts`（純粋）＋ DB 関数 `record_tea_deliveries`
  *
+ * ⚠ この経路は **台帳（038）にだけ書く**。L0（customer_events）の `shipment.sent` は
+ *   積まない。理由は「主体の発行（resolveOrIssueSubject）が supabase-js の側にしか
+ *   無く、本スクリプトは pg で直に繋いでいる」から — SQL 側に 2 本目の発行を
+ *   作ると、主体の作り方の正本が 2 つになる（E4 の追記専用も二重に守る羽目になる）。
+ *   よってここでは足さず、手動投入ぶんを L0 に載せる経路は別に決める。
+ *   自動の経路（Shopify 注文 webhook）は `src/lib/shopify-order-webhook.ts` が
+ *   台帳と L0 の両方へ通している。
+ *
  * ─ なぜ手動経路が要るか ─
  *   EC はまだ開店しておらず、Shopify 注文 webhook から流れてくる記録がまだ無い。
  *   一方でこの記録は**過去に遡って作れない**（書かなかった月は永久に空欄）。

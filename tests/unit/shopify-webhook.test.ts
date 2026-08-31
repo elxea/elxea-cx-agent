@@ -88,6 +88,8 @@ function makeRecordingDeps(tagMap: Map<string, string[]> = new Map()) {
     fetchTags: [] as string[][],
     // 配送台帳（038）へ書いた行。誰に・いつ・何が届いたかの記録。
     deliveries: [] as Array<Record<string, unknown>>,
+    // L0 へ通した送付の出来事（shipment.sent）。台帳の結果が legacy として付く。
+    shipmentFacts: [] as Array<{ rows: number; legacy: string }>,
   };
   const deps: ShopifyOrderDeps = {
     fetchProductTags: async (ids) => {
@@ -97,6 +99,9 @@ function makeRecordingDeps(tagMap: Map<string, string[]> = new Map()) {
     recordDeliveries: async (rows) => {
       for (const r of rows) calls.deliveries.push(r as unknown as Record<string, unknown>);
       return { inserted: rows.length, updated: 0, kept: 0 };
+    },
+    recordShipmentFact: async (rows, legacy) => {
+      calls.shipmentFacts.push({ rows: rows.length, legacy: legacy.status });
     },
     runPurchasePipeline: async (id, lineItems) => {
       calls.pipeline.push({ id, lineItems });

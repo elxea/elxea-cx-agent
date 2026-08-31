@@ -299,7 +299,13 @@ function fakeEnv(withFirebase = true): Env {
 }
 
 function makeDeps(opts: { tagsThrow?: boolean; ledgerThrows?: boolean } = {}) {
-  const calls = { deliveries: [] as DeliveryRecord[], pipeline: 0, profile: 0 };
+  const calls = {
+    deliveries: [] as DeliveryRecord[],
+    pipeline: 0,
+    profile: 0,
+    // L0 へ通した送付の出来事（shipment.sent）。台帳の結果が legacy として付く。
+    shipmentFacts: [] as Array<{ rows: DeliveryRecord[]; legacy: string; reason?: string }>,
+  };
   const deps: ShopifyOrderDeps = {
     fetchProductTags: async () => {
       if (opts.tagsThrow) throw new Error("shopify down");
@@ -309,6 +315,13 @@ function makeDeps(opts: { tagsThrow?: boolean; ledgerThrows?: boolean } = {}) {
       if (opts.ledgerThrows) throw new Error("ledger down");
       calls.deliveries.push(...rows);
       return { inserted: rows.length, updated: 0, kept: 0 };
+    },
+    recordShipmentFact: async (rows, legacy) => {
+      calls.shipmentFacts.push({
+        rows,
+        legacy: legacy.status,
+        reason: "reason" in legacy ? legacy.reason : undefined,
+      });
     },
     runPurchasePipeline: async () => {
       calls.pipeline++;
@@ -359,6 +372,30 @@ it("webhook: guest checkout は台帳にも書かない", async () => {
   const res = await handleShopifyOrder(order({ customer: null }), fakeEnv(), deps);
   assertEqual(res.status, "skipped_no_customer");
   assertEqual(calls.deliveries.length, 0);
+});
+
+// --- 台帳と L0 が同じ 1 回の送付を指していること -------------------------------
+
+it("webhook: 台帳に書いた行と同じものが L0 の送付の出来事にも通る", async () => {
+  const { deps, calls } = makeDeps();
+  await handleShopifyOrder(order(), fakeEnv(), deps);
+  assertEqual(calls.shipmentFacts.length, 1, "1 注文につき 1 回");
+  assertEqual(calls.shipmentFacts[0].rows.length, calls.deliveries.length, "同じ行を渡している");
+  assertEqual(calls.shipmentFacts[0].legacy, "ok");
+});
+
+it("webhook: 台帳が書けなくても L0 には「送った」が理由付きで残る（T-12）", async () => {
+  const { deps, calls } = makeDeps({ ledgerThrows: true });
+  await handleShopifyOrder(order(), fakeEnv(), deps);
+  assertEqual(calls.shipmentFacts.length, 1, "台帳の失敗で L0 まで止めない");
+  assertEqual(calls.shipmentFacts[0].legacy, "failed");
+  assertEqual(calls.shipmentFacts[0].reason, "delivery_ledger_write_failed");
+});
+
+it("webhook: guest checkout は L0 の送付の出来事も作らない", async () => {
+  const { deps, calls } = makeDeps();
+  await handleShopifyOrder(order({ customer: null }), fakeEnv(), deps);
+  assertEqual(calls.shipmentFacts.length, 0);
 });
 
 // ---------------------------------------------------------------------------
