@@ -148,6 +148,22 @@ export function flowEventType(name: string): string {
 }
 
 /**
+ * 「誰に・いつ・どのお茶を・どの号を送ったか」を L0 に載せる型名。
+ *
+ * ─ purchase.order_paid と何が違うのか（別の出来事である理由）─
+ *   購入は「注文が成立した」、送付は「手元に届いた」。ずれることがある
+ *   （欠品・変更・返品・マルシェの手渡し・EC 開店前の実配送）。roji の正本も
+ *   決めたこと（migration 033）と届いたこと（038）を別の事実として分けている。
+ *   同じ型名に畳むと、届いていない注文が「送った」として数えられる。
+ *
+ * ─ 数の正本はどこか ─
+ *   詳しい正本は台帳 `tea_delivery_ledger`（038）の側に残す。L0 に積むのは
+ *   「その主体の身に送付が 1 回起きた」という時系列の事実で、payload の形と
+ *   読み口は `src/lib/cdp/shipment.ts` が持つ。
+ */
+export const SHIPMENT_SENT_EVENT_TYPE = "shipment.sent";
+
+/**
  * 領域名を前置しない、独立した出来事。
  *
  * `diagnosis.answer` は設計 §4 の #14（茶葉診断 Web 入口）の「口」にあたる。
@@ -158,6 +174,7 @@ export const STANDALONE_EVENT_TYPES = [
   "rating.submitted",
   "survey.answer_recorded",
   "diagnosis.answer",
+  SHIPMENT_SENT_EVENT_TYPE,
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -319,11 +336,21 @@ export function isIdentifierKind(value: unknown): value is IdentifierKind {
  * ─ L1 を動かさない出来事は常に true ─
  *   行動ログ・フロー・購入の payload は解釈に使わないので、形を問わない
  *   （問うと、既存 5 経路の payload を全部ここに写す羽目になる = 二重管理）。
+ *
+ * ─ 例外: shipment.sent ─
+ *   送付は L1 の解釈（persona）を動かさないが、**月別の送付履歴という読み口が
+ *   この payload をそのまま畳む**（src/lib/cdp/shipment.ts）。畳まれる payload は
+ *   形を問う、という基準は persona と同じなのでここで一緒に見る。
+ *   PROFILE_EVENT_TYPES に足さないのは、あの一覧が migration 046 の CASE と
+ *   1 対 1 であるという約束を崩さないため（送付を畳む枝は 046 に無い）。
  */
 export function isWellFormedPayload(
   eventType: string,
   payload: Record<string, unknown> | undefined,
 ): boolean {
+  if (eventType === SHIPMENT_SENT_EVENT_TYPE) {
+    return isWellFormedShipmentPayload(payload);
+  }
   if (!isProfileEventType(eventType)) return true;
   const p = payload ?? {};
 
@@ -352,6 +379,33 @@ export function isWellFormedPayload(
     default:
       return true;
   }
+}
+
+/** 届いた日の形（台帳 038 の delivered_on と同じ）。 */
+const SHIPPED_ON_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * `shipment.sent` の payload が読める形か。
+ *
+ * 求めるのは 2 つだけ: **いつ届いたか**（shipped_on）と **何が届いたか**（items）。
+ * 号（issue_ref）は EC の注文には無いので必須にしない — 必須にすると、
+ * 号が始まる前の送付が全部 schema_ok = false になり、履歴が空になる。
+ */
+export function isWellFormedShipmentPayload(
+  payload: Record<string, unknown> | undefined,
+): boolean {
+  const p = payload ?? {};
+  const shippedOn = p.shipped_on;
+  if (typeof shippedOn !== "string" || !SHIPPED_ON_RE.test(shippedOn)) return false;
+  const items = p.items;
+  if (!Array.isArray(items) || items.length === 0) return false;
+  return items.every((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.ref !== "string" || item.ref.trim() === "") return false;
+    const q = item.quantity;
+    return typeof q === "number" && Number.isInteger(q) && q > 0;
+  });
 }
 
 /** 3 軸の数値バケツか（欠けた軸は許す。数値でない値が入っているものは弾く）。 */

@@ -26,6 +26,8 @@ import {
   type DeliveryRecord,
   type DeliveryWriteResult,
 } from "./delivery-ledger";
+import { recordCustomerEvent, type LegacyOutcome } from "./cdp/events-gateway";
+import { buildShipmentFact } from "./cdp/shipment";
 import { getFirestoreEnv, updateCustomerProfile } from "./firestore";
 import { runPurchasePreferencePipeline } from "./preference-pipeline";
 import { fetchProductTagsByIds } from "./shopify";
@@ -90,6 +92,18 @@ export type ShopifyOrderDeps = {
    * **この記録は過去に遡って作れない**ため、属性更新やペルソナ加算より先に実行する。
    */
   recordDeliveries: (rows: DeliveryRecord[]) => Promise<DeliveryWriteResult>;
+  /**
+   * 送付という出来事を L0 に 1 行積む（`shipment.sent`）。
+   *
+   * 台帳（038）の鍵は EC の顧客番号 / LINE の ID であって subject_id ではないため、
+   * 台帳だけでは「この主体に何を送ったか」が引けない。台帳を書いた直後に、
+   * **同じ行から**組み立てた事実を L0 にも通す（器は 1 つも増やさない）。
+   * 決して throw しない実装を渡すこと（gateway の作法）。
+   */
+  recordShipmentFact: (
+    rows: DeliveryRecord[],
+    legacy: LegacyOutcome,
+  ) => Promise<void>;
   /** CustomerProfile の部分更新（lastPurchaseAt / isSubscriber）。 */
   updateProfile: (
     shopifyCustomerId: string,
@@ -235,13 +249,34 @@ export async function handleShopifyOrder(
     // ── 1. 配送台帳（何より先に書く。遡って作れない記録だから）─────────────
     let deliveriesRecorded = 0;
     let deliveryLedgerError: string | undefined;
+    const deliveryRows = extractDeliveryRecords(order, { productTags: tagMap });
     try {
-      const rows = extractDeliveryRecords(order, { productTags: tagMap });
-      const written = await deps.recordDeliveries(rows);
+      const written = await deps.recordDeliveries(deliveryRows);
       deliveriesRecorded = written.inserted + written.updated;
     } catch (err) {
       // 台帳が書けなくても他の経路は止めない（ここで throw すると属性更新まで巻き添えになる）。
       deliveryLedgerError = err instanceof Error ? err.message : String(err);
+    }
+
+    // ── 1b. 送付という出来事を L0 にも積む（subject_id から履歴が引けるように）──
+    //   台帳が書けなかったときも **積む**。積まないと「送ったのに記録が無い」が
+    //   どこにも数えられずに消える（T-12: 無言で捨てない）。台帳の結果は
+    //   legacy_write として同じ行に残るので、後から見分けがつく。
+    try {
+      await deps.recordShipmentFact(
+        deliveryRows,
+        deliveryLedgerError !== undefined
+          ? { status: "failed", reason: "delivery_ledger_write_failed" }
+          : deliveriesRecorded > 0
+            ? { status: "ok" }
+            : { status: "skipped", reason: "no_delivery_rows" },
+      );
+    } catch (err) {
+      // L0 への追記は決して呼び出し側を止めない（gateway の作法）。
+      console.warn(
+        "[shopify-webhook] shipment fact not recorded (non-blocking):",
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     if (tagFetchError) {
@@ -344,6 +379,16 @@ export function createShopifyOrderDeps(supabase: SupabaseClient): ShopifyOrderDe
   return {
     fetchProductTags: (productIds, env) => fetchProductTagsByIds(productIds, env),
     recordDeliveries: (rows) => ledger.record(rows),
+    recordShipmentFact: async (rows, legacy) => {
+      // 号（issue_ref）は渡さない。EC の注文には号が無く、roji の号は
+      // migration 033 の割当が持つ別の事実だから（推測で埋めない）。
+      const fact = buildShipmentFact(rows, {
+        source: "cx-agent.shopify-order",
+        channel: "shopify",
+      });
+      if (!fact) return;
+      await recordCustomerEvent(supabase, fact, legacy);
+    },
     runPurchasePipeline: (customerId, lineItems, env) =>
       runPurchasePreferencePipeline(customerId, lineItems, env),
     updateProfile: async (customerId, updates, env) => {

@@ -92,6 +92,15 @@
       ],
       "timeout_sec": 180
     },
+    "unit.shipment": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-shipment.test.ts"
+      ],
+      "timeout_sec": 180
+    },
     "unit.subject-links": {
       "tier": "unit",
       "cmd": [
@@ -324,6 +333,15 @@
         "tests/db/cdp-stage2-parity-snapshot.db.test.ts"
       ],
       "timeout_sec": 420
+    },
+    "unit.delivery-ledger": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/delivery-ledger.test.ts"
+      ],
+      "timeout_sec": 180
     }
   },
   "features": [
@@ -416,6 +434,17 @@
       "criteria": "web-app が送る event_type / channel / identifier_kind を cx-agent が全部受理する (D3 / D4)",
       "checks": [
         "crossrepo.vocabulary"
+      ]
+    },
+    {
+      "id": "F-43",
+      "area": "事実の収集 (L0)",
+      "name": "誰に・いつ・どのお茶を・どの号を送ったかが主体から引ける",
+      "criteria": "送付が L0 に shipment.sent として 1 回だけ積まれ (冪等の元は注文の参照)、subject_id から月別の送付履歴が引ける。台帳 038 の器は増えていない",
+      "checks": [
+        "unit.shipment",
+        "unit.delivery-ledger",
+        "static.typecheck"
       ]
     },
     {
