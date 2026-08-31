@@ -393,6 +393,32 @@ it("L1 を動かす出来事の一覧に、第1段の 3 つが漏れなく入っ
   }
 });
 
+it("第1段の実装が古い migration 番号（048）を指していない", () => {
+  /**
+   * QA 1 周目の指摘 F-1 の再発防止。
+   *
+   * 本実装は最初 048 で書き、master に既に 048（Stage 2 parity snapshots）があったため
+   * 051 へ振り直した。そのときコメントの一部が 048 のまま残り、**適用コマンドを
+   * 048 と読み違えると 051 が未適用のままサイレント失敗する**（048 は適用済みの別物なので
+   * 何事もなく通ってしまう）。番号のずれを人の目で守らない。
+   *
+   * ⚠ 「048 を全面禁止」にはしない。src/lib/cdp/stage2-parity.ts の 048 は
+   *   master の本物の 048 を指す正しい参照である。**第1段の持ち物だけ**を見る。
+   */
+  const stage1Files = [
+    "src/lib/cdp/taste-axes.ts",
+    "src/lib/cdp/event-vocabulary.ts",
+    "src/lib/cdp/profile-intake.ts",
+    "src/db/migrations/051_cdp_stage1_taste_scene_provenance.sql",
+    "docs/cdp-taste-axes-astringency-2026-09.md",
+  ];
+  for (const rel of stage1Files) {
+    const text = readFileSync(join(process.cwd(), rel), "utf8");
+    const hits = text.split("\n").filter((l) => /(migration|--only)\s*0?48\b|\b048_cdp_stage1/.test(l));
+    assertEqual(hits.length, 0, `${rel} が古い番号 048 を指している: ${JSON.stringify(hits)}`);
+  }
+});
+
 it("migration 051 が L1 の 3 列を検算の対象に入れている", () => {
   // 比較対象に入れ忘れると、その列だけ黙って検算の外に出る。
   const parity = MIGRATION_051.slice(MIGRATION_051.indexOf("cdp_l1_recompute_parity"));

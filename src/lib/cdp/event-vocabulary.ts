@@ -216,7 +216,7 @@ export const STANDALONE_EVENT_TYPES = [
  *
  * ⚠ 第1段は「材料を取り始める」段である（設計 §6）。この 3 つは **事実を積むだけ**で、
  *   軸の位置の推論（減衰・窓・重み）は第3段 ⑯ に置く。L1 側も evidence を出所付きで
- *   持つところまでにしてある（migration 048）。
+ *   持つところまでにしてある（migration 051）。
  */
 export const PROFILE_EVENT_TYPES = [
   "persona.baseline_imported",
@@ -418,7 +418,7 @@ export function isWellFormedPayload(
      * 旧来の形を弾かないのは、既に本番の口（`recordProductRating`）がこの形で
      * 積んでいるからである。ここで弾くと **動いている経路の出来事が
      * schema_ok=false になり、L1 に入らなくなる**（E1 は保存するが解釈はしない）。
-     * 2 つの形の区別は L1 側が出所タグで持つ（migration 048 / 設計 §6 第1段 ③）。
+     * 2 つの形の区別は L1 側が出所タグで持つ（migration 051 / 設計 §6 第1段 ③）。
      *
      * ⚠ `score` を「星の数」として画面に出さないこと。択一 #4 の確定条件は
      *   **スコアは内部利用のみ・お客さんには星も数値も見せない**（R2 / バッジ非表示）。
