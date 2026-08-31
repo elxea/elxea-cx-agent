@@ -110,6 +110,15 @@
       ],
       "timeout_sec": 180
     },
+    "unit.identity-retraction": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-identity-retraction.test.ts"
+      ],
+      "timeout_sec": 180
+    },
     "unit.stage2-backfill": {
       "tier": "unit",
       "cmd": [
@@ -540,6 +549,15 @@
       "checks": [
         "unit.stage2-backfill",
         "dbw.stage2-backfill"
+      ]
+    },
+    {
+      "id": "F-44",
+      "area": "人の同一性",
+      "name": "誤った観測・誤った判断を、元の行を書き換えずに取り消せる",
+      "criteria": "取り消しは追記 1 行で表され、解決の 4 関数だけが _live を読む (消去経路の 3 関数は元の表のまま)。取り消しの版 049 は全文が冪等で本番固有のデータ是正を含まず、監視値 subjects_without_live_edges は「link で戻してある主体」を迷子と数えない (049 / 050)",
+      "checks": [
+        "unit.identity-retraction"
       ]
     },
     {

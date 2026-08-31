@@ -441,6 +441,47 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "rls", table: "cdp_stage2_parity_snapshots" },
     ],
   },
+
+  /* 049: 追記型の台帳に「取り消し」を入れる（誤った観測・誤った判断を、元の行を
+   *      1 バイトも書き換えずに読み口から外せるようにする）。
+   *
+   * ⚠ この version は **本番に raw SQL で適用済み**（2026-08-31 19:30 JST）で、
+   *   ファイルが存在しない時点で当たっている。よってこのエントリの主目的は
+   *   `--baseline`（実在検知 → register）で本番を台帳へ後追い登録することにある。
+   *   sentinel が全部そろっていれば applied 判定 → register。
+   *
+   * sentinel は 049 が **新しく作るもの** だけに絞る。付け替えた 4 関数
+   * （cdp_subject_component / cdp_canonical_identifiers / cdp_subject_links_j4_guard /
+   *  cdp_l1_derive_delivery_identity）は 043 / 046 が作ったものの差し替えなので、
+   *  実在しても「049 版か 043 版か」を言えない（044 / 047 と同じ理由）。
+   *  basis の CHECK に値が 2 つ増えたことも information_schema の実在確認では見られない。
+   *
+   * 表 2 つ / 一意 index 2 つ / 新設関数 1 つ / RLS 2 つで一意に判定できる。
+   * ビュー（identity_edges_live / subject_links_live）は probe が to_regclass を使う
+   * ため kind:"table" で実在確認できるが、上記だけで判定は一意に決まるので足さない
+   * （sentinel の意味を「表」と「ビュー」で混ぜない）。 */
+  "049_cdp_identity_retraction": {
+    idempotent: true,
+    specs: [
+      { kind: "table", table: "identity_edge_retractions" },
+      { kind: "table", table: "subject_link_retractions" },
+      { kind: "index", index: "identity_edge_retractions_uniq" },
+      { kind: "index", index: "subject_link_retractions_uniq" },
+      { kind: "function", func: "cdp_retraction_summary" },
+      { kind: "rls", table: "identity_edge_retractions" },
+      { kind: "rls", table: "subject_link_retractions" },
+    ],
+  },
+
+  /* 050: cdp_retraction_summary() の subjects_without_live_edges から偽陽性を取る
+   *      （live な link で正しい人に戻してある主体を「迷子」と数えていた）。
+   *
+   * specs が空なのは 044 と同じ理由で、この version が作るオブジェクトが無いから
+   * （cdp_retraction_summary の CREATE OR REPLACE のみ）。関数の実在は 049 で既に
+   * 真になるので sentinel に使えない（「関数が新しい定義になっているか」は
+   * 実在確認では語れない）。よって no-sentinel → baseline では leave-idempotent、
+   * --apply が冪等に再適用する（＝安全。読み取り専用の関数 1 本の差し替え）。 */
+  "050_cdp_retraction_summary_link_aware": { idempotent: true, specs: [] },
 };
 
 // ---------------------------------------------------------------------------
