@@ -11,10 +11,31 @@
  *   - POST  insert / upsert（on_conflict）
  *   - PATCH update（eq フィルタ）
  *   - DELETE（eq フィルタ・後片付け用）
- * これ以外（複雑な演算子や RPC）は本 Phase の動線では不使用。
+ *   - POST  rpc/<name>（**テストが明示的に登録したものだけ**。下記）
+ * これ以外（複雑な演算子）は本 Phase の動線では不使用。
+ *
+ * ─ RPC の扱い（重要）─
+ *
+ *   RPC の中身は plpgsql であり、ここで再現すると「モックが再現した挙動」を
+ *   確かめることになる（＝実装の検証にならない）。よって **既定では 404** を返し、
+ *   テストが onRpc で応答を登録したときだけ答える。ここで確かめられるのは
+ *   「呼び出し側がどの関数をどう呼び、戻りをどう読むか」だけである、と割り切る。
+ *   SQL 側の意味（冪等・生成列・連続日数）は tests/db/*.db.test.ts が実 DB で見る。
  */
 
 type Row = Record<string, unknown>;
+
+/** RPC の応答（テストが登録する）。status 既定 200。 */
+export interface RpcResponse {
+  status?: number;
+  body: unknown;
+}
+
+/** 呼ばれた RPC の記録（引数まで見て「何を渡したか」を固定できるようにする）。 */
+export interface RpcCall {
+  name: string;
+  args: Row;
+}
 
 const PGRST_OBJECT = "application/vnd.pgrst.object+json";
 
@@ -68,12 +89,22 @@ export interface SupabaseMock {
   seed(table: string, rows: Row[]): void;
   /** テーブルの現在の行配列を返す（DB 効果の assert 用）。 */
   all(table: string): Row[];
+  /**
+   * RPC の応答を登録する。登録していない関数名は **404**（＝未適用の migration と
+   * 同じ見え方）になる。handler は呼ばれるたびに評価されるので、同じ関数の
+   * 2 回目以降で応答を変えることもできる。
+   */
+  onRpc(name: string, handler: (args: Row, callIndex: number) => RpcResponse): void;
+  /** 呼ばれた RPC の記録（順序どおり）。 */
+  rpcCalls: RpcCall[];
 }
 
 /** Supabase の base URL（host 一致でルーティングするため保持）。 */
 export function createSupabaseMock(): SupabaseMock {
   const store: Record<string, Row[]> = {};
   const table = (t: string): Row[] => (store[t] ??= []);
+  const rpcHandlers: Record<string, (args: Row, callIndex: number) => RpcResponse> = {};
+  const rpcCalls: RpcCall[] = [];
 
   function applyFilters(rows: Row[], params: URLSearchParams): Row[] {
     let out = rows;
@@ -145,6 +176,37 @@ export function createSupabaseMock(): SupabaseMock {
     const headers = new Headers((init?.headers as HeadersInit) ?? {});
     const wantsSingle = (headers.get("accept") ?? "").includes(PGRST_OBJECT);
     const prefer = headers.get("prefer") ?? "";
+
+    // RPC（/rest/v1/rpc/<name>）。表の分岐より先に振り分ける
+    // （でないと "rpc/xxx" という名前の表への insert として素通りしてしまう）。
+    if (t.startsWith("rpc/")) {
+      const name = t.slice("rpc/".length);
+      let args: Row = {};
+      try {
+        const parsed = JSON.parse(init?.body ? String(init.body) : "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Row;
+      } catch {
+        args = {};
+      }
+      const callIndex = rpcCalls.filter((c) => c.name === name).length;
+      rpcCalls.push({ name, args });
+
+      const handler = rpcHandlers[name];
+      if (!handler) {
+        // 未登録 = その関数が DB に無い。PostgREST が返す形（PGRST202 / 404）に寄せる。
+        return json(
+          {
+            code: "PGRST202",
+            details: null,
+            hint: null,
+            message: `Could not find the function public.${name} in the schema cache`,
+          },
+          404,
+        );
+      }
+      const res = handler(args, callIndex);
+      return json(res.body, res.status ?? 200);
+    }
 
     if (method === "GET" || method === "HEAD") {
       const matched = applyFilters(table(t), params);
@@ -246,8 +308,14 @@ export function createSupabaseMock(): SupabaseMock {
   return {
     store,
     handle,
+    rpcCalls,
+    onRpc(name, handler) {
+      rpcHandlers[name] = handler;
+    },
     reset() {
       for (const k of Object.keys(store)) delete store[k];
+      for (const k of Object.keys(rpcHandlers)) delete rpcHandlers[k];
+      rpcCalls.length = 0;
     },
     seed(t, rows) {
       table(t).push(...rows.map((r) => ({ ...r })));
