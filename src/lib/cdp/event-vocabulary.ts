@@ -40,6 +40,7 @@
 
 import type { BehaviorAction } from "../firestore";
 import type { FlowEventName } from "../flow-events";
+import { isTasteAxis, isTastePole } from "./taste-axes";
 
 /** 型レベルの網羅アサート。false になると tsc が落ちる。 */
 type Assert<T extends true> = T;
@@ -171,11 +172,15 @@ export const SHIPMENT_SENT_EVENT_TYPE = "shipment.sent";
  */
 export const STANDALONE_EVENT_TYPES = [
   "purchase.order_paid",
-  "rating.submitted",
   "survey.answer_recorded",
   "diagnosis.answer",
   SHIPMENT_SENT_EVENT_TYPE,
 ] as const;
+
+// 注: `rating.submitted` は 2026-09-01 に STANDALONE から PROFILE_EVENT_TYPES へ移した
+//   （顧客プロファイル 第1段 ①）。届いた後の評価が L1 の材料になったので、payload の形を
+//   見る側（＝解釈に使う側）に入れる必要が出たため。語彙名は変えていないので、
+//   既に積まれている行の event_type はそのまま読める。
 
 // ---------------------------------------------------------------------------
 // Stage 4: 解釈（L1）を動かす出来事
@@ -190,9 +195,9 @@ export const STANDALONE_EVENT_TYPES = [
  *   置き場を作るとき、L1 の列に直接書ける口を開けると「解釈を直接書き換える経路」が
  *   でき、L1 が L0 から再計算できなくなる（Stage 4 の不変条件が壊れる）。
  *   よって受け口は **L0 に 1 行積むだけ**にして、L1 はそれを畳んだ結果にする。
- *   畳み方の正本は migration 046 の cdp_l1_build_profile 1 か所。
+ *   畳み方の正本は cdp_l1_build_profile 1 か所（046 が置き、051 が差し替えた版）。
  *
- * ─ 一覧（畳まれ方は 046 の CASE と 1 対 1）─
+ * ─ 一覧（畳まれ方は cdp_l1_build_profile の CASE と 1 対 1）─
  *
  *   persona.baseline_imported … 移行の起点。Firestore に既に貯まっていた点を 1 回だけ載せる
  *   persona.signal_applied    … 点が動いた 1 回分（出所と増減）
@@ -201,6 +206,17 @@ export const STANDALONE_EVENT_TYPES = [
  *   notify.preference_set     … 事前通知の設定（key / value）
  *   notify.suppressed / .resumed … 配信を止める / 再開する
  *   profile.override          … 本人訂正（field / value）
+ *
+ * ─ 顧客プロファイル 第1段で足した 3 つ（2026-09-01 / 設計 rev.3.2 §6 第1段 ①⑤ / §7 #4）─
+ *
+ *   rating.submitted           … 届いた後の評価（①）。**5 段階**（択一 #4 の確定は (c)）。
+ *                                旧来のお茶カード ±1 タップも同じ型で受ける（下記）
+ *   taste.declared             … 本人が味の軸について言ったこと（会話 / じぶんのページ）
+ *   purchase.recipient_declared … 「誰のために買ったか」（⑤ 自分用 / 贈りもの）
+ *
+ * ⚠ 第1段は「材料を取り始める」段である（設計 §6）。この 3 つは **事実を積むだけ**で、
+ *   軸の位置の推論（減衰・窓・重み）は第3段 ⑯ に置く。L1 側も evidence を出所付きで
+ *   持つところまでにしてある（migration 051）。
  */
 export const PROFILE_EVENT_TYPES = [
   "persona.baseline_imported",
@@ -212,7 +228,23 @@ export const PROFILE_EVENT_TYPES = [
   "notify.suppressed",
   "notify.resumed",
   "profile.override",
+  "rating.submitted",
+  "taste.declared",
+  "purchase.recipient_declared",
 ] as const;
+
+/**
+ * 「誰のために買ったか」の語彙（設計 §3「自分用と贈答は別モデル」）。
+ *
+ * ⚠ 2 値に閉じている。自分用と贈答は **構造が違う**（Boncinelli et al. 2019: 同じ人でも
+ *   属性の重みが有意に変わる）ので、後から 3 つ目を足す種類の語彙ではない。
+ */
+export const PURCHASE_SCENES = ["self", "gift"] as const;
+export type PurchaseScene = (typeof PURCHASE_SCENES)[number];
+
+/** 「合わなかった」ときに任意で聞く 1 問の選択肢（設計 §2「どこが」4 択）。 */
+export const RATING_ASPECTS = ["aroma", "strength", "aftertaste", "amount"] as const;
+export type RatingAspect = (typeof RATING_ASPECTS)[number];
 
 export type ProfileEventType = (typeof PROFILE_EVENT_TYPES)[number];
 
@@ -341,7 +373,7 @@ export function isIdentifierKind(value: unknown): value is IdentifierKind {
  *   送付は L1 の解釈（persona）を動かさないが、**月別の送付履歴という読み口が
  *   この payload をそのまま畳む**（src/lib/cdp/shipment.ts）。畳まれる payload は
  *   形を問う、という基準は persona と同じなのでここで一緒に見る。
- *   PROFILE_EVENT_TYPES に足さないのは、あの一覧が migration 046 の CASE と
+ *   PROFILE_EVENT_TYPES に足さないのは、あの一覧が cdp_l1_build_profile の CASE と
  *   1 対 1 であるという約束を崩さないため（送付を畳む枝は 046 に無い）。
  */
 export function isWellFormedPayload(
@@ -376,6 +408,39 @@ export function isWellFormedPayload(
       return true;
     case "profile.override":
       return nonEmptyString(p.field) && "value" in p;
+
+    /**
+     * 届いた後の評価（①）。**2 つの形を受ける**。
+     *
+     *   第1段の形 … `score` が 1〜5 の整数（択一 #4 = (c) 5 段階）
+     *   旧来の形   … `rating` が +1 / -1（お茶カードの「感想ひとこと」1 タップ）
+     *
+     * 旧来の形を弾かないのは、既に本番の口（`recordProductRating`）がこの形で
+     * 積んでいるからである。ここで弾くと **動いている経路の出来事が
+     * schema_ok=false になり、L1 に入らなくなる**（E1 は保存するが解釈はしない）。
+     * 2 つの形の区別は L1 側が出所タグで持つ（migration 051 / 設計 §6 第1段 ③）。
+     *
+     * ⚠ `score` を「星の数」として画面に出さないこと。択一 #4 の確定条件は
+     *   **スコアは内部利用のみ・お客さんには星も数値も見せない**（R2 / バッジ非表示）。
+     */
+    case "rating.submitted":
+      return isRatingPayload(p);
+
+    /** 本人が味の軸について言ったこと。軸と極が語彙どおりであること。 */
+    case "taste.declared":
+      return (
+        typeof p.axis === "string" &&
+        isTasteAxis(p.axis) &&
+        isTastePole(p.axis, p.pole)
+      );
+
+    /** 誰のために買ったか（⑤）。 */
+    case "purchase.recipient_declared":
+      return (
+        typeof p.scene === "string" &&
+        (PURCHASE_SCENES as readonly string[]).includes(p.scene)
+      );
+
     default:
       return true;
   }
@@ -406,6 +471,38 @@ export function isWellFormedShipmentPayload(
     const q = item.quantity;
     return typeof q === "number" && Number.isInteger(q) && q > 0;
   });
+}
+
+/** Tea Menu の 5 桁番号。`product-ratings.ts` の PRODUCT_NO_RE と同じ形。 */
+const PRODUCT_NO_FORM = /^\d{5}$/;
+
+/**
+ * 届いた後の評価の payload が読める形か。
+ *
+ * 必須: `product_no` が 5 桁。
+ * どちらか一方: `score`（1-5 の整数）または `rating`（+1 / -1）。
+ * 任意: `aspect`（あるなら語彙どおり）/ `delivery_ref`・`issue_ref`（あるなら非空文字列）。
+ *
+ * 両方あっても弾かない（移行期に両方載る経路が出たときに、出来事を落とさない）。
+ */
+function isRatingPayload(p: Record<string, unknown>): boolean {
+  if (typeof p.product_no !== "string" || !PRODUCT_NO_FORM.test(p.product_no)) return false;
+
+  const hasScore =
+    typeof p.score === "number" &&
+    Number.isInteger(p.score) &&
+    p.score >= 1 &&
+    p.score <= 5;
+  const hasRating = p.rating === 1 || p.rating === -1;
+  if (!hasScore && !hasRating) return false;
+
+  if (p.aspect !== undefined && !(RATING_ASPECTS as readonly string[]).includes(p.aspect as string)) {
+    return false;
+  }
+  for (const key of ["delivery_ref", "issue_ref"] as const) {
+    if (p[key] !== undefined && !nonEmptyString(p[key])) return false;
+  }
+  return true;
 }
 
 /** 3 軸の数値バケツか（欠けた軸は許す。数値でない値が入っているものは弾く）。 */
