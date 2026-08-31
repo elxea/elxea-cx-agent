@@ -294,3 +294,116 @@ export async function recordProfileOverride(
     }),
   );
 }
+
+// ---------------------------------------------------------------------------
+// 顧客プロファイル 第1段（2026-09-01 / 設計 rev.3.2 §6 第1段 ① ⑤）
+//
+// ⚠ ここも **記録の口だけ**。軸の位置の推論は第3段 ⑯ で、L1 の畳み手も
+//   第1段では数えるだけにしてある（migration 051）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 届いた一杯への評価（第1段 ①）。**5 段階**（設計 §7 択一 #4 の確定 = (c)）。
+ *
+ * ─ 5 段階にした条件（#4 の確定と一体）─
+ *   **スコアは内部利用のみ。お客さんには星も数値も見せない**（R2 / バッジ非表示は維持）。
+ *   自由記述は「感想を送る」の別導線であって、ここには載せない。
+ *
+ * ─ deliveryRef を渡すこと ─
+ *   「どの配送のどの一杯についての評価か」を指す不透明な文字列。これが無いと
+ *   回答率（第1段 ⑦ / cdp_l0_rating_response_rate の rate_strict）が測れず、
+ *   設計 §2 の降伏条件を判定できない。**人の識別子を入れないこと**（E5）。
+ *
+ * ─ 冪等キー ─
+ *   銘柄 + 配送 + 時刻。同じ一杯に後から付け直したら別の出来事として残る
+ *   （上書きしない = 設計 §3「一杯ごとの評価は追加のみ」）。
+ *
+ * ─ 旧来の ±1 タップとの関係 ─
+ *   お茶カードの「感想ひとこと」は `recordProductRating`（src/lib/product-ratings.ts）
+ *   のままで、こちらには寄せない。あちらは product_ratings への直書きを
+ *   gateway 越しに残す経路で、器（022 の CHECK）が ±1 しか受けない。
+ *   L1 は 2 つを **別々に数える**（taste.evidence.totals の score_n / legacy_n）。
+ */
+export async function recordDeliveredCupRating(
+  supabase: SupabaseClient,
+  ctx: ProfileIntakeContext,
+  args: {
+    /** Tea Menu の 5 桁番号。 */
+    productNo: string;
+    /** 1（合わなかった）〜 5（合った）。 */
+    score: number;
+    /** 「合わなかった」ときに任意で聞く 1 問（設計 §2）。 */
+    aspect?: "aroma" | "strength" | "aftertaste" | "amount";
+    /** どの配送のどの一杯か（不透明な文字列・人を指さない）。 */
+    deliveryRef?: string;
+    /** どの号のページから答えたか。 */
+    issueRef?: string;
+    at?: string;
+  },
+): Promise<IntakeResult> {
+  const productNo = typeof args.productNo === "string" ? args.productNo.trim() : "";
+  const deliveryRef = (args.deliveryRef ?? "").trim();
+  const issueRef = (args.issueRef ?? "").trim();
+  const stamp = args.at ?? ctx.occurredAt ?? new Date().toISOString();
+  return recordCustomerEvent(
+    supabase,
+    fact(ctx, "rating.submitted", `cup:${productNo}:${deliveryRef}@${stamp}`, {
+      product_no: productNo,
+      score: args.score,
+      ...(args.aspect ? { aspect: args.aspect } : {}),
+      ...(deliveryRef ? { delivery_ref: deliveryRef } : {}),
+      ...(issueRef ? { issue_ref: issueRef } : {}),
+      rating_source: "post_delivery",
+    }),
+  );
+}
+
+/**
+ * 本人が味の軸について言ったこと（会話 / じぶんのページ）。
+ *
+ * ─ 何を「言った」とみなすか（設計 §2）─
+ *   会話では **前置きした問いへの答えだけ**を「聞いたこと」として扱う。
+ *   前置きのない雑談から意図を汲んでここへ流さない（会話全体を採点の場にしない）。
+ *
+ * ─ 復唱してから呼ぶこと（設計 §4）─
+ *   黙って書き換えると、本人には直ったかどうか分からない。呼ぶ側が
+ *   「では『渋みはしっかりめ』に直しますね」と復唱してから呼ぶ。
+ */
+export async function recordTasteDeclaration(
+  supabase: SupabaseClient,
+  ctx: ProfileIntakeContext,
+  args: { axis: string; pole: string; at?: string },
+): Promise<IntakeResult> {
+  const axis = typeof args.axis === "string" ? args.axis.trim() : "";
+  const pole = typeof args.pole === "string" ? args.pole.trim() : "";
+  const stamp = args.at ?? ctx.occurredAt ?? new Date().toISOString();
+  return recordCustomerEvent(
+    supabase,
+    fact(ctx, "taste.declared", `taste:${axis}@${stamp}`, { axis, pole }),
+  );
+}
+
+/**
+ * 誰のために買ったか（第1段 ⑤）。**購入フローの外**で聞く。
+ *
+ * ⚠ 購入フローに嗜好の設問を混ぜない（設計 §2 原則2）。呼び出しは購入完了**後**の
+ *   画面からに限る。ここは記録の口なので強制はできない — 呼ぶ側の責任である。
+ *
+ * 構造が違うので後から足せない、というのが第1段に入っている理由
+ * （Boncinelli et al. 2019: 同じ人でも自分用と贈答で属性の重みが有意に変わる）。
+ */
+export async function recordPurchaseRecipient(
+  supabase: SupabaseClient,
+  ctx: ProfileIntakeContext,
+  args: { scene: "self" | "gift"; orderRef?: string; at?: string },
+): Promise<IntakeResult> {
+  const orderRef = (args.orderRef ?? "").trim();
+  const stamp = args.at ?? ctx.occurredAt ?? new Date().toISOString();
+  return recordCustomerEvent(
+    supabase,
+    fact(ctx, "purchase.recipient_declared", `recipient:${orderRef || stamp}`, {
+      scene: args.scene,
+      ...(orderRef ? { order_ref: orderRef } : {}),
+    }),
+  );
+}

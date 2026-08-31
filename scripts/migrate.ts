@@ -482,6 +482,27 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
    * 実在確認では語れない）。よって no-sentinel → baseline では leave-idempotent、
    * --apply が冪等に再適用する（＝安全。読み取り専用の関数 1 本の差し替え）。 */
   "050_cdp_retraction_summary_link_aware": { idempotent: true, specs: [] },
+  /* 051: 顧客プロファイル 第1段（届いた後の評価 / 誰のために / 出所タグ / 回答率）。
+   *
+   * sentinel は **新設した関数**で取る。subject_profile に足した 3 列
+   * （taste / scene / provenance）は ADD COLUMN IF NOT EXISTS なので実在で判定できるが、
+   * 046 を差し替えた 3 関数は名前が同じで「当たったか」を実在では言えない。
+   * 新しい名前の関数（cdp_taste_axes / cdp_provenance_put /
+   * cdp_l0_rating_response_rate）だけが 051 に固有の正の sentinel である。
+   * 冪等: ADD COLUMN IF NOT EXISTS と CREATE OR REPLACE FUNCTION のみ。 */
+  "051_cdp_stage1_taste_scene_provenance": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "subject_profile", column: "taste" },
+      { kind: "column", table: "subject_profile", column: "scene" },
+      { kind: "column", table: "subject_profile", column: "provenance" },
+      { kind: "function", func: "cdp_taste_axes" },
+      { kind: "function", func: "cdp_taste_poles" },
+      { kind: "function", func: "cdp_provenance_rank" },
+      { kind: "function", func: "cdp_provenance_put" },
+      { kind: "function", func: "cdp_l0_rating_response_rate" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
