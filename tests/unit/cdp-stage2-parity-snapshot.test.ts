@@ -19,7 +19,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { INTROSPECTION, listMigrationFiles, versionOf } from "../../scripts/migrate";
+import { INTROSPECTION, listMigrationFiles, versionOf, versionNumber } from "../../scripts/migrate";
 
 let total = 0;
 let passed = 0;
@@ -66,7 +66,15 @@ it("048 は 047 の次の番号として足されている（適用済みを書�
   const idx = versions.indexOf(VERSION);
   assertTrue(idx >= 0, "048 が migrations に無い");
   assertEqual(versions[idx - 1], "047_cdp_stage2_legacy_backfill", "048 の 1 つ前が 047 ではない");
-  assertEqual(versions[versions.length - 1], VERSION, "048 が最後の version ではない");
+  /* 旧版はここで「048 が最後の version であること」を確かめていた。それは
+   * **意図（適用済みを書き換えず、次の番号として足した）ではなく時点**を固定して
+   * しまう検査で、次の migration が足された瞬間に必ず落ちる（049 で実際に落ちた）。
+   * 意図のほうを直接言い直す: 番号は単調増加で、後から番号が割り込まれていない。 */
+  const numbers = versions.map(versionNumber);
+  assertTrue(
+    numbers.every((n, i) => i === 0 || n > numbers[i - 1]),
+    `version の番号が単調増加していない（割り込み or 重複）: ${versions.join(", ")}`,
+  );
 });
 
 it("migrate.ts が 048 を実在確認できる（sentinel 登録漏れが無い）", () => {
