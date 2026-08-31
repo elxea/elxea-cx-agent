@@ -106,7 +106,9 @@ cx-agentの外（いまはelxea-web-app）から出来事を積むための口�
 
 - `behavior.<action>` — 行動語彙15値（cx-agentの14値 + web-appにしか無かった `audio_play`）。web-appの10値・zodの7値はこの部分集合。
 - `flow.<name>` — `FlowEventName` 33値（`.` は `_` に畳む。例 `survey.answer` → `flow.survey_answer`）。
-- 独立した出来事 — `purchase.order_paid` / `rating.submitted` / `survey.answer_recorded` / `diagnosis.answer`。
+- 独立した出来事 — `purchase.order_paid` / `rating.submitted` / `survey.answer_recorded` / `diagnosis.answer` / `shipment.sent`。
+
+`shipment.sent`（送った記録）は **`purchase.order_paid` とは別の出来事**である。購入は「注文が成立した」、送付は「手元に届いた」で、欠品・変更・返品・マルシェの手渡し・EC開店前の実配送でずれる（rojiの正本も、決めたこと = migration 033と届いたこと = 038を別の事実として分けている）。同じ型名に畳むと **届いていない注文が「送った」として数えられる**。詳しい正本は台帳 `tea_delivery_ledger`（038）の側に残し、L0に積むのは「その主体の身に送付が1回起きた」という時系列の事実だけ。組み立てと読み口は `src/lib/cdp/shipment.ts`。
 
 `channel` の既知は `line` / `web` / `shopify` の3値。`shopify` はTSの型（`BehaviorChannel = "line" | "web"`）に無いが、注文webhookが実際に書いている値である。**実在するものを語彙から外しても、実在するほうが「未知」になるだけで何も直らない。** 型を合わせるのはStage 5。
 
