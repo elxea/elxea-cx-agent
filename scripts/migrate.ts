@@ -503,6 +503,26 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "function", func: "cdp_l0_rating_response_rate" },
     ],
   },
+  /* 052: L1 の畳み直しが「列が増えたこと」に気づかない穴の根治。
+   *
+   * 051 の本番適用で、cdp_l1_recompute_all が 1 件も畳み直さず（recomputed:0）、
+   * 既存 profile の新列が DEFAULT のまま残った。判定が last_event_seq だけを見ており、
+   * 「出来事は増えていないが解釈の形が変わった」を検知できなかったのが根因。
+   *
+   * sentinel は新設した列と関数で取る。差し替えた 2 関数
+   * （cdp_l1_recompute_subject / cdp_l1_recompute_all）は名前が同じで、実在では
+   * 「当たったか」を言えない（036 → 037 と同じ事情）。
+   *
+   * 冪等: ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE FUNCTION / 全件畳み直し
+   *       （L0 からの再計算なので何度走らせても同じ状態に収束する）。
+   * ⚠ 本 migration は末尾で自己検査し、畳み直しの取り残しがあれば例外で失敗する。 */
+  "052_cdp_l1_refold_on_shape_change": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "subject_profile", column: "shape_fingerprint" },
+      { kind: "function", func: "cdp_l1_shape_fingerprint" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
