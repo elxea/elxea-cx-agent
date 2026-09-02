@@ -523,6 +523,51 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "function", func: "cdp_l1_shape_fingerprint" },
     ],
   },
+  /* 053: 送った記録の台帳の読み口（roji タッチポイント地図 A-0）。
+   *
+   * 台帳への書き込みは既に動いており、残っていた依存は「Web アプリ側から引く経路」
+   * 1 点だった。A-1（先月への返事）・A-4（また入れて / もういらない）・
+   * A-5（じぶんのページの月別履歴）・A-7（購入履歴からの導線）が 4 つともここに依存する。
+   *
+   * sentinel は新設した関数 2 つで取る。表も列も足していないので、判定材料は
+   * これしかない（そして 2 つとも 053 でしか作られない名前なので一意に決まる）。
+   *
+   * 冪等: CREATE OR REPLACE FUNCTION のみ。読み取り専用（INSERT/UPDATE/DELETE を含まない）。 */
+  "053_cdp_delivery_readout": {
+    idempotent: true,
+    specs: [
+      { kind: "function", func: "cdp_delivery_months_bound" },
+      { kind: "function", func: "cdp_delivery_history_for_identifier" },
+    ],
+  },
+  /* 054: イベントへの関心 / 窓への傾き / 事前通知への変更の器（B-1 / B-2 / B-3）。
+   *
+   * subject_profile に 3 列足し、畳み手・書き手・検算の 3 本を差し替える。
+   * 列が増えるので 052 の shape fingerprint により全員が pending になる（自動）。
+   * そのうえで 052 と同じく **一回性の是正**（全件畳み直し）と **末尾の自己検査** を
+   * 含める。自己検査は「形の版が古い行が 0 件」に加えて「足した 3 列が DEFAULT の
+   * まま残った行が 0 件」も見る（051 の障害の本体は後者だった）。
+   *
+   * sentinel は新設した列 3 つと、新しい名前の関数で取る。差し替えた 3 関数
+   * （cdp_l1_build_profile / cdp_l1_recompute_subject / cdp_l1_recompute_parity）は
+   * 名前が同じで、実在では「当たったか」を言えない（051 / 052 と同じ事情）。
+   *
+   * 冪等: ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE FUNCTION / 全件畳み直し
+   *       （L0 からの再計算なので何度走らせても同じ状態に収束する）。 */
+  "054_cdp_interest_window_change_containers": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "subject_profile", column: "event_interest" },
+      { kind: "column", table: "subject_profile", column: "window_leaning" },
+      { kind: "column", table: "subject_profile", column: "assignment_changes" },
+      { kind: "function", func: "cdp_event_interest_modes" },
+      { kind: "function", func: "cdp_content_windows" },
+      { kind: "function", func: "cdp_window_modes" },
+      { kind: "function", func: "cdp_assignment_change_actions" },
+      { kind: "function", func: "cdp_window_zero" },
+      { kind: "function", func: "cdp_window_mode_zero" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

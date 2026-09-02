@@ -419,3 +419,92 @@ cx-agent 内部から呼ぶときは `src/lib/cdp/profile-intake.ts` の型付�
 ### 消去との関係
 
 `subject_profile` / `subject_segment_state` はどちらも `subject_id` 列を持つので、042/043の「表の表」（`roji_person_key_map`）が**自動で列挙する** — 除外リストに入れない＝消える側である、が既定。辿らずに数える孤児検査（`roji_erasure_residue`）にも046で足した。消去済みの主体に行を足そうとすると `cdp_reject_retired_subject` が入口で止める（畳み直しと消去が前後しても解釈が復活しない）。
+
+---
+
+## 14. A-0 / B-1 / B-2 / B-3 — 送った記録の読み口と、取り返せない材料の器
+
+正本: roji体験目的 × タッチポイント全体地図（2026-09-02・Setaka 承認済み）第4章 A-0 / B-1 / B-2 / B-3
+実装: migration `053_cdp_delivery_readout.sql` / `054_cdp_interest_window_change_containers.sql`
+
+### `POST /api/cdp/delivery/history` — 送った記録の台帳を引く
+
+認証は他のCDPの口と同じ共有秘密（`SYNC_API_SECRET` / `X-API-Key`）。**新しい秘密を増やさない。**
+
+```
+body : { identifier_kind, identifier_value, months? }   // months は既定12・1〜36に丸める
+200  : { found, reason?, months?, keys?, periods: [...] }
+400  : 鍵の種類が語彙に無い / 値が空 / 本文がJSONでない
+401  : 鍵なし・鍵違い・サーバ側に秘密が無い（fail-closed）
+```
+
+**読み取り専用なのにPOSTなのは、引数に人を指す鍵が入るから。** GETにすると鍵がURL・アクセスログ・Refererに残る。L0の吸い上げ口（`/api/cdp/l0/*`）がGETなのは引数が水位と日付だけで人を指さないからで、ここはその条件を満たさない（設計 §3-1「表示しない・URLに出さない」）。SQL側の関数は `STABLE` で、INSERT / UPDATE / DELETE を1つも含まない。
+
+`periods[]` は新しい月が先頭で、月ごとに2つのキーを持つ。
+
+- `assigned` … 「送ることにした」（migration 033 `roji_delivery_ledger`）。`issue_ref` と `teas[].product_no`（5桁）。割当の行が無い月は `null`
+- `delivered` … 「実際に届いた」（migration 038 `tea_delivery_ledger`）。行ごとに `date_basis` と `source` を持つ
+
+**この2つを1つの配列に畳まない。** 038の冒頭が明記しているとおり、決めたこと（033）と届いたこと（038）は別の事実で、欠品・変更・返品でずれる。畳むと「届いていないものを届いたと言う」経路が生まれる。片方だけの月も落とさない（SQL側は FULL OUTER JOIN）。
+
+### なぜL0の `shipment.sent` ではなく台帳を読むのか
+
+L0に送付を積む経路は既に通っている（`src/lib/cdp/shipment.ts`）。それでもこの口が台帳を読むのは、L0だけではこの問いに**いまは答えられない**ため。理由は3つとも実装の実測である。
+
+1. **手渡し・EC開店前の実配送がL0に載っていない。** `scripts/record-delivery.ts` は台帳にだけ書き、`shipment.sent` を積まない（同ファイル冒頭に明記）。ECは未開店なので、いま実在する配送はほぼ全部この経路である
+2. **L0のpayloadが持つ銘柄の参照はShopifyのproduct_id系**で、5桁の銘柄番号ではない。評価の口（`rating.submitted`）が要求するのは `product_no` なので、L0の参照だけでは「どの一杯について聞くか」を組み立てられない
+3. **号（`issue_ref`）は033にしか無い**
+
+よって役割が分かれる。**どちらも消さない。**
+
+| | 何の問いに答えるか | 使い先 |
+|---|---|---|
+| L0 `shipment.sent` | その主体の身に送付が何回起きたか（時系列） | 回答率（051 `cdp_l0_rating_response_rate`）の分母 |
+| `POST /api/cdp/delivery/history` | その月に何を送ることにして、何が届いたか（中身） | 先月への返事 / じぶんのページの月別履歴 |
+
+### 返さないもの（意図的）
+
+`subject_id` / 生の LINE userId / Shopify顧客番号 / 住所・宛名・メール / 038の `note`（手動投入の自由文）/ 033の `estimate_snapshot`・`monthly_note`・`candidates_not_chosen`・`preview_*`。
+
+鍵は**件数だけ**返す（`keys.shopify_customer_id` / `keys.line_messaging_uid`）。履歴0件のときに「まだ何も届いていない」のか「鍵が繋がっていない」のかを、呼ぶ側が生値を見ずに切り分けるため。`email_hash` では引かない（SEC-1・SQL側も同じ枝を持つ）。消去済みの主体には `found:false` を返す。
+
+### 見つからないときも200で返す
+
+「この人の履歴が引けなかった」は呼び出し側にとって**表示すべき状態**であって要求の誤りではない。404にすると、web-app側は「口が無い」のか「履歴が無い」のかを応答コードから切り分けられない。理由は本文の `reason` に載せる（`subject_not_found` / `subject_retired` / `rpc_failed` / `identifier_kind_not_resolvable`）。
+
+### 追加した語彙（`event_type`）— 送り先は既存の `POST /api/events`
+
+L1を動かす出来事として4つ足した。受け口は既存のgatewayで、**新しい書き込みの口を作らない**。
+
+| `event_type` | payload | 出所 | 畳まれ先 |
+|---|---|---|---|
+| `event.interest_declared` | `{ mode }` … `onsite` / `online` / `not_now` | declared | `subject_profile.event_interest.intent` |
+| `event.attended` | `{ event_ref }` | observed | `subject_profile.event_interest.attendance` |
+| `window.entered` | `{ window, ref, mode }` | observed | `subject_profile.window_leaning` |
+| `assignment.changed` | `{ period, changes[] }` | declared | `subject_profile.assignment_changes` |
+
+- `window` は6つ（`tea` / `literature` / `art` / `music` / `farming` / `science`）。正本 序章3 の「複数の窓」と同じ。**暫定である**（Setaka確定 2026-09-02。最初のアンケート2問目で見直す）
+- `mode`（窓） は `read` / `listen` / `watch` / `saved`。**本人に聞かない**ので、窓の出所は常に observed
+- `changes[]` は `{ action, ref, replaced_ref? }`。`action` は `add` / `remove` / `replace`。**空の配列を通さない**（何も変えていない「変えた」を積ませない）
+- `assignment.changed` の `period` は**変えた対象の月**であって出来事が起きた月ではない（10月号を9月末に変えることが普通にある）。畳み手もpayloadのperiodを見る
+
+語彙はいずれも**閉じている**。分類の変更は設計判断であって観測の揺らぎではない（`PURCHASE_SCENES` / taste の軸と同じ扱い）。語彙から外れた値で届いた出来事は、E1どおり**L0には残り** `schema_ok = false` として数えられる（畳まれないだけ）。
+
+### 器だけを先に作る理由
+
+3つとも正本が「取り返せないもの」に挙げている材料で、**器が無い間に起きたことは後から作れない**。収集の画面も配信もここでは作らない。
+
+### 第1段の姿勢を引き継ぐ（推論しない）
+
+051と同じく、L1に置くのは**数えた材料だけ**である。とくに窓には代表値（`primary`）を置かない — A-2（記事22本への目印付け）が終わるまで材料は0件で入るので、0件のうちからいちばん多い窓を出す枝があると、1タップで「文学の人」が決まる。
+
+窓の `counts` は6つとも常に存在する（0も書く）。触れられた窓だけをキーにすると、「まだ1度も触れられていない窓」と「そもそも分類に無い窓」が区別できなくなり、E8'の比較も人によってキーの数が変わる。
+
+### 畳み直しは自動で走る
+
+054は `subject_profile` に列を3つ足す。052の `cdp_l1_shape_fingerprint()` は列名から版を導くので、**列が増えれば版が変わり全員がpendingになる**（051の「列を足したのに1件も畳み直されない」は構造的に再発しない）。そのうえで052と同じく、migration自身が**一回性の是正**（全件畳み直し）と**末尾の自己検査**を行う。自己検査は2つ見る。
+
+1. 形の版が古い行が0件
+2. **足した3列がDEFAULT `{}` のまま残った行が0件** — 051の障害の本体は「版は刻んだが中身は空」だったので、版だけ見る自己検査では足りない
+
+どちらかが残っていれば `RAISE EXCEPTION` で適用そのものを失敗させる。「当てたのに直っていない」を残さない。

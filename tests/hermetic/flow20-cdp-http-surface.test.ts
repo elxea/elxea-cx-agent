@@ -100,6 +100,17 @@ const SURFACES = [
     path: "/api/cdp/l0/subject-map?after_edge_seq=0&limit=1",
     body: null,
   },
+  {
+    // A-0 送った記録の台帳の読み口（migration 053）。読み取り専用だが、引数に
+    // 人を指す鍵が入るので POST（GET だと鍵が URL とアクセスログに残る）。
+    name: "POST /api/cdp/delivery/history（送付履歴の読み口）",
+    method: "POST" as const,
+    path: "/api/cdp/delivery/history",
+    body: {
+      identifier_kind: "shopify_customer_id",
+      identifier_value: "1234567890",
+    },
+  },
 ];
 
 async function call(
