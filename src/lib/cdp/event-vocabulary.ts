@@ -217,6 +217,17 @@ export const STANDALONE_EVENT_TYPES = [
  * ⚠ 第1段は「材料を取り始める」段である（設計 §6）。この 3 つは **事実を積むだけ**で、
  *   軸の位置の推論（減衰・窓・重み）は第3段 ⑯ に置く。L1 側も evidence を出所付きで
  *   持つところまでにしてある（migration 051）。
+ *
+ * ─ roji タッチポイント地図 B-1 / B-2 / B-3 で足した 4 つ（2026-09-02 / migration 054）─
+ *
+ *   event.interest_declared    … イベントへの参加の意向（B-1）。現地 / オンライン / いまは出ない
+ *   event.attended             … 出た回の記録（B-1）
+ *   window.entered             … 6 つの窓のどれに触れたか（B-2）。読んだ / 聴いた / 観た / 保存した
+ *   assignment.changed         … 事前通知に対する変更（B-3）。**最も濃い好みの手がかり**
+ *
+ * ⚠ 4 つとも **器だけ**である。収集の画面も配信もまだ無い。器を先に開けるのは、
+ *   3 つとも正本が「取り返せないもの」に挙げているため — 器が無い間に起きたことは
+ *   後から作れない（正本 第4章 / 地図 第4章 B-1・B-2・B-3）。
  */
 export const PROFILE_EVENT_TYPES = [
   "persona.baseline_imported",
@@ -231,6 +242,10 @@ export const PROFILE_EVENT_TYPES = [
   "rating.submitted",
   "taste.declared",
   "purchase.recipient_declared",
+  "event.interest_declared",
+  "event.attended",
+  "window.entered",
+  "assignment.changed",
 ] as const;
 
 /**
@@ -245,6 +260,95 @@ export type PurchaseScene = (typeof PURCHASE_SCENES)[number];
 /** 「合わなかった」ときに任意で聞く 1 問の選択肢（設計 §2「どこが」4 択）。 */
 export const RATING_ASPECTS = ["aroma", "strength", "aftertaste", "amount"] as const;
 export type RatingAspect = (typeof RATING_ASPECTS)[number];
+
+// ---------------------------------------------------------------------------
+// B-1 イベントへの関心 / B-2 窓への傾き / B-3 変更の記録（2026-09-02・migration 054）
+//
+// ⚠ 3 つとも **SQL 側の関数と 1 対 1** である（畳み手が SQL、口が TS）。
+//   同じ語彙であることは tests/unit/cdp-profile-containers.test.ts が機械で留める。
+// ---------------------------------------------------------------------------
+
+/**
+ * イベントへの参加の意向（B-1）。SQL 側 `cdp_event_interest_modes()` と同一・同順。
+ *
+ * ⚠ `not_now`（いまは出ない）を語彙に入れているのは、**降りる意思も材料**だから。
+ *   記録しないと「聞かれていない人」と「今回は出ないと言った人」が同じに見え、
+ *   招く判断（正本 第3章「入口は開き、深い場は招く」）のときに区別できない。
+ */
+export const EVENT_INTEREST_MODES = ["onsite", "online", "not_now"] as const;
+export type EventInterestMode = (typeof EVENT_INTEREST_MODES)[number];
+
+/**
+ * 6 つの窓（B-2）。SQL 側 `cdp_content_windows()` と同一・同順。
+ *
+ * 正本 序章3 の「複数の窓（お茶・文学・アート・音楽・農・科学）× 時間をかけて育つ
+ * 1 つのカルテ」がそのままこの 6 つである。
+ *
+ * ⚠ **暫定である**（Setaka 確定 2026-09-02 / 地図 第5章 判断2 の推奨 (b)）。
+ *   最初のアンケート 2 問目がこの分類そのものを問う設計なので、回答が出たら見直す。
+ * ⚠ 語彙は **閉じている**。分類の変更は設計判断であって観測の揺らぎではない
+ *   （taste の軸・PURCHASE_SCENES と同じ扱い）。知らない窓で届いた出来事は
+ *   L0 には残り（E1）、schema_ok = false として数えられる。
+ */
+export const CONTENT_WINDOWS = [
+  "tea",
+  "literature",
+  "art",
+  "music",
+  "farming",
+  "science",
+] as const;
+export type ContentWindow = (typeof CONTENT_WINDOWS)[number];
+
+/**
+ * 窓の日本語名。**表示のための言葉であって分類の正本ではない**（正本は上の slug）。
+ * ここに置くのは、後から画面側が「文学」を独自訳して分類がずれるのを防ぐため。
+ */
+export const CONTENT_WINDOW_LABELS: Record<ContentWindow, string> = {
+  tea: "お茶",
+  literature: "文学",
+  art: "アート",
+  music: "音楽",
+  farming: "農",
+  science: "科学",
+};
+
+/**
+ * 窓への触れ方（B-2）。SQL 側 `cdp_window_modes()` と同一・同順。
+ *
+ * 正本の「読んだ・聴いた・お気に入りに入れた記録から後から集計できる形にする
+ * （**聞かない**）」に、観た（映像）を足した 4 つ。すべて観測から入る。
+ */
+export const WINDOW_MODES = ["read", "listen", "watch", "saved"] as const;
+export type WindowMode = (typeof WINDOW_MODES)[number];
+
+/**
+ * 事前通知に対する変更の種類（B-3）。SQL 側 `cdp_assignment_change_actions()` と同一・同順。
+ *
+ * 変更の詳しい正本は 033 の `preview_changes`（何を何に変えたか）側に残す。
+ * L0 / L1 が持つのは「本人が能動的に動いた」という解釈の材料だけ。
+ */
+export const ASSIGNMENT_CHANGE_ACTIONS = ["add", "remove", "replace"] as const;
+export type AssignmentChangeAction = (typeof ASSIGNMENT_CHANGE_ACTIONS)[number];
+
+export function isEventInterestMode(value: unknown): value is EventInterestMode {
+  return typeof value === "string" && (EVENT_INTEREST_MODES as readonly string[]).includes(value);
+}
+
+export function isContentWindow(value: unknown): value is ContentWindow {
+  return typeof value === "string" && (CONTENT_WINDOWS as readonly string[]).includes(value);
+}
+
+export function isWindowMode(value: unknown): value is WindowMode {
+  return typeof value === "string" && (WINDOW_MODES as readonly string[]).includes(value);
+}
+
+export function isAssignmentChangeAction(value: unknown): value is AssignmentChangeAction {
+  return (
+    typeof value === "string" &&
+    (ASSIGNMENT_CHANGE_ACTIONS as readonly string[]).includes(value)
+  );
+}
 
 export type ProfileEventType = (typeof PROFILE_EVENT_TYPES)[number];
 
@@ -441,9 +545,69 @@ export function isWellFormedPayload(
         (PURCHASE_SCENES as readonly string[]).includes(p.scene)
       );
 
+    /** B-1 参加の意向。語彙どおりの mode 1 つだけ。 */
+    case "event.interest_declared":
+      return isEventInterestMode(p.mode);
+
+    /**
+     * B-1 出た回。回の参照が要る。
+     *
+     * ⚠ 誰と出たか・何を話したかは payload に載せない（正本 第3章「その回に置かれた
+     *   言葉」は発言者にたどり着けない形で別に持つ）。ここで見るのは回の参照だけ。
+     */
+    case "event.attended":
+      return nonEmptyString(p.event_ref);
+
+    /**
+     * B-2 窓に入った。窓・参照・触れ方の 3 つが要る。
+     *
+     * `ref` を必須にするのは、**どの記事で入ったかが L0 に残らないと A-2（記事への
+     * 目印付け）の検算ができない**ため。L1 は数しか持たないので、参照の置き場は
+     * L0 のこの行だけになる。
+     */
+    case "window.entered":
+      return isContentWindow(p.window) && nonEmptyString(p.ref) && isWindowMode(p.mode);
+
+    /**
+     * B-3 事前通知への変更。どの月の中身をどう変えたか。
+     *
+     * `period` は **変えた対象の月**であって出来事が起きた月ではない（10 月号を
+     * 9 月末に変えることが普通にある）。畳み手も payload の period を見る。
+     */
+    case "assignment.changed":
+      return isAssignmentChangePayload(p);
+
     default:
       return true;
   }
+}
+
+/** 年月（YYYY-MM）。033 / 038 の period と同じ形。 */
+const PERIOD_FORM = /^\d{4}-\d{2}$/;
+
+/**
+ * B-3 の payload が読める形か。
+ *
+ * 必須: `period` が YYYY-MM、`changes` が 1 件以上の配列で、各件が
+ *       語彙どおりの `action` と非空の `ref` を持つこと。
+ * 任意: `replaced_ref`（あるなら非空文字列。`action="replace"` のとき何を外したか）。
+ *
+ * 空の `changes` を通さないのは、「変えた」という出来事が **何も変えていない**
+ * 形で積まれると、B-3 がいちばん欲しい「最も濃い好みの手がかり」が
+ * 中身の無い 1 行として数えられてしまうため。
+ */
+function isAssignmentChangePayload(p: Record<string, unknown>): boolean {
+  if (typeof p.period !== "string" || !PERIOD_FORM.test(p.period)) return false;
+  const changes = p.changes;
+  if (!Array.isArray(changes) || changes.length === 0) return false;
+  return changes.every((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const c = raw as Record<string, unknown>;
+    if (!isAssignmentChangeAction(c.action)) return false;
+    if (!nonEmptyString(c.ref)) return false;
+    if (c.replaced_ref !== undefined && !nonEmptyString(c.replaced_ref)) return false;
+    return true;
+  });
 }
 
 /** 届いた日の形（台帳 038 の delivered_on と同じ）。 */

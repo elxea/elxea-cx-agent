@@ -351,6 +351,43 @@
         "tests/unit/delivery-ledger.test.ts"
       ],
       "timeout_sec": 180
+    },
+    "unit.delivery-history": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-delivery-history.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "unit.profile-containers": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-profile-containers.test.ts"
+      ],
+      "timeout_sec": 180
+    },
+    "hermetic.delivery-readout": {
+      "tier": "hermetic",
+      "cmd": [
+        "npx",
+        "vitest",
+        "run",
+        "tests/hermetic/flow26-cdp-delivery-readout.test.ts"
+      ],
+      "timeout_sec": 300
+    },
+    "unit.l1-refold": {
+      "tier": "unit",
+      "cmd": [
+        "npx",
+        "tsx",
+        "tests/unit/cdp-l1-refold.test.ts"
+      ],
+      "timeout_sec": 180
     }
   },
   "features": [
@@ -451,9 +488,9 @@
       "name": "誰に・いつ・どのお茶を・どの号を送ったかが主体から引ける",
       "criteria": "送付が L0 に shipment.sent として 1 回だけ積まれ (冪等の元は注文の参照)、subject_id から月別の送付履歴が引ける。台帳 038 の器は増えていない",
       "checks": [
-        "unit.shipment",
-        "unit.delivery-ledger",
-        "static.typecheck"
+        "unit.delivery-history",
+        "hermetic.delivery-readout",
+        "hermetic.http-surface"
       ]
     },
     {
@@ -790,6 +827,28 @@
       "name": "型が通る (退行の下限)",
       "criteria": "CI の型検査が緑",
       "checks": [
+        "static.typecheck"
+      ]
+    },
+    {
+      "id": "F-43",
+      "area": "解釈の読み出し (L1)",
+      "name": "送った記録の台帳を Web アプリ側から引ける",
+      "criteria": "人を指す鍵 1 つから、月ごとの「決めたこと」(033) と「届いたこと」(038) が引ける。2 つを 1 つに畳まない・出所タグが台帳の値のまま出る・subject_id / 生の鍵 / 台帳の自由文を返さない・読むだけ (主体を発行しない)",
+      "checks": [
+        "unit.delivery-history",
+        "hermetic.delivery-readout",
+        "hermetic.http-surface"
+      ]
+    },
+    {
+      "id": "F-44",
+      "area": "解釈の材料 (L1)",
+      "name": "取り返せない 3 つの材料に器がある",
+      "criteria": "イベントへの関心 / 窓への傾き / 事前通知への変更が L0 の語彙にあり、L1 の列に畳まれ、E8' の比較対象に入っている。語彙は TS と SQL で一致し、代表値の推論をしない",
+      "checks": [
+        "unit.profile-containers",
+        "unit.l1-refold",
         "static.typecheck"
       ]
     }

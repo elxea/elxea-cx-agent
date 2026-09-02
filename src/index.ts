@@ -16,6 +16,7 @@ import {
   cdpL0DailyCountsHandler,
   cdpSubjectMapHandler,
 } from "./routes/cdp-export";
+import { cdpDeliveryHistoryHandler } from "./routes/cdp-delivery";
 import {
   identityLinkHandler,
   identityLinkLineHandler,
@@ -403,6 +404,15 @@ app.post("/api/events", eventsIntakeHandler);
 app.get("/api/cdp/l0/events", cdpL0EventsHandler);
 app.get("/api/cdp/l0/daily-counts", cdpL0DailyCountsHandler);
 app.get("/api/cdp/l0/subject-map", cdpSubjectMapHandler);
+
+// 送った記録の台帳の読み口（roji タッチポイント地図 A-0）— じぶんのページ・
+//   今月のお茶が「この人に何が届いたか」を引く唯一の経路。web-app は Supabase
+//   クライアントを持たないので、口はここにしか置けない。
+//   読み取り専用だが **POST** にしてある（引数に人を指す鍵が入るため。GET だと
+//   URL・アクセスログ・Referer に鍵が残る。理由は routes/cdp-delivery.ts 冒頭）。
+//   認証は L0 の読み口と同じ共有秘密（SYNC_API_SECRET / X-API-Key）。
+//   契約: docs/cdp-events-gateway-contract.md §14
+app.post("/api/cdp/delivery/history", cdpDeliveryHistoryHandler);
 
 // Identity link routes
 app.post("/api/identity/link", identityLinkHandler);
