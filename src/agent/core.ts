@@ -38,7 +38,7 @@ import {
   isSalesTool,
   SALES_TOOL_DISABLED_RESULT,
 } from "../lib/sales-surface";
-import { withTimeout } from "../lib/utils";
+import { withTimeout, iterateWithDeadline } from "../lib/utils";
 import { recordEscalation } from "../lib/alerts";
 import { applyBrandGuard, createBrandGuardStream } from "../lib/brand-guard";
 import { formatTeaLabel } from "../lib/brand-copy";
@@ -946,10 +946,15 @@ export async function runAgentStreaming(
     console.log(`[agent-stream] turn=${turn}, elapsed=${tLlm - t0}ms`);
     console.log(`[agent-stream] streaming turn=${turn}`);
 
-    // ストリーム確立までは従来どおりタイムアウトを掛ける（turn 0 の既存保護を維持）。
+    // このターンの応答生成「全体」に期限を掛ける（ストリーム確立 + 本文受信ループ）。
+    //
+    // 非ストリーミング時代は withTimeout(client.messages.create(...)) が全文生成を包んでいた。
+    // stream:true では create() の解決はストリーム確立（ほぼ TTFB）までしか表さないため、
+    // 期限を絶対時刻で持ち、本文受信ループ側にも同じ期限を渡して上界を戻す。
+    const turnDeadlineAt = Date.now() + TIMEOUT_LLM_CALL_MS;
     const stream = await withTimeout(
       client.messages.create({ ...apiParams, messages, stream: true }),
-      TIMEOUT_LLM_CALL_MS,
+      Math.max(0, turnDeadlineAt - Date.now()),
       `anthropic turn=${turn}`,
     );
 
@@ -964,33 +969,41 @@ export async function runAgentStreaming(
       cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
     };
 
-    for await (const event of stream) {
-      if (event.type === "message_start") {
-        const u = event.message.usage as unknown as Record<string, number | undefined>;
-        usage = {
-          input_tokens: u.input_tokens ?? 0,
-          output_tokens: u.output_tokens ?? 0,
-          cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
-          cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
-        };
-      } else if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
-        hasToolUse = true;
-        curTool = { id: event.content_block.id, name: event.content_block.name, json: "" };
-      } else if (event.type === "content_block_delta") {
-        if (event.delta.type === "text_delta") {
-          emitText(event.delta.text);
-          fullText += event.delta.text;
-        } else if (event.delta.type === "input_json_delta" && curTool) {
-          curTool.json += (event.delta as unknown as { partial_json: string }).partial_json;
+    // L-1: 途中で例外が出ても、増分ガードが保留している末尾を捨てない。
+    // （finally にすると正常時もターン境界で吐いてしまい、ターンをまたぐ保留が壊れる）
+    try {
+      for await (const event of iterateWithDeadline(stream, turnDeadlineAt, `anthropic turn=${turn} stream`)) {
+        if (event.type === "message_start") {
+          const u = event.message.usage as unknown as Record<string, number | undefined>;
+          usage = {
+            input_tokens: u.input_tokens ?? 0,
+            output_tokens: u.output_tokens ?? 0,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+          };
+        } else if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
+          hasToolUse = true;
+          curTool = { id: event.content_block.id, name: event.content_block.name, json: "" };
+        } else if (event.type === "content_block_delta") {
+          if (event.delta.type === "text_delta") {
+            emitText(event.delta.text);
+            fullText += event.delta.text;
+          } else if (event.delta.type === "input_json_delta" && curTool) {
+            curTool.json += (event.delta as unknown as { partial_json: string }).partial_json;
+          }
+        } else if (event.type === "content_block_stop" && curTool) {
+          streamTools.push(curTool);
+          curTool = null;
+        } else if (event.type === "message_delta") {
+          const u = (event as unknown as { usage?: { output_tokens?: number } }).usage;
+          if (u?.output_tokens) usage.output_tokens = u.output_tokens;
+          console.log(`[agent-stream] streaming turn=${turn} done, llm=${Date.now() - tLlm}ms, stop=${event.delta.stop_reason}`);
         }
-      } else if (event.type === "content_block_stop" && curTool) {
-        streamTools.push(curTool);
-        curTool = null;
-      } else if (event.type === "message_delta") {
-        const u = (event as unknown as { usage?: { output_tokens?: number } }).usage;
-        if (u?.output_tokens) usage.output_tokens = u.output_tokens;
-        console.log(`[agent-stream] streaming turn=${turn} done, llm=${Date.now() - tLlm}ms, stop=${event.delta.stop_reason}`);
       }
+    } catch (err) {
+      const tailOnError = guardStream.flush();
+      if (tailOnError) callbacks.onTextDelta(tailOnError);
+      throw err;
     }
     console.log(JSON.stringify({ type: "usage", ...usage }));
 
