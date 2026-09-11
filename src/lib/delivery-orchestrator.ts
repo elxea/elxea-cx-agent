@@ -83,6 +83,19 @@ export interface OrchestratorDeps {
   ledgerHasClaim(notionPageId: string, month: string): Promise<boolean>;
   /** AudienceSpec を実対象へ解決する（target-resolver.resolveTargets を配線）。 */
   resolveTargets(audience: AudienceSpec): Promise<ResolvedTargets>;
+  /**
+   * 全員配信（broadcast）を送った直後に、台帳へ「人数の出所」と「送信リクエストの鍵」を書き足す。
+   *
+   * なぜ送信**後**か: claim は送信前に建てるので、その時点では requestId がまだ存在しない。
+   * なぜ best-effort か: これは帳簿の注記であって送信可否ではない。書けなくても配信は成立している。
+   *   呼び出し側（ここ）は失敗を握りつぶし、送信結果を一切変えない。
+   * 未配線（テスト fake 等）なら何もしない。
+   */
+  annotateLedger?(
+    notionPageId: string,
+    month: string,
+    requestId: string | undefined,
+  ): Promise<void>;
   sender: LineSender;
   now(): Date;
   /**
@@ -323,6 +336,20 @@ async function processPage(
   const delivered = outcome.deliveredRecipients;
   const partial = outcome.partial;
   const sendError = outcome.error;
+
+  // (i-2) 台帳の注記（best-effort・送信結果に影響させない）。
+  //   全員配信の実到達は LINE 側にしか無く、requestId を今ここで残さないと
+  //   「実際は何通届いたのか」を後から引く手段が永久に失われる（統計は 14 日で消える）。
+  if (targets.kind === "broadcast" && deps.annotateLedger) {
+    try {
+      await deps.annotateLedger(page.id, month, outcome.requestId);
+    } catch (err) {
+      console.warn(
+        `[delivery] 台帳注記に失敗（送信は成立・帳簿の精度だけの問題） page=${page.id}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   if (!outcome.ok && delivered === 0) {
     // 全失敗。Failed 書戻し。台帳 claim は済みだが実送信ゼロ。
     await deps.repo.writeResult(page.id, {

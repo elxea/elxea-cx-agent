@@ -56,6 +56,20 @@ export const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 /** 消費の出所。台帳 CHECK 制約と一致させる。 */
 export type LedgerSource = "broadcast" | "interactive" | "other";
 
+/**
+ * recipients の出所（migration 055 の recipients_basis）。**どの数字がどれだけ確かか**を行ごとに残す。
+ *   measured          : 送信直前に followers/ids を数えた実測値（全員配信の既定の正）
+ *   env_fallback      : 実測に失敗し env 固定値へ退避した見積
+ *   actual_delivered  : 送信後に insight/message/event の実配信数で補正した実数（最も確か）
+ *   manual_correction : 人が根拠を持って訂正した値
+ * DB 側に CHECK は置かない（本 migration 以前の行は NULL）。語彙の正本はこの型。
+ */
+export type RecipientsBasis =
+  | "measured"
+  | "env_fallback"
+  | "actual_delivered"
+  | "manual_correction";
+
 /** 台帳への 1 行（= 1 claim）。 */
 export interface LedgerEntry {
   /** 冪等キー。broadcast は Notion 配信ページ ID。interactive/other は衝突しない安定キー。 */
@@ -88,6 +102,19 @@ export interface LedgerStore {
   claim(entry: LedgerEntry): Promise<{ claimed: boolean }>;
   /** 指定月の確定消費（SUM(recipients)）。行が無ければ 0。 */
   confirmedConsumption(month: string): Promise<number>;
+  /**
+   * claim 済みの行に「出所」と「送信リクエストの鍵」を後から書き足す（migration 055）。
+   *
+   * ⚠ claim 本体（送信可否を握る排他）とは**意図的に分けてある**。claim の INSERT に
+   *   055 の列を混ぜると、列が未適用の環境で claim 自体が失敗し「送れなくなる」。
+   *   帳簿の注記のために配信を止めるのは本末転倒なので、別の best-effort 更新にしてある。
+   *   呼び出し側は失敗を握りつぶすこと（送信結果に影響させない）。
+   * 任意実装（テスト fake は省略可）。
+   */
+  annotate?(
+    key: { notionPageId: string; month: string },
+    patch: { recipientsBasis?: RecipientsBasis; lineRequestId?: string },
+  ): Promise<void>;
 }
 
 /** consumption API のスナップショット（照合専用）。 */
@@ -282,6 +309,26 @@ export function createSupabaseLedgerStore(supabase: SupabaseClient): LedgerStore
         throw new LedgerClaimError(`ledger claim failed: ${error.message}`);
       }
       return { claimed: (data?.length ?? 0) > 0 };
+    },
+
+    async annotate(
+      key: { notionPageId: string; month: string },
+      patch: { recipientsBasis?: RecipientsBasis; lineRequestId?: string },
+    ): Promise<void> {
+      const row: Record<string, string> = {};
+      if (patch.recipientsBasis) row.recipients_basis = patch.recipientsBasis;
+      if (patch.lineRequestId) row.line_request_id = patch.lineRequestId;
+      if (Object.keys(row).length === 0) return;
+      const { error } = await supabase
+        .from(LEDGER_TABLE)
+        .update(row)
+        .eq("notion_page_id", key.notionPageId)
+        .eq("month", key.month);
+      // migration 055 未適用ならここで列不在エラーになる。呼び出し側が握りつぶす前提で throw する
+      // （黙って成功を装うと「注記されたはず」という誤った前提が下流に伝播するため）。
+      if (error) {
+        throw new Error(`ledger annotate failed: ${error.message}`);
+      }
     },
 
     async confirmedConsumption(month: string): Promise<number> {

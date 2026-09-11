@@ -214,10 +214,12 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 - これらの SQL ヘッダは明示的に **「適用: 本番未適用」= 本番へ当てないことが設計**（024 = 配信計測の集計テーブル、
   025 = 休眠再訪「静かな一通」の意思決定台帳）。pending のまま残るのが正常。
 - 適用するのは **stats / dormant 機能を本番で有効化する時だけ**（それぞれ fetch ジョブ / cron 配線を本番で回す判断とセット）。
-  現状は友だち約 48 人で LINE Insight のユニーク値が null 返却域にある等、有効化前提が整っていない。
-  （友だち数の根拠: LINE Insight `targetedReaches` 実測 48・2026-07-27 時点。友だち数は変動するため本ドキュメント内は
-  すべて「約 48 人」で表記を統一する。無料枠ガードの見積は環境変数 `LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` が正で、
-  ドキュメントの数値は参考値。）
+  友だち数が LINE Insight のユニーク値 null 返却しきい値（20 人）を大きく超えるまでは有効化前提が整わない、
+  という判断で保留している。
+  （**友だち数をこのドキュメントに書かない**。友だち数は日々変わるので、書いた瞬間から古くなる。
+  無料枠ガードの見積は **送信のたびの実測**（`src/lib/line-audience-size.ts` → `GET /v2/bot/followers/ids`）が正で、
+  環境変数 `LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` は **実測できなかったときのフォールバック専用**へ降格した
+  〔2026-09-11〕。現在値を知りたいときは LINE を見る。）
 - したがって「pending 解消」を目的に 024/025 を無条件適用しない。有効化判断が出たときに、当該機能の cron/フラグ投入と
   同時に `--apply` する（両テーブルとも `IF NOT EXISTS` で冪等）。
 - **スクリプト側の担保**: `scripts/deploy-prod.sh` は `024 / 025 / 027` を**本番非適用リスト（deny-list）**として持つ。
@@ -327,6 +329,8 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
+| **全員配信の受信者数** | **送信のたびに LINE から実測（2026-09-11）**。env 固定値は**フォールバック専用**へ降格 | `line-audience-size.ts`（`GET /v2/bot/followers/ids`・ページング + 安全弁・userId は数えるだけで保持しない）。実測不能時のみ `LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` を使い、**どちらを使ったかはログの `[delivery] friend-count basis=` に出る**。実測も env も無ければ従来どおり fail-closed（送信不可） |
+| **送信後の台帳補正** | **有効（2026-09-11）**。送信時に控えた `X-Line-Request-Id` を鍵に実配信数で `line_message_ledger.recipients` を直す | `broadcast-reconcile.ts`（`GET /v2/bot/insight/message/event?requestId=` の `overview.delivered`）。`POST /api/delivery/run` の冒頭で自動実行 + 手動は `POST /api/broadcast-recipients/reconcile`。**GET のみ・送信系 API 非接触**。LINE の統計は**送信から 14 日**で消えるため、それを過ぎた行は見積のまま残す。要 migration 055 |
 
 #### ⚠ 最重要の運用ルール: 承認しただけでは送られない。「回した瞬間」に送られる
 
@@ -436,6 +440,30 @@ pnpm exec wrangler tail --format pretty
   pnpm exec wrangler secret list | grep NOTION_DELIVERY_DB_ID   # 本番: ヒットしないのが正
   pnpm exec wrangler secret delete NOTION_DELIVERY_DB_ID        # 誤って入っていた場合のみ
   ```
+
+### 受信者数はどこから来るか（`LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` の位置づけ）
+
+**全員配信の「全員」は、常に送信したその瞬間の友だち全員である。**
+`POST /v2/bot/message/broadcast` は宛先を指定せずに送るので、こちらが持っている数字は
+実際の到達に一切影響しない。影響するのは「無料枠(200通/月)をどう見積もるか」＝帳簿だけ。
+
+だから数字の出どころは次の優先順で決まる（`src/lib/line-audience-size.ts`）:
+
+1. **実測**（正）: 送信の直前に `GET /v2/bot/followers/ids` を数える。ブロック済みは含まれないので
+   broadcast の実到達に対応する。ページングあり・安全弁あり・**userId は数に潰して保持しない**。
+2. **env フォールバック**: 実測が失敗したとき（429 / ネットワーク断 等）のみ
+   `LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD` / `_TEST` を使う。
+   **実測の失敗を理由に配信は止めない**（帳簿の数字のために配信を止めるのは本末転倒）。
+3. **どちらも無い → 送らない**（fail-closed。従来どおり `resolveTargets` が `kind:"error"` を返す）。
+
+送信後は `POST /api/delivery/run` が次回実行の冒頭で、または
+`POST /api/broadcast-recipients/reconcile` を叩いたときに、LINE が数えた**実配信数**で台帳を直す。
+
+> **なぜこうしたか（2026-09-11・オーナー判断）**: env 固定値(48)を 2 ヶ月放置した結果、
+> 台帳が実態より過少になっていた（08-05 台帳48/実測56・08-22 台帳48/実測63・09-11 台帳48/実測68）。
+> 無料枠を守るための台帳が、守る対象の数字を取り違えていた。
+> 「全員配信の『全員』は常にその時点の全員。固定値を持つこと自体が間違い」。
+> → **この値を secret に入れ直して運用する運用は採らない**。env はもう正本ではない。
 
 ### 配信を止める
 

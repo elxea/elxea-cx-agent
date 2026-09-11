@@ -5,7 +5,12 @@
  *   全員(broadcast) 配信経路を、実 LINE / 実 Notion / 実 Supabase / 実 R2 に一切触れず
  *   純粋関数レベルで実証する。検証項目:
  *     - 配信対象「全員」→ kind=all（broadcast パス）
- *     - kind=all の target 解決 = LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD(=48)
+ *     - kind=all の target 解決 = 注入された見積がそのまま載ること + 見積 null は fail-closed
+ *       ⚠ 2026-09-11: 見積の正は「送信のたびの実測」に変わった（line-audience-size.ts）。
+ *         env の LINE_BROADCAST_ESTIMATED_RECIPIENTS_* は**フォールバック専用**へ降格。
+ *         本テストは resolveTargets に見積を直接注入するので、その転換の影響を受けない
+ *         （= fail-closed の非回帰検査としてそのまま生きる）。実測経路の検証は
+ *         tests/unit/broadcast-recipients.test.ts。
  *     - 自己承認 pin 受理: prod 専用フラグで独立性免除・承認者ゼロは常に fail-closed
  *     - 画像 2 枚の恒久 R2 公開 URL を決定的に再構成（broadcast/<pageId>/<i>.jpg）
  *     - 実送信スイッチ非復活ガード: 送信経路のソースに env 送信フラグが再導入されていない
@@ -44,7 +49,9 @@ function check(label: string, cond: boolean): void {
 
 // go-live 対象行の確定値
 const PAGE_ID = "3a870c9d-064c-8085-a98d-c8cbf61b2ce2";
-const PROD_ESTIMATE = 48; // LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD
+// 任意の見積値（注入専用）。かつては env 固定値 48 と同値である前提だったが、
+// 2026-09-11 に見積の正が実測へ移ったため、ここは「注入した値がそのまま載るか」を見るだけの数。
+const PROD_ESTIMATE = 48;
 const SETAKA = "8e87c527-a90a-4a0c-bbdf-579af5a58124"; // 担当者=承認者（単独運用の自己承認）
 const IMAGE_COUNT = 2;
 
