@@ -32,7 +32,7 @@ import {
 } from "../lib/personalization-context";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { systemPrompt, buildPersonaPromptFragment } from "./system-prompt";
-import { agentTools } from "./tools";
+import { agentTools, agentToolsFor, type ToolPolicy } from "./tools";
 import {
   isSalesSurfaceEnabled,
   isSalesTool,
@@ -60,7 +60,7 @@ function createAnthropicClient(env: Env): Anthropic {
   });
 }
 
-type Message = {
+export type Message = {
   role: "user" | "assistant";
   content: string;
   /**
@@ -721,6 +721,20 @@ export async function runAgentStreaming(
     imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
     /** A-1: product_ratings 等を引くキー（チャネル固有 ID）。省略時は userId。 */
     ratingUserRef?: string;
+    /**
+     * AI に渡す道具の範囲（既定 `all` = 従来どおり）。
+     * 音声経路が「道具を使う問いで約 2,700ms 余分に掛かる」のを避けるために足した軸。
+     * 意味は `src/agent/tools.ts` の `agentToolsFor` が正本。
+     */
+    toolPolicy?: ToolPolicy;
+    /**
+     * 呼び出し元が足したい system 指示（既定 なし）。
+     *
+     * 自社の `systemPrompt(env)` は**置き換えない**。第 2 ブロック（キャッシュ対象外）の
+     * 末尾に足すだけ。CLM 受け口で「相手から来た指示文を併用する」方針を選んだときの
+     * 入口で、既定の方針（自社を正本・相手の指示は破棄）では誰も渡さない。
+     */
+    extraSystem?: string;
   },
 ): Promise<StreamingAgentMeta> {
   const client = createAnthropicClient(env);
@@ -845,14 +859,18 @@ export async function runAgentStreaming(
       // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
       // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
       { type: "text" as const, text: systemPrompt(env), cache_control: { type: "ephemeral" as const } },
-      { type: "text" as const, text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext },
+      { type: "text" as const, text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext + (options?.extraSystem ? `\n\n${options.extraSystem}` : "") },
     ],
     // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
-    tools: (() => {
-      const tools = agentTools(env);
-      return tools.map((tool, i) =>
-        i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
-      );
+    // さらに toolPolicy で範囲を絞れる（音声経路用・既定 all は従来と同一）。
+    ...(() => {
+      const tools = agentToolsFor(env, options?.toolPolicy ?? "all");
+      if (tools.length === 0) return {};
+      return {
+        tools: tools.map((tool, i) =>
+          i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
+        ),
+      };
     })(),
   };
 

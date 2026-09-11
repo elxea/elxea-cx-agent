@@ -10,6 +10,7 @@ import {
   webChatEventHandler,
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
+import { clmChatCompletionsHandler } from "./routes/clm";
 import { eventsIntakeHandler } from "./routes/events";
 import {
   cdpL0EventsHandler,
@@ -273,6 +274,38 @@ export type Env = {
    *    正本は src/lib/firestore.ts の assertFirestoreConfigured。
    */
   FIRESTORE_UNCONFIGURED_ACK?: string;
+  // --- CLM（音声の頭脳として外から叩かれる口）---
+  /**
+   * POST /v1/chat/completions の鍵。**SYNC_API_SECRET とは別鍵**。
+   *
+   * この鍵は社外（Hume の設定画面）に預ける。SYNC_API_SECRET を使い回すと、
+   * その鍵で /api/chat の shopify_customer_id 自己申告まで通ってしまう
+   * （= 声の設定に貼った鍵で他人を名乗れる）。用途が違う鍵は分ける。
+   * 未設定なら受け口は常に 401（fail-closed）。
+   */
+  CLM_API_SECRET?: string;
+  /**
+   * CLM が受け取った `messages` をどこまでログに出すか。
+   * "off" | "shape"（既定・中身 0 文字）| "redacted" | "full"。
+   * ⚠ "redacted" / "full" は本番（DELIVERY_TARGET_ENV="prod"）では拒否され
+   *   "shape" に落ちる（顧客の発話を本番ログに出しっぱなしにしないため）。
+   *   正本は src/lib/clm-protocol.ts の resolveLogLevel。
+   */
+  CLM_LOG_MESSAGES?: string;
+  /**
+   * 相手（Hume）から来た system role の扱い。"own"（既定・破棄）| "append"（併用）。
+   */
+  CLM_SYSTEM_POLICY?: string;
+  /**
+   * 音声経路で AI に渡す道具の範囲。"none" | "minimal"（既定）| "all"。
+   * 意味は src/agent/tools.ts の agentToolsFor が正本。
+   */
+  CLM_TOOL_POLICY?: string;
+  /**
+   * 相手の custom_session_id をハッシュに畳むときの塩。
+   * 未設定でも動く（その場合ハッシュが総当たりに弱いだけ）。
+   */
+  CLM_SESSION_SALT?: string;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -385,6 +418,15 @@ app.post("/api/chat/image", webChatImageHandler);
 app.post("/api/chat/event", webChatEventHandler);
 app.post("/api/chat/feedback", webChatFeedbackHandler);
 app.get("/api/chat/feedback/stats", webChatFeedbackStatsHandler);
+
+// CLM route（音声の頭脳として外から叩かれる OpenAI 互換の口）
+//   Hume EVI の Custom Language Model は OpenAI 互換 /chat/completions を SSE で叩く。
+//   会話本体は runAgentStreaming ただ 1 つのまま。ここは形の変換だけ（routes/clm.ts）。
+//   認証は CLM_API_SECRET（SYNC_API_SECRET とは別鍵・未設定なら常に 401）。
+//   `/v1/...` と `/api/clm/v1/...` の 2 本を同じハンドラに向ける。相手の設定画面が
+//   「base URL を入れると /chat/completions を足す」形でも、フルパス指定でも繋がるようにするため。
+app.post("/v1/chat/completions", clmChatCompletionsHandler);
+app.post("/api/clm/v1/chat/completions", clmChatCompletionsHandler);
 
 // Survey route
 app.post("/api/survey", surveyHandler);

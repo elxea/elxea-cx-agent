@@ -210,5 +210,39 @@ export function agentTools(env: SalesSurfaceEnv | undefined | null): Anthropic.T
   return isSalesSurfaceEnabled(env) ? [...AGENT_TOOLS, ...SALES_TOOLS] : AGENT_TOOLS;
 }
 
+/**
+ * 道具の範囲。**音声経路のために増やした軸**で、文字チャットの既定は変わらない。
+ *
+ * 道具を 1 つでも使う問いは、実測で約 2,700ms 余分に掛かる（道具の往復で LLM を
+ * もう 1 周するため）。文字なら許せる間でも、声の会話では 1 秒の沈黙が「止まった」
+ * と受け取られる。そこで音声経路だけ範囲を狭められるようにする。
+ *
+ * - `all`     … 従来どおり（`agentTools(env)` と同じ）
+ * - `minimal` … **エスカレーションだけ**残す。注文照会（`lookup_my_orders` /
+ *               `get_order_detail`）を落とす。理由は 2 つ:
+ *               (a) 遅い側の実体が注文照会（Shopify への外部呼び出しを含む）
+ *               (b) 注文番号は**声では通らない**。本タスクの実声検証で「煎茶」が
+ *                   ASR で 2 回とも落ちている以上、"#1234" を聞き取って照会する
+ *                   経路は音声で成立しないと見るのが妥当。
+ *               逆にエスカレーションは落とせない。クレーム・健康被害・返品の訴えを
+ *               人に渡す唯一の出口で、これが無い音声窓口は「苦情を言っても誰にも
+ *               届かない窓口」になる。呼び出しは Slack 通知が fire-and-forget なので
+ *               応答を待たせない。
+ * - `none`    … 道具を 1 つも渡さない（最速。人へ渡す出口も無くなる）
+ */
+export type ToolPolicy = "all" | "minimal" | "none";
+
+/** 音声経路など、道具の範囲を絞りたい呼び出し用。`all` は `agentTools` と同一。 */
+export function agentToolsFor(
+  env: SalesSurfaceEnv | undefined | null,
+  policy: ToolPolicy = "all",
+): Anthropic.Tool[] {
+  if (policy === "none") return [];
+  if (policy === "minimal") {
+    return AGENT_TOOLS.filter((t) => t.name === "escalate_to_human");
+  }
+  return agentTools(env);
+}
+
 /** 後方互換のため旧名もエクスポート */
 export const ESCALATION_TOOLS = AGENT_TOOLS;
