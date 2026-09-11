@@ -169,6 +169,16 @@ export interface SendOutcome {
   partial: boolean;
   /** エラー要約（PII 非記載）。 */
   error?: string;
+  /**
+   * LINE が返した送信 1 回ぶんの鍵（応答ヘッダ X-Line-Request-Id）。broadcast のみ設定する。
+   *
+   * なぜ持つか: 全員配信は宛先指定なしで送るため「実際に何通届いたか」は LINE 側にしか無い。
+   *   後から GET /v2/bot/insight/message/event?requestId= で実配信数を引いて台帳を正すための鍵で、
+   *   **この場で拾わないと二度と手に入らない**（統計は送信から 14 日で消える）。
+   * multicast は 1 配信が複数リクエストに割れて鍵が 1 本に定まらないため設定しない
+   *   （multicast の計測は customAggregationUnits 経由で別に取れる）。
+   */
+  requestId?: string;
 }
 
 /**
@@ -253,10 +263,13 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
           body: JSON.stringify({ messages }),
         });
         if (res.ok) {
+          // 送信 1 回を指す鍵。ここで拾い損ねると実配信数を後から引く手段が無くなる。
+          const requestId = res.headers.get("x-line-request-id") ?? undefined;
           return {
             ok: true,
             deliveredRecipients: estimatedRecipients,
             partial: false,
+            requestId,
           };
         }
         const t = await res.text().catch(() => "unknown");

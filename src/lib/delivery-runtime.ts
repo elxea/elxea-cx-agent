@@ -63,6 +63,11 @@ import {
 import { isApprovalAuthorized, selfApprovalRelaxed } from "./delivery-approval";
 import { resolveDeliveryChannel } from "./delivery-channel";
 import {
+  createLineFollowerPageFetcher,
+  resolveBroadcastRecipientEstimate,
+  type FriendCountBasis,
+} from "./line-audience-size";
+import {
   createLineSender,
   chunkForMulticast,
   MULTICAST_MAX_RECIPIENTS,
@@ -548,6 +553,11 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
     fsEnv = null;
   }
 
+  // 直近の見積がどこから来たか（実測 / env フォールバック）。台帳の注記に使う。
+  //   runDeliveryOnce は 1 ページずつ直列に「解決 → 送信」を回すため、
+  //   送信直後に読む値は必ずそのページの解決結果に対応する。
+  let lastEstimateBasis: FriendCountBasis | null = null;
+
   const targetDeps: TargetResolverDeps = {
     loadLinkages: () => loadLinkages(env),
     loadPersonaUsers: async (persona) => {
@@ -559,7 +569,24 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
       if (!fsEnv) throw new Error("Firestore 未設定のため lineUsers 直読みができない");
       return loadPersonaLineUsers(fsEnv, persona);
     },
-    broadcastEstimate: async () => channel.estimatedFriendCount,
+    // 全員配信の受信者数は**送信のたびに LINE から数える**（2026-09-11・オーナー判断）。
+    //   全員配信は宛先指定なしで送るため実到達はその時点の友だち全員。固定値は必ず陳腐化する。
+    //   実測できなければ env のフォールバック値に退避する（この数字は到達人数に一切影響しない
+    //   帳簿用の値なので、取得失敗を理由に配信を止めるのは筋が悪い）。
+    //   ⚠ fail-closed は緩めていない: 実測も env も無ければ従来どおり null を返し、
+    //     resolveTargets の既存判定（見積 null → kind:"error"）で送信不可になる。
+    broadcastEstimate: async () => {
+      const result = await resolveBroadcastRecipientEstimate({
+        fetchPage: createLineFollowerPageFetcher(channel.accessToken),
+        envFallback: channel.fallbackFriendCount,
+      });
+      lastEstimateBasis = result.basis;
+      console.log(
+        `[delivery] friend-count basis=${result.basis} count=${result.count ?? "-"} ` +
+          `pages=${result.pages}${result.reason ? ` reason=${result.reason}` : ""}`,
+      );
+      return result.count;
+    },
     // 社内 allowlist は env が唯一の供給元（PII 非記載）。空/未設定は resolveTargets が fail-closed。
     loadAllowlistUserIds: async () => parseAllowlist(env.LINE_INTERNAL_USER_IDS),
   };
@@ -586,6 +613,21 @@ export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
     },
     ledger,
     consumption: consumptionFetcherForToken(channel.accessToken),
+    // 送信直後の台帳注記（best-effort）。requestId は「実際に何通届いたか」を後から
+    //   LINE に問い合わせる唯一の鍵で、ここで残さないと二度と手に入らない（統計は 14 日で消える）。
+    annotateLedger: async (notionPageId, month, requestId) => {
+      await ledger.annotate?.(
+        { notionPageId, month },
+        {
+          recipientsBasis: lastEstimateBasis ?? undefined,
+          lineRequestId: requestId,
+        },
+      );
+      console.log(
+        `[delivery] ledger annotated page=${notionPageId} basis=${lastEstimateBasis ?? "-"} ` +
+          `requestId=${requestId ? "captured" : "none"}`,
+      );
+    },
     ledgerHasClaim: async (notionPageId, month) => {
       const { data, error } = await supabase
         .from(LEDGER_TABLE)

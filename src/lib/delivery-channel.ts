@@ -1,9 +1,15 @@
 /**
  * 2 環境（本番 / テスト）の LINE チャネル切替（設計 確定要件 1）。
  *
- * 本番 OA @307tzhkw（友だち約 48 人・LINE Insight targetedReaches 実測 2026-07-27／変動する）
- * / テスト OA @426vlcyb（友だち数名）。
- * チャネルトークン・想定友だち数を prod/test で切り替える。secret 名を分ける。
+ * 本番 OA @307tzhkw / テスト OA @426vlcyb。
+ * チャネルトークンと「友だち数のフォールバック値」を prod/test で切り替える。secret 名を分ける。
+ *
+ * ⚠ 友だち数をここに固定値で持つのをやめた（2026-09-11・オーナー判断）:
+ *   全員配信は宛先指定なしで送るため、実際の到達は**その時点の友だち全員**。固定値は必ず陳腐化する
+ *   （env の 48 に対し 2026-09-11 実測 68。2 ヶ月で台帳が 20 通ぶん過少になっていた）。
+ *   受信者数の正は送信のたびの実測（src/lib/line-audience-size.ts）で、env 値は
+ *   **実測できなかったときのフォールバック専用**へ降格した。だからここに現在値を書かない
+ *   （書けば必ずまた古くなる）。実数は LINE が持っている。
  *
  * fail-closed 方針:
  *   - 既定は "test"（未設定・不正値は本番に流さない）。
@@ -13,6 +19,7 @@
  */
 
 import type { Env } from "../index";
+import { parseFallbackCount } from "./line-audience-size";
 
 /** 配信の対象環境。 */
 export type DeliveryTargetEnv = "prod" | "test";
@@ -22,8 +29,11 @@ export interface DeliveryChannel {
   targetEnv: DeliveryTargetEnv;
   /** チャネルアクセストークン（値はログ・Notion に出さない）。 */
   accessToken: string;
-  /** broadcast 時の想定受信者数（無料枠ガードの見積に使う）。未設定なら null。 */
-  estimatedFriendCount: number | null;
+  /**
+   * broadcast 時の想定受信者数の**フォールバック値**（env 由来）。未設定なら null。
+   * 正は送信のたびの実測（line-audience-size.ts）。ここは実測が取れなかったときだけ使う。
+   */
+  fallbackFriendCount: number | null;
   /** ログ・結果表示用の環境ラベル（トークンは含めない）。 */
   label: string;
 }
@@ -38,10 +48,10 @@ export function parseTargetEnv(raw: string | undefined): DeliveryTargetEnv {
  *
  * prod:
  *   - accessToken = LINE_CHANNEL_ACCESS_TOKEN（既存・本番）
- *   - estimatedFriendCount = LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD
+ *   - fallbackFriendCount = LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD（フォールバック専用）
  * test:
  *   - accessToken = LINE_CHANNEL_ACCESS_TOKEN_TEST
- *   - estimatedFriendCount = LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST
+ *   - fallbackFriendCount = LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST（フォールバック専用）
  *
  * 選択環境のトークン未設定は throw（fail-closed）。
  */
@@ -63,14 +73,12 @@ export function resolveDeliveryChannel(env: Env): DeliveryChannel {
     targetEnv === "prod"
       ? env.LINE_BROADCAST_ESTIMATED_RECIPIENTS_PROD
       : env.LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST;
-  const parsed = rawCount != null ? Number.parseInt(rawCount, 10) : NaN;
-  const estimatedFriendCount =
-    Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  const fallbackFriendCount = parseFallbackCount(rawCount);
 
   return {
     targetEnv,
     accessToken,
-    estimatedFriendCount,
+    fallbackFriendCount,
     label: targetEnv === "prod" ? "prod(@307tzhkw)" : "test(@426vlcyb)",
   };
 }

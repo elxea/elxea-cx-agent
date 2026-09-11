@@ -40,6 +40,7 @@ import {
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
+import { runBroadcastRecipientReconcile } from "./lib/broadcast-reconcile";
 import { runDormantReengagement } from "./lib/dormant-reengagement";
 import { runMarcheActivation } from "./lib/marche-activation";
 import { getAlertStatus } from "./lib/alerts";
@@ -682,6 +683,27 @@ app.post("/api/delivery/run", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
+  // 送信の前に、前回までの配信の「実際に何通届いたか」で台帳を正しておく（best-effort・GET のみ）。
+  //   理由: 台帳は無料枠(200通/月)を守る唯一の権威で、走行合計がズレたまま次を送ると
+  //   残枠の判断そのものがズレる。直前に実数へ寄せておけば、このあとのガードが正しい数で判定できる。
+  //   ⚠ これは補正であって送信可否ではない。失敗しても配信は止めない（ログだけ残す）。
+  const reconcile = await runBroadcastRecipientReconcile(c.env).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+    scanned: 0,
+    corrected: 0,
+    details: [] as never[],
+  }));
+  console.log(
+    "Pre-delivery ledger reconcile:",
+    JSON.stringify({
+      ok: reconcile.ok,
+      reason: reconcile.reason,
+      scanned: reconcile.scanned,
+      corrected: reconcile.corrected,
+    }),
+  );
+
   const result = await runOnDemandDelivery(c.env).catch((err) => ({
     error: err instanceof Error ? err.message : String(err),
   }));
@@ -717,6 +739,48 @@ app.post("/api/delivery/run", async (c) => {
     pinPass: result.pinPass,
     reaper: result.run.reaper,
   });
+});
+
+/**
+ * 通数台帳の後追い補正 手動トリガ API（2026-09-11）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。
+ *
+ * 何をするか: 送信時に控えた X-Line-Request-Id を鍵に LINE から「実際に何通届いたか」を引き、
+ *   見積で建てた line_message_ledger.recipients を実数へ直す。
+ *
+ * ⚠ 読み取り専用の外部 I/O: LINE Insight（GET）のみ。LINE 送信系 API は一切呼ばない
+ *   （broadcast / push / multicast / narrowcast / reply のどれにも触れない = 実配信ゼロ）。
+ * ⚠ LINE の統計は送信から 14 日で消える。それを過ぎた行は見積のまま残す（推測で塗らない）。
+ * cron と違い結果 JSON を同期で返す（証跡化のため待ってから応答する）。
+ */
+app.post("/api/broadcast-recipients/reconcile", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const result = await runBroadcastRecipientReconcile(c.env).catch((err) => ({
+    ok: false as const,
+    reason: err instanceof Error ? err.message : String(err),
+    scanned: 0,
+    corrected: 0,
+    details: [] as never[],
+  }));
+
+  console.log(
+    "Manual ledger reconcile completed:",
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      scanned: result.scanned,
+      corrected: result.corrected,
+    }),
+  );
+
+  return c.json({ status: "broadcast_recipients_reconcile_completed", result });
 });
 
 /**

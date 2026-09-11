@@ -568,6 +568,16 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "function", func: "cdp_window_mode_zero" },
     ],
   },
+  // 055: 通数台帳に「送信リクエストの鍵」と「人数の出所」を足す（全員配信の見積 → 実測への転換）。
+  //   追加列はすべて NULL 許容・IF NOT EXISTS なので冪等。sentinel は 3 列の実在。
+  "055_line_message_ledger_delivery_truth": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "line_message_ledger", column: "line_request_id" },
+      { kind: "column", table: "line_message_ledger", column: "recipients_basis" },
+      { kind: "column", table: "line_message_ledger", column: "note" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
