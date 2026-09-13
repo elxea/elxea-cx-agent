@@ -7,7 +7,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { EvaluationResult } from "./types";
+import { normalizeGapCategory, type EvaluationResult } from "./types";
 
 /** Patterns that indicate a clear failure (score 1-2) */
 const FAILURE_PATTERNS = [
@@ -145,6 +145,11 @@ ${response}
     if (parsed.quality_score < 1 || parsed.quality_score > 5) {
       parsed.quality_score = Math.max(1, Math.min(5, Math.round(parsed.quality_score)));
     }
+
+    // gap_category は LLM 出力なので既知の 9 カテゴリ以外が来うる。
+    // ここで null に正規化し、「ギャップ無し」の表現を 1 つに保つ
+    // (下流が "none" 等の文字列を個別に弾かなくて済む)。
+    parsed.gap_category = normalizeGapCategory(parsed.gap_category);
 
     return parsed;
   } catch (err) {

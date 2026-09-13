@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const SCRIPT = join(REPO_ROOT, "scripts", "deploy-worker.sh");
+const UPLOAD_SCRIPT = join(REPO_ROOT, "scripts", "upload-version.sh");
 
 let totalTests = 0;
 let passedTests = 0;
@@ -81,8 +82,8 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** 刻印だけを取り出す（wrangler は呼ばれない）。 */
-function stamp(cwd: string): { code: number | null; tag: string; message: string; output: string } {
-  const r = spawnSync("bash", [SCRIPT], {
+function stamp(cwd: string, script: string = SCRIPT): { code: number | null; tag: string; message: string; output: string } {
+  const r = spawnSync("bash", [script], {
     cwd,
     encoding: "utf8",
     env: { ...process.env, DEPLOY_STAMP_PRINT_ONLY: "1" },
@@ -256,6 +257,19 @@ function isBareWranglerDeploy(line: string): boolean {
   return true;
 }
 
+/**
+ * 「刻印を通さない `wrangler versions upload`」か。
+ *
+ * 2026-09-12 の段階昇格では、手打ちの `npx wrangler versions upload` で作った version に
+ * tag が無く、由来コミットを Cloudflare 側だけでは確定できなかった。deploy と同じ理屈で
+ * upload 側も 1 実装（scripts/upload-version.sh）に寄せる。
+ */
+function isBareVersionsUpload(line: string): boolean {
+  if (!/\bwrangler\s+versions\s+upload\b/.test(line)) return false;
+  if (line.includes("--tag") && line.includes("--message")) return false; // 刻印を渡す本体
+  return true;
+}
+
 it("デプロイ経路が全部この 1 実装を通る（実 exec 行で確かめる）", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
     scripts: Record<string, string>;
@@ -318,6 +332,72 @@ it("リポジトリ全体に bare `wrangler deploy` が 1 件も残っていな�
   assertTrue(
     offenders.length === 0,
     "刻印を通さない wrangler deploy が残っている（scripts/deploy-worker.sh 経由にすること）:\n" +
+      offenders.map((o) => `  - ${o}`).join("\n"),
+  );
+});
+
+console.log("\n--- upload-version.sh（versions upload の刻印）---");
+
+it("upload も同じ刻印を作る（deploy と形が揃う）", () => {
+  const repo = makeRepo("perf: 初回ターンをストリーミングにする");
+  try {
+    const deployStamp = stamp(repo.dir, SCRIPT);
+    const uploadStamp = stamp(repo.dir, UPLOAD_SCRIPT);
+    assertEqual(uploadStamp.code, 0, "exit code");
+    assertEqual(uploadStamp.tag, repo.sha.slice(0, 12), "tag");
+    assertEqual(uploadStamp.tag, deployStamp.tag, "deploy と upload で tag が違う");
+    assertEqual(uploadStamp.message, deployStamp.message, "deploy と upload で message が違う");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+it("upload-version.sh が --tag / --message を渡している", () => {
+  const upload = readFileSync(UPLOAD_SCRIPT, "utf8");
+  assertIncludes(upload, "--tag", "upload-version.sh が tag を渡していない");
+  assertIncludes(upload, "--message", "upload-version.sh が message を渡していない");
+  assertIncludes(upload, "wrangler versions upload", "versions upload を呼んでいない");
+
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  for (const name of ["upload:version", "upload:version:staging"]) {
+    assertIncludes(pkg.scripts[name] ?? "", "upload-version.sh", `package.json の ${name}`);
+  }
+});
+
+it("リポジトリ全体に bare `wrangler versions upload` が 1 件も残っていない", () => {
+  /* 2026-09-12 の段階昇格は手打ちの `npx wrangler versions upload`（tag 無し）で、
+     由来コミットを Cloudflare 側だけでは確定できなかった。同じ形をコードに残さない。 */
+  const ls = spawnSync("git", ["ls-files"], { cwd: REPO_ROOT, encoding: "utf8" });
+  assertEqual(ls.status, 0, "git ls-files");
+
+  const targets = ls.stdout
+    .split("\n")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .filter((f) => /\.(sh|ya?ml|json|ts|mjs|js)$/.test(f))
+    /* このテスト自身と upload-version.sh は判定文字列そのものを含むので除く。 */
+    .filter((f) => f !== "tests/unit/deploy-worker-stamp.test.ts")
+    .filter((f) => f !== "scripts/upload-version.sh");
+
+  const offenders: string[] = [];
+  for (const file of targets) {
+    let source: string;
+    try {
+      source = readFileSync(join(REPO_ROOT, file), "utf8");
+    } catch {
+      continue;
+    }
+    if (!source.includes("wrangler")) continue;
+    for (const line of executableLines(source)) {
+      if (isBareVersionsUpload(line)) offenders.push(`${file}: ${line}`);
+    }
+  }
+
+  assertTrue(
+    offenders.length === 0,
+    "刻印を通さない wrangler versions upload が残っている（scripts/upload-version.sh 経由にすること）:\n" +
       offenders.map((o) => `  - ${o}`).join("\n"),
   );
 });

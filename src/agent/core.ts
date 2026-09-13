@@ -32,15 +32,15 @@ import {
 } from "../lib/personalization-context";
 import { productCard, productCarousel, orderCard } from "../lib/flex-templates";
 import { systemPrompt, buildPersonaPromptFragment } from "./system-prompt";
-import { agentTools } from "./tools";
+import { agentTools, agentToolsFor, type ToolPolicy } from "./tools";
 import {
   isSalesSurfaceEnabled,
   isSalesTool,
   SALES_TOOL_DISABLED_RESULT,
 } from "../lib/sales-surface";
-import { withTimeout } from "../lib/utils";
+import { withTimeout, iterateWithDeadline } from "../lib/utils";
 import { recordEscalation } from "../lib/alerts";
-import { applyBrandGuard } from "../lib/brand-guard";
+import { applyBrandGuard, createBrandGuardStream } from "../lib/brand-guard";
 import { formatTeaLabel } from "../lib/brand-copy";
 
 /**
@@ -60,7 +60,7 @@ function createAnthropicClient(env: Env): Anthropic {
   });
 }
 
-type Message = {
+export type Message = {
   role: "user" | "assistant";
   content: string;
   /**
@@ -721,6 +721,20 @@ export async function runAgentStreaming(
     imageContent?: { base64: string; mediaType: "image/jpeg" | "image/png" };
     /** A-1: product_ratings 等を引くキー（チャネル固有 ID）。省略時は userId。 */
     ratingUserRef?: string;
+    /**
+     * AI に渡す道具の範囲（既定 `all` = 従来どおり）。
+     * 音声経路が「道具を使う問いで約 2,700ms 余分に掛かる」のを避けるために足した軸。
+     * 意味は `src/agent/tools.ts` の `agentToolsFor` が正本。
+     */
+    toolPolicy?: ToolPolicy;
+    /**
+     * 呼び出し元が足したい system 指示（既定 なし）。
+     *
+     * 自社の `systemPrompt(env)` は**置き換えない**。第 2 ブロック（キャッシュ対象外）の
+     * 末尾に足すだけ。CLM 受け口で「相手から来た指示文を併用する」方針を選んだときの
+     * 入口で、既定の方針（自社を正本・相手の指示は破棄）では誰も渡さない。
+     */
+    extraSystem?: string;
   },
 ): Promise<StreamingAgentMeta> {
   const client = createAnthropicClient(env);
@@ -845,14 +859,18 @@ export async function runAgentStreaming(
       // 第1ブロック = 不変な SYSTEM_PROMPT のみを cache_control で共有キャッシュ (全ペルソナ横断)。
       // personaFragment はペルソナ可変なので断片化回避のため第2ブロック側へ移す。
       { type: "text" as const, text: systemPrompt(env), cache_control: { type: "ephemeral" as const } },
-      { type: "text" as const, text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext },
+      { type: "text" as const, text: personaFragment + languageReminder + customerContext + crossChannelNote + personalizationBlock + knowledgeContext + (options?.extraSystem ? `\n\n${options.extraSystem}` : "") },
     ],
     // 売り込み面が無効（既定）なら購入ボタン・商品カードの道具は渡さない（sales-surface.ts）。
-    tools: (() => {
-      const tools = agentTools(env);
-      return tools.map((tool, i) =>
-        i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
-      );
+    // さらに toolPolicy で範囲を絞れる（音声経路用・既定 all は従来と同一）。
+    ...(() => {
+      const tools = agentToolsFor(env, options?.toolPolicy ?? "all");
+      if (tools.length === 0) return {};
+      return {
+        tools: tools.map((tool, i) =>
+          i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" as const } } : tool,
+        ),
+      };
     })(),
   };
 
@@ -901,8 +919,25 @@ export async function runAgentStreaming(
     }
   };
 
+  /**
+   * egress brand-fact ガードのストリーミング版。
+   * SSE の `done` は本文を載せないため、画面に出る文字列は delta の連結そのもの。
+   * delta を素通しにすると「保存は是正済み・表示は非正本」になるので、
+   * 送信前に増分ガードを通す（末尾数十文字の保留のみ・冪等）。
+   */
+  const guardStream = createBrandGuardStream({ channel, userId });
+  /** 是正済み delta のみをクライアントへ送る。 */
+  const emitText = (text: string) => {
+    if (!text) return;
+    const out = guardStream.push(text);
+    if (out) callbacks.onTextDelta(out);
+  };
+
   /** 最終応答処理 */
   const finalize = (finalText: string) => {
+    // ストリーミング出力の保留分を吐き切ってから done を送る（表示と保存を一致させる）。
+    const guardTail = guardStream.flush();
+    if (guardTail) callbacks.onTextDelta(guardTail);
     if (isLowKnowledge) {
       logUnansweredQuery(supabase, { userId, channel, queryText: userMessage, maxSimilarity, resultCount: knowledgeResults.length, escalated }).catch(console.error);
     }
@@ -918,27 +953,58 @@ export async function runAgentStreaming(
   };
 
   // ツールループ
+  //
+  // 全ターンで Claude の streaming API を使う（2026-09-11）。
+  // 以前は turn 0 だけ非ストリーミングで全文を待ち、揃ってから 8 文字ずつ切って
+  // 「ストリーミング風」に流していた。実測では TTFT 中央値 3,806ms のうち
+  // 2,696ms (87%) がこの全文待ちで、道具使用の有無はストリーム中に判定できる
+  // （turn>0 が既にそうしていた）ため、turn 0 を同じ流儀に揃えて待ちを解消する。
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     const tLlm = Date.now();
     console.log(`[agent-stream] turn=${turn}, elapsed=${tLlm - t0}ms`);
+    console.log(`[agent-stream] streaming turn=${turn}`);
 
-    // 2回目以降（ツール使用後の応答）は Claude streaming API を使用
-    if (turn > 0) {
-      console.log(`[agent-stream] streaming turn=${turn}`);
-      const stream = await client.messages.create({ ...apiParams, messages, stream: true });
+    // このターンの応答生成「全体」に期限を掛ける（ストリーム確立 + 本文受信ループ）。
+    //
+    // 非ストリーミング時代は withTimeout(client.messages.create(...)) が全文生成を包んでいた。
+    // stream:true では create() の解決はストリーム確立（ほぼ TTFB）までしか表さないため、
+    // 期限を絶対時刻で持ち、本文受信ループ側にも同じ期限を渡して上界を戻す。
+    const turnDeadlineAt = Date.now() + TIMEOUT_LLM_CALL_MS;
+    const stream = await withTimeout(
+      client.messages.create({ ...apiParams, messages, stream: true }),
+      Math.max(0, turnDeadlineAt - Date.now()),
+      `anthropic turn=${turn}`,
+    );
 
-      let fullText = "";
-      let hasToolUse = false;
-      const streamTools: Array<{ id: string; name: string; json: string }> = [];
-      let curTool: { id: string; name: string; json: string } | null = null;
+    let fullText = "";
+    let hasToolUse = false;
+    const streamTools: Array<{ id: string; name: string; json: string }> = [];
+    let curTool: { id: string; name: string; json: string } | null = null;
+    // usage はストリームでは message_start（入力・キャッシュ）と message_delta（出力）に分かれて届く。
+    // プロンプトキャッシュの効きを既存ログ形式のまま観測できるよう、集めて 1 行で出す。
+    let usage: Record<string, number> = {
+      input_tokens: 0, output_tokens: 0,
+      cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+    };
 
-      for await (const event of stream) {
-        if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
+    // L-1: 途中で例外が出ても、増分ガードが保留している末尾を捨てない。
+    // （finally にすると正常時もターン境界で吐いてしまい、ターンをまたぐ保留が壊れる）
+    try {
+      for await (const event of iterateWithDeadline(stream, turnDeadlineAt, `anthropic turn=${turn} stream`)) {
+        if (event.type === "message_start") {
+          const u = event.message.usage as unknown as Record<string, number | undefined>;
+          usage = {
+            input_tokens: u.input_tokens ?? 0,
+            output_tokens: u.output_tokens ?? 0,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+          };
+        } else if (event.type === "content_block_start" && event.content_block.type === "tool_use") {
           hasToolUse = true;
           curTool = { id: event.content_block.id, name: event.content_block.name, json: "" };
         } else if (event.type === "content_block_delta") {
           if (event.delta.type === "text_delta") {
-            callbacks.onTextDelta(event.delta.text);
+            emitText(event.delta.text);
             fullText += event.delta.text;
           } else if (event.delta.type === "input_json_delta" && curTool) {
             curTool.json += (event.delta as unknown as { partial_json: string }).partial_json;
@@ -947,78 +1013,38 @@ export async function runAgentStreaming(
           streamTools.push(curTool);
           curTool = null;
         } else if (event.type === "message_delta") {
+          const u = (event as unknown as { usage?: { output_tokens?: number } }).usage;
+          if (u?.output_tokens) usage.output_tokens = u.output_tokens;
           console.log(`[agent-stream] streaming turn=${turn} done, llm=${Date.now() - tLlm}ms, stop=${event.delta.stop_reason}`);
         }
       }
-
-      if (!hasToolUse) return finalize(fullText);
-
-      // ツール呼び出しをストリーミング中に検出（稀なケース）
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-      const assistantContent: Anthropic.ContentBlockParam[] = [];
-      if (fullText) assistantContent.push({ type: "text" as const, text: fullText });
-      for (const tb of streamTools) {
-        let parsed: Record<string, unknown> = {};
-        try { parsed = JSON.parse(tb.json); } catch { /* empty */ }
-        const block: Anthropic.ToolUseBlock = { type: "tool_use", id: tb.id, name: tb.name, input: parsed };
-        assistantContent.push({ type: "tool_use" as const, id: tb.id, name: tb.name, input: parsed });
-        const execResult = await executeTool(block, userId, channel, env);
-        usedTools.push(tb.name);
-        handleToolResult(block, execResult);
-        toolResults.push({ type: "tool_result" as const, tool_use_id: tb.id, content: execResult.text });
-      }
-      messages.push({ role: "assistant", content: assistantContent });
-      messages.push({ role: "user", content: toolResults });
-      continue;
+    } catch (err) {
+      const tailOnError = guardStream.flush();
+      if (tailOnError) callbacks.onTextDelta(tailOnError);
+      throw err;
     }
+    console.log(JSON.stringify({ type: "usage", ...usage }));
 
-    // 初回ターン: 非ストリーミングでツール呼び出しの有無を確認
-    const response = await withTimeout(
-      client.messages.create({ ...apiParams, messages }), TIMEOUT_LLM_CALL_MS, `anthropic turn=${turn}`,
-    );
-    console.log(`[agent-stream] turn=${turn} done, llm=${Date.now() - tLlm}ms`);
-    console.log(JSON.stringify({
-      type: "usage", input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens,
-      cache_creation_input_tokens: (response.usage as any).cache_creation_input_tokens || 0,
-      cache_read_input_tokens: (response.usage as any).cache_read_input_tokens || 0,
-    }));
+    // 道具を使わなかった = このターンが最終応答。
+    if (!hasToolUse) return finalize(fullText);
 
-    const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
-    const toolUseBlocks = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
+    // 道具使用ターン: 生成済みテキストは既に送信済みなので、最終応答用に蓄積しておく。
+    if (fullText) accumulatedText += fullText;
 
-    if (toolUseBlocks.length === 0) {
-      // ツール不使用: テキストをチャンク送信（既に生成済みのため擬似ストリーミング）。
-      // turn 0 は非ストリーミングで全文が揃っているため、チャンク送信前に egress ガードを適用でき、
-      // クライアントへ流れる delta も是正済みになる。
-      const finalText = applyBrandGuard(
-        textBlocks.map((b) => b.text).join(""),
-        { channel, userId },
-      );
-      for (let i = 0; i < finalText.length; i += 8) {
-        callbacks.onTextDelta(finalText.slice(i, i + 8));
-      }
-      return finalize(finalText);
-    }
-
-    // ツール使用時: テキストブロックがあればクライアントに即時送信
-    // (turn 0 は非ストリーミングなので、テキストを手動でチャンク送信する)
-    const turnText = textBlocks.map((b) => b.text).join("");
-    if (turnText) {
-      for (let i = 0; i < turnText.length; i += 8) {
-        callbacks.onTextDelta(turnText.slice(i, i + 8));
-      }
-      accumulatedText += turnText;
-    }
-
-    // ツール実行
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const toolUse of toolUseBlocks) {
-      const execResult = await executeTool(toolUse, userId, channel, env);
-      usedTools.push(toolUse.name);
-      handleToolResult(toolUse, execResult);
-      toolResults.push({ type: "tool_result" as const, tool_use_id: toolUse.id, content: execResult.text });
+    const assistantContent: Anthropic.ContentBlockParam[] = [];
+    if (fullText) assistantContent.push({ type: "text" as const, text: fullText });
+    for (const tb of streamTools) {
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(tb.json); } catch { /* empty */ }
+      const block: Anthropic.ToolUseBlock = { type: "tool_use", id: tb.id, name: tb.name, input: parsed };
+      assistantContent.push({ type: "tool_use" as const, id: tb.id, name: tb.name, input: parsed });
+      const execResult = await executeTool(block, userId, channel, env);
+      usedTools.push(tb.name);
+      handleToolResult(block, execResult);
+      toolResults.push({ type: "tool_result" as const, tool_use_id: tb.id, content: execResult.text });
     }
-    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "assistant", content: assistantContent });
     messages.push({ role: "user", content: toolResults });
   }
 
@@ -1026,7 +1052,9 @@ export async function runAgentStreaming(
   const fallback = productCards.length > 0
     ? "こちらの商品情報をご参考になさってください。他にもご質問がございましたら、お気軽にどうぞ。"
     : "申し訳ございません、ただいま情報の取得に少しお時間をいただいております。具体的なご質問をいただければ、改めてお調べいたしますね。";
-  for (let i = 0; i < fallback.length; i += 8) callbacks.onTextDelta(fallback.slice(i, i + 8));
+  const guardTailFallback = guardStream.flush();
+  if (guardTailFallback) callbacks.onTextDelta(guardTailFallback);
+  callbacks.onTextDelta(fallback);
   callbacks.onDone(fallback);
   return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies: [] };
 }

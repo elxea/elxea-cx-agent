@@ -11,6 +11,7 @@ import {
   guardBrandFacts,
   applyBrandGuard,
 } from "../../src/lib/brand-guard";
+import { createBrandGuardStream } from "../../src/lib/brand-guard";
 import { BRAND_NAME_READING, COMPANY_NAME } from "../../src/lib/brand-copy";
 
 let total = 0;
@@ -126,6 +127,54 @@ it("空文字は安全に扱う", () => {
   assert(r.text === "", "空文字");
   assert(!r.changed, "変化なし");
   assert(r.violations.length === 0, "違反なし");
+});
+
+
+// ---------------------------------------------------------------------------
+// createBrandGuardStream — ストリーミング出力の増分ガード
+// ---------------------------------------------------------------------------
+
+/** delta 列を流し込み、クライアントへ送られる全文を組み立てるヘルパ。 */
+function runStream(deltas: string[]): string {
+  const g = createBrandGuardStream({ channel: "web" });
+  let out = "";
+  for (const d of deltas) out += g.push(d);
+  out += g.flush();
+  return out;
+}
+
+it("ストリームでも非正本の読み仮名を是正する", () => {
+  const out = runStream(["こんにちは。", "エルシア", "のお茶をご紹介します。よろしくお願いいたします。"]);
+  assert(out.includes(BRAND_NAME_READING), "正本読み仮名に是正される");
+  assert(!out.includes("エルシア" + "です"), "非正本がそのまま残らない");
+  assert(!/エルシア/.test(out.replace(new RegExp(BRAND_NAME_READING, "g"), "")), "非正本の残存なし");
+});
+
+it("delta 境界で分断された非正本句も是正する（保留バッファの要件）", () => {
+  // "合同会社elxea" を 3 つの delta に割る。素通し実装ならここで取りこぼす。
+  const out = runStream(["当社は", "合同会", "社el", "xea と申します。以後お見知り置きください。"]);
+  assert(out.includes(COMPANY_NAME), "正本法人名に是正される: " + out);
+  assert(!out.includes("合同会社"), "非正本の法人格が残らない: " + out);
+});
+
+it("産地の自己紹介句のみ是正し、商品の産地事実は壊さない", () => {
+  const out = runStream(["当ブランドは", "鹿児島を中心", "に、鹿児島産の茶葉も扱っています。ご参考まで。"]);
+  assert(out.includes("日本各地"), "自己紹介句が是正される: " + out);
+  assert(out.includes("鹿児島産の茶葉"), "商品の産地事実は保持: " + out);
+  assert(!out.includes("鹿児島を中心"), "非正本句が残らない: " + out);
+});
+
+it("違反がなければ入力の連結をそのまま返す（欠落・重複なし）", () => {
+  const deltas = ["静けさの", "ある一杯を、", "日々の区切りに。", "本日もご利用ありがとうございます。"];
+  assert(runStream(deltas) === deltas.join(""), "全文が一致する");
+});
+
+it("短い応答でも flush で取りこぼさない（保留長未満）", () => {
+  assert(runStream(["はい。"]) === "はい。", "保留長未満でも flush で出る");
+});
+
+it("空 delta を投げても壊れない", () => {
+  assert(runStream(["", "ありがとうございます。", ""]) === "ありがとうございます。", "空 delta は無視される");
 });
 
 for (const t of queue) {

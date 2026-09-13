@@ -140,3 +140,65 @@ export function applyBrandGuard(
   }
   return result.text;
 }
+
+/**
+ * ストリーミング出力用の brand-guard（増分適用）。
+ *
+ * 背景: Web チャネル（SSE）はクライアントへ `text_delta` を逐次送るだけで、
+ *   `done` イベントに本文を載せていない。つまり **画面に出る文字列は delta の連結**であり、
+ *   delta を素通しにすると `applyBrandGuard`（finalize の choke point）は
+ *   「保存される本文」しか是正できず、**表示は非正本のまま**という穴ができる。
+ *
+ * 対処: 末尾 HOLDBACK 文字を保留しながら delta を通す。ルールの検出パターンは
+ *   いずれも短い定型句なので、境界をまたいだ分断（例: "合同会" | "社elxea"）も
+ *   保留分と連結してから判定すれば取りこぼさない。
+ *
+ * コスト: 最初の emit が HOLDBACK 文字ぶん遅れるだけ（実測で数十 ms 規模）。
+ *   ルールは冪等（置換後の語はどのパターンにもマッチしない）なので、
+ *   finalize 側で全文に再適用しても二重置換にはならない。
+ */
+/**
+ * 保留する文字数。最長ルールは `合同会社\s*(?:elxea|エルクシア)`（"合同会社" 4 + 空白 + "エルクシア" 5）。
+ * `\s*` が非有界なため厳密な上界は取れないが、句の間に 15 文字を超える空白が入るのは
+ * 病的なケースなので 24 文字で実用上十分な安全域を取る。
+ */
+const BRAND_GUARD_STREAM_HOLDBACK = 24;
+
+/** ストリーミング用ガードのハンドル。 */
+export interface BrandGuardStream {
+  /** delta を投入し、送信してよい（是正済みの）文字列を返す。空文字なら送信不要。 */
+  push(delta: string): string;
+  /** ストリーム終端で呼び、保留中の残りを是正して返す。 */
+  flush(): string;
+}
+
+/**
+ * 増分 brand-guard を生成する。`meta` は違反ログ用（PII は含めない）。
+ */
+export function createBrandGuardStream(
+  meta: { channel?: string; userId?: string } = {},
+): BrandGuardStream {
+  let pending = "";
+  return {
+    push(delta: string): string {
+      if (!delta) return "";
+      pending += delta;
+      if (pending.length <= BRAND_GUARD_STREAM_HOLDBACK) return "";
+      const corrected = applyBrandGuard(pending, meta);
+      // 置換で長さが変わりうるため、是正後の文字列を基準に保留を切り出す。
+      if (corrected.length <= BRAND_GUARD_STREAM_HOLDBACK) {
+        pending = corrected;
+        return "";
+      }
+      const emit = corrected.slice(0, corrected.length - BRAND_GUARD_STREAM_HOLDBACK);
+      pending = corrected.slice(corrected.length - BRAND_GUARD_STREAM_HOLDBACK);
+      return emit;
+    },
+    flush(): string {
+      if (!pending) return "";
+      const out = applyBrandGuard(pending, meta);
+      pending = "";
+      return out;
+    },
+  };
+}
