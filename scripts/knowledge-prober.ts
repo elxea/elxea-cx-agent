@@ -262,7 +262,9 @@ async function saveProbeToNotion(result: ProbeResult): Promise<void> {
     ? "fail"
     : score >= 4
       ? "pass"
-      : result.evaluation?.gap_category && result.evaluation.gap_category !== "none"
+      : // gap_category は response-evaluator が既知カテゴリ or null に正規化済み
+        // (以前ここにあった !== "none" 判定は、型に存在しない値との比較で常に真だった)
+        result.evaluation?.gap_category
         ? "gap_detected"
         : "fail";
 
@@ -282,7 +284,10 @@ async function saveProbeToNotion(result: ProbeResult): Promise<void> {
         },
       ],
     },
-    "Article Generated": { checkbox: result.articleGenerated ?? false },
+    // このページは probe 直後 (Phase 2 の記事生成より前) に作られるため、記事生成の有無は
+    // まだ決まっていない。常に false を書く。記事生成の正本は Supabase
+    // probe_history.article_generated (markArticleGenerated が更新する)。
+    "Article Generated": { checkbox: false },
     "Run Date": { date: { start: new Date().toISOString().split("T")[0] } },
     Status: { select: { name: status } },
   };

@@ -8,17 +8,33 @@ export type Persona = "serenity" | "explorer" | "sensory";
 /** Depth levels for persona questions */
 export type DepthLevel = "entry" | "explore" | "deep";
 
+/** Gap categories for knowledge gaps (値の正本。型はここから導出する) */
+export const GAP_CATEGORIES = [
+  "tea_knowledge",
+  "brewing",
+  "pairing",
+  "brand_story",
+  "product_detail",
+  "wellness",
+  "seasonal",
+  "gift",
+  "order_support",
+] as const;
+
 /** Gap categories for knowledge gaps */
-export type GapCategory =
-  | "tea_knowledge"
-  | "brewing"
-  | "pairing"
-  | "brand_story"
-  | "product_detail"
-  | "wellness"
-  | "seasonal"
-  | "gift"
-  | "order_support";
+export type GapCategory = (typeof GAP_CATEGORIES)[number];
+
+/**
+ * 評価 JSON は LLM 出力なので、既知のカテゴリ以外が来うる
+ * (旧プロンプトの名残である "none" / 綴り違い / 未定義カテゴリ)。
+ * 「ギャップ無し」は null 一本に正規化し、下流が文字列比較で分岐しなくて済むようにする。
+ */
+export function normalizeGapCategory(value: unknown): GapCategory | null {
+  if (typeof value !== "string") return null;
+  return (GAP_CATEGORIES as readonly string[]).includes(value)
+    ? (value as GapCategory)
+    : null;
+}
 
 /** Quality evaluation result from Claude */
 export type EvaluationResult = {

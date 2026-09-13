@@ -302,6 +302,29 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 # - Check Slack for any error alerts
 ```
 
+### 段階昇格するとき（version を作ってから少しずつ載せる）
+
+一括で載せず、先に version だけ作って一部トラフィックで様子を見る手順。
+**`wrangler versions upload` を手打ちしない。** 手打ちすると version に tag が付かず、
+Cloudflare 側のメタデータだけでは由来コミットを確定できない（2026-09-12 に実際に起きた。
+ブランチ先端との振る舞い一致による間接確認で済ませるしかなかった）。
+
+```bash
+# 1. version を作る（--tag <短SHA> / --message <完全SHA + ブランチ + 件名> が自動で付く）
+pnpm run upload:version
+#    → 出力の Version ID を控える。tag から commit を引けるので、切り戻し先の中身が即分かる。
+
+# 2. 一部トラフィックへ載せる（Tier 2: Setaka 承認が要る操作）
+npx wrangler versions deploy <version-id>@<percent> <current-version-id>@<percent>
+
+# 3. 実測を見て 100% へ昇格、または前 version へ戻す
+```
+
+刻印の実装は `scripts/upload-version.sh`（`scripts/deploy-worker.sh` と同じ
+`scripts/lib/deploy-stamp.sh` を通る）。`tests/unit/deploy-worker-stamp.test.ts` が
+「刻印を通さない `wrangler deploy` / `wrangler versions upload` がリポジトリに無いこと」を
+機械で縛っている。
+
 ### Rollback
 
 ```bash

@@ -9,6 +9,8 @@
     "dev:staging": "wrangler dev --env staging",
     "deploy": "bash scripts/deploy-preflight.sh && bash scripts/deploy-worker.sh",
     "deploy:staging": "bash scripts/deploy-worker.sh --env staging",
+    "upload:version": "bash scripts/upload-version.sh",
+    "upload:version:staging": "bash scripts/upload-version.sh --env staging",
     "migrate": "npx tsx scripts/migrate.ts",
     "migrate:dry-run": "npx tsx scripts/migrate.ts --dry-run",
     "migrate:staging:dry-run": "npx tsx scripts/migrate.ts --dry-run --env staging",

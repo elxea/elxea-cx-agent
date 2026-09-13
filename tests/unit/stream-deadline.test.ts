@@ -86,6 +86,36 @@ it("ストリーム確立後に 1 件も届かない場合も期限で打ち切�
   assert(Date.now() - t0 < budget + 500, "期限付近で打ち切る");
 });
 
+it("少しずつ届き続けて終わらないストリームも、ターン期限で打ち切る", async () => {
+  // 守るもの: 「毎秒 1 文字ずつ来るが、いつまでも完了しない」返答。
+  // 各イベントの間隔は短いので「無通信が N ms 続いたら切る」方式では永久に切れない。
+  // iterateWithDeadline は絶対時刻でターン全体を縛るので、間隔に関係なく期限で切れる。
+  //
+  // 退行検知の仕掛け: このストリームは有限 (120 件 x 15ms ≒ 1,800ms) で、
+  // ターン期限 (250ms) より明らかに長い。実装を「無通信間隔の上限」に戻すと
+  // 例外が出ないまま全件を流し切るため、下の 3 つの assert が落ちる。
+  const gapMs = 15;
+  const eventCount = 120;
+  const budget = 250;
+  const { stream, state } = fakeStream({
+    events: Array.from({ length: eventCount }, () => "あ"),
+    gapMs,
+  });
+  const t0 = Date.now();
+  const got: string[] = [];
+  let err: Error | null = null;
+  try {
+    for await (const ev of iterateWithDeadline(stream, t0 + budget, "anthropic turn=0 stream")) got.push(ev);
+  } catch (e) { err = e as Error; }
+  const elapsed = Date.now() - t0;
+  assert(err !== null, "間隔が短くても、ターン期限を超えたら例外になる");
+  assert(/Timeout: anthropic turn=0 stream/.test(err!.message), `タイムアウト例外である: ${err?.message}`);
+  assert(got.length < eventCount, `全件を流し切らない: got=${got.length}/${eventCount}`);
+  assert(got.length > 0, "打ち切りまでに届いた delta は通っている");
+  assert(elapsed >= budget - 50 && elapsed < budget + 500, `期限付近で打ち切る: elapsed=${elapsed}ms budget=${budget}ms`);
+  assert(state.aborted === 1, "打ち切り時に上流接続を abort する");
+});
+
 it("既に期限を過ぎていれば即座に打ち切る", async () => {
   const { stream, state } = fakeStream({ events: ["a"], stallAfter: 0 });
   const t0 = Date.now();
