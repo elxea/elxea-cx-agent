@@ -578,6 +578,16 @@ export const INTROSPECTION: Record<string, VersionIntrospection> = {
       { kind: "column", table: "line_message_ledger", column: "note" },
     ],
   },
+  // 056: 通数台帳に「送信予約」を足す（claim-before-send を DB の原子性で担保する）。
+  //   追加列はすべて NULL 許容・IF NOT EXISTS なので冪等。sentinel は 3 列の実在。
+  "056_line_message_ledger_send_reservation": {
+    idempotent: true,
+    specs: [
+      { kind: "column", table: "line_message_ledger", column: "reservation_id" },
+      { kind: "column", table: "line_message_ledger", column: "send_state" },
+      { kind: "column", table: "line_message_ledger", column: "sent_count" },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------

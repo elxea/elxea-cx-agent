@@ -20,7 +20,7 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 # （誤送信ゼロの安全な故障だが監視ノイズ）。本番は本番 OA（@307tzhkw）に明示固定する。
 #   ⚠ 2026-08-22: 実送信スイッチ（旧 secret DELIVERY_SEND_ENABLED）は撤去した。さらに同日、
 #     一斉配信は **完全オンデマンド** になった（cron からの自動配信を廃止）。承認済み
-#     （Status=Approved）の行は、`POST /api/delivery/run` を叩いたときにだけ実送信される。
+#     （Status=Approved）の行は、`POST /api/delivery/send-one` で 1 件ずつ指定したときにだけ実送信される。
 #     DELIVERY_TARGET_ENV="prod" は送信先 OA を本番（@307tzhkw / 実顧客）に固定する指定であり、
 #     ここが "prod" の Worker で run を叩くと本番の友だち全員に届く。テストは staging 側で行うこと。
 DELIVERY_TARGET_ENV = "prod"
@@ -34,7 +34,7 @@ enabled = true
 # ── Cron Triggers ──
 # ⚠ 2026-08-22（Setaka 指示・完全オンデマンド化）: **一斉配信の cron は登録しない**。
 #   旧 "*/15 * * * *"（15分毎の自動配信）は撤去した。承認済み行が時刻到来で自動送信される経路は
-#   もう存在しない。配信は `POST /api/delivery/run` を明示的に叩いたときにだけ走る
+#   もう存在しない。配信は `POST /api/delivery/send-one` を明示的に叩いたときにだけ走る（全件送る口は 2026-09-22 に撤去）
 #   （docs/deploy-runbook.md「LINE 配信の運用ゲート」/ docs/line-delivery-guide.md 参照）。
 #   多層防御: 万一この crons に "*/15 * * * *" が復活しても、src/index.ts の scheduled ハンドラは
 #   cronKind==="delivery" を **no-op** で握りつぶす（配信は発火しない）。cron を復活させるだけでは
@@ -111,7 +111,7 @@ binding = "AI"
 # top-level [triggers] を「置換」するため、top-level に残る 1 本（同期 03:00 JST）を再掲した
 # うえで stats（04:00 JST）を足す。これで staging = 同期+計測、本番 = 同期のみ。
 #   ⚠ 2026-08-22 完全オンデマンド化: staging からも配信 cron "*/15 * * * *" を外した。
-#     staging の配信検証は `POST /api/delivery/run`（テスト OA 宛て）で明示的に叩いて行う。
+#     staging の配信検証は `POST /api/delivery/send-one`（テスト OA 宛て・1 件指定）で行う。
 #   ⚠ 本番 [triggers] には stats を入れない（本番配信計測の有効化は GA/昇格ゲートで別途判断）。
 #   - "0 19 * * *"（04:00 JST）: classifyCron → "stats" → runBroadcastStatsFetch。
 #       読み取り専用（LINE Insight GET + Supabase）。LINE 送信系 API は呼ばない（実配信ゼロ）。

@@ -16,7 +16,7 @@
  *   明示的に "delivery" へ分類し、index.ts 側で **no-op**（何もしないで return）に倒すことで、
  *   「復活しても配信もしないし同期も誤爆しない」状態を保つ。
  *
- * 配信の起動経路は `POST /api/delivery/run` のみ（オンデマンド）。
+ * 配信の起動経路は `POST /api/delivery/send-one` のみ（1 件指定・オンデマンド）。
  */
 export const DELIVERY_CRON_PATTERN = "*/15 * * * *";
 

@@ -71,6 +71,21 @@ export function parseAudience(
   return { kind: "persona", persona };
 }
 
+/**
+ * 指紋（コンテンツハッシュ）に載せる配信対象の決定的な識別子。
+ *
+ * 日本語ラベルそのままではなく enum 側の語彙で組む（"all" / "persona:serenity" /
+ * "allowlist"）。ラベルの表記揺れ（全角空白など）で指紋がぶれると、承認後に何も
+ * 変えていないのに送れなくなるため、`parseAudience` を通した結果から組む。
+ *
+ * 未知・空の配信対象は `parseAudience` が null を返して手前で止まるので、ここには来ない。
+ */
+export function audienceFingerprintKey(spec: AudienceSpec): string {
+  if (spec.kind === "all") return "all";
+  if (spec.kind === "allowlist") return "allowlist";
+  return `persona:${spec.persona}`;
+}
+
 /** ペルソナ enum を日本語ラベルに戻す（ログ・表示用）。 */
 export function personaToJp(persona: PersonaType): string {
   return PERSONA_JP_MAP[persona] ?? persona;

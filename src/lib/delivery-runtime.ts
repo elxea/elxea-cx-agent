@@ -2,11 +2,12 @@
  * 配信 runtime 配線（T8/T9 の実 I/O 束ね）。
  *
  * 実アダプタ（Notion / Supabase / Firestore / LINE チャネル）を構築し、
- * オーケストレータ（delivery-orchestrator.ts）を駆動する `runDelivery` を提供する。
+ * 1 件指定送信（delivery-send-one.ts）を駆動する `runSendOneDelivery` と、
+ * 承認 pin（`pinDeliveryApproval`）を提供する。
  *
  * ⚠ 実送信の前提（2026-08-22 変更: 実送信スイッチ撤去 → さらに完全オンデマンド化）:
  *   - 以前あった env フラグ DELIVERY_SEND_ENABLED は **廃止した**。
- *   - **cron による自動配信も廃止した**。配信が走るのは `POST /api/delivery/run` を
+ *   - **cron による自動配信も廃止した**。配信が走るのは `POST /api/delivery/send-one` を
  *     明示的に叩いたときだけ（「承認しただけでは送られない・回したら送られる」）。
  *   - **配信予定日時は送信条件ではなくなった**（Approved なら予定日時が未来でも空でも送る）。
  *     予定日時は運用者の記録用メモとして残るだけ。
@@ -41,16 +42,19 @@ import {
 } from "./message-ledger";
 import {
   createNotionRequest,
-  queryApprovedDeliveries,
-  querySendingDeliveries,
   setStatus,
   writeDeliveryResult,
   resetApproval,
   clearDeliveryError,
   pinApproval,
   fetchDeliveryPage,
+  fetchApprovalTask,
+  fetchNotionUserEmail,
   resolveDeliveryDbId,
+  writeDeliveryError,
   DeliveryDbConfigError,
+  NotionHttpError,
+  isRetryableNotionStatus,
 } from "./delivery-repository";
 import { computeContentHash } from "./content-hash";
 import {
@@ -89,11 +93,22 @@ import {
   type SegmentAgreement,
 } from "./cdp/segment-resolver";
 import {
-  runDeliveryOnce,
-  type OrchestratorDeps,
-  type DeliveryRunResult,
-} from "./delivery-orchestrator";
-import type { AudienceSpec } from "./delivery-audience";
+  sendOneDelivery,
+  type SendOneDeps,
+  type SendOneRequest,
+  type SendOneResponse,
+  type SendReservationPort,
+  type ReservationClaim,
+} from "./delivery-send-one";
+import {
+  RetryableApprovalError,
+  type ApprovalTaskPort,
+} from "./delivery-approval-task";
+import {
+  audienceFingerprintKey,
+  parseAudience,
+  type AudienceSpec,
+} from "./delivery-audience";
 
 const VALID_PERSONAS: PersonaType[] = ["serenity", "explorer", "sensory"];
 
@@ -413,7 +428,14 @@ export async function compareSegmentTargets(
 
 /** 承認 pin の結果。 */
 export type PinApprovalResult =
-  | { ok: true; contentHash: string }
+  | {
+      ok: true;
+      contentHash: string;
+      /** 承認時点の配信対象人数（スナップショット・N-12）。呼び出し側が判定タスクに載せる。 */
+      approvedAudienceCount: number;
+      /** 指紋に載せた配信対象の識別子（"all" / "persona:xxx" / "allowlist"）。 */
+      audienceKey: string;
+    }
   | { ok: false; reason: string };
 
 /**
@@ -434,6 +456,11 @@ export async function pinDeliveryApproval(
   // 形式は normalize が files「画像」の有無で自動判定済み。
   if (page.format !== "text" && page.format !== "image") {
     return { ok: false, reason: "形式が未設定/未知" };
+  }
+  // 配信対象は指紋の構成要素（2026-09-22）。空・未知は pin しない（fail-closed）。
+  const audience = parseAudience(page.audienceRaw);
+  if (!audience) {
+    return { ok: false, reason: "配信対象が空/未知（fail-closed）" };
   }
   // 本文か画像のどちらかは必須（text は本文、image は画像枚数）。
   const srcUrls = page.imageSourceUrls ?? [];
@@ -481,341 +508,322 @@ export async function pinDeliveryApproval(
     }
   }
 
-  // ハッシュは恒久R2 URL 群で計算（送信時は imageCount から同じ URL 群を決定的に再構成し照合）。
+  // 承認時点の配信対象人数（N-12 の基準）。取得できないまま pin すると送信直前の
+  // 「+10% 超で停止」の基準が無くなるので、ここは fail-closed で止める。
+  let approvedAudienceCount: number;
+  try {
+    const targets = await resolveTargetsForEnv(env, audience);
+    if (targets.kind === "error") {
+      return { ok: false, reason: `配信対象の人数を数えられない: ${targets.reason}` };
+    }
+    approvedAudienceCount = targets.estimatedRecipients;
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `配信対象の人数を数えられない: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!Number.isInteger(approvedAudienceCount) || approvedAudienceCount < 1) {
+    return { ok: false, reason: "配信対象の人数が 0（送る相手がいない・fail-closed）" };
+  }
+
+  // ハッシュは恒久R2 URL 群 + 配信対象で計算（送信時は同じ組み立てで再計算し照合）。
+  const audienceKey = audienceFingerprintKey(audience);
   const contentHash = await computeContentHash({
     format: page.format,
     body: page.body,
     imageUrls: r2Urls,
+    audience: audienceKey,
   });
-  await pinApproval(request, pageId, contentHash);
-  return { ok: true, contentHash };
+  await pinApproval(request, pageId, contentHash, approvedAudienceCount);
+  return { ok: true, contentHash, approvedAudienceCount, audienceKey };
 }
 
-/**
- * 配信を 1 巡実行する（runtime 配線）。
- * 承認済み（Approved）・未送信・pin 一致・通数ガード通過の行を実送信する。
- * 予定時刻の到来は条件に含めない（2026-08-22 完全オンデマンド化）。
- */
-export async function runDelivery(env: Env): Promise<DeliveryRunResult> {
-  const supabase = createSupabaseClient(env);
+// ---------------------------------------------------------------------------
+// 1 件指定送信の runtime 配線（POST /api/delivery/send-one が唯一の送信経路）
+// ---------------------------------------------------------------------------
+//
+// ⚠ 旧「全件送る口」（`POST /api/delivery/run` / `runOnDemandDelivery` / `runDelivery` /
+//    `runDeliveryOnce`）は 2026-09-22 に削除した。互換の再追加をしないこと
+//    （プラン v6.2 §4-2 の 1・§7-5「1 件だけ送る口が成り立たないなら止めて相談する」）。
+//
+// 送信可否を握る多層ガード（プラン §4-3）:
+//   1-2. Setaka の承認と送信直前の再確認（Mac 側が主・ここは第二の防御）
+//   5.   1 件指定（対象は引数の pageId だけ。走査しない）
+//   6.   配信本体による承認確認（All Tasks 判定行・最終編集者・指紋）
+//   8.   既存の確認（配信停止の除外・無料枠 200 通・claim による二重送信防止）
 
-  // preflight: 台帳テーブル必須（不在なら送信経路に載せない）。
-  const ledgerErr = await checkLedgerTables(supabase);
-  if (ledgerErr) {
-    return {
-      scanned: 0,
-      processed: [
-        {
-          pageId: "-",
-          title: "-",
-          audience: null,
-          disposition: "failed",
-          reason: `preflight 失敗: ${ledgerErr}`,
-          recipients: 0,
-        },
-      ],
-      reaper: [],
-    };
-  }
-
-  const channel = resolveDeliveryChannel(env); // token 未設定は throw（fail-closed）
-  // env 分離: prod ワーカーは prod DB、test/staging ワーカーは専用 test DB のみ読む。
-  // 誤配線（共有 DB / cross-env）は送信前に fail-closed で塞ぐ（preflight 失敗として返す）。
-  let dbId: string;
-  try {
-    dbId = resolveDeliveryDbId(env);
-  } catch (e) {
-    if (e instanceof DeliveryDbConfigError) {
-      return {
-        scanned: 0,
-        processed: [
-          {
-            pageId: "-",
-            title: "-",
-            audience: null,
-            disposition: "failed",
-            reason: `配信 DB 解決 fail-closed: ${e.message}`,
-            recipients: 0,
-          },
-        ],
-        reaper: [],
-      };
-    }
-    throw e;
-  }
-  const request = createNotionRequest(env);
-
-  // Firestore env（ペルソナ配信で必要。全員配信のみなら未設定でも動く）。
+/** 対象解決に必要な依存を env から組む（pin と送信で同じ解決経路を使う）。 */
+function buildTargetDeps(
+  env: Env,
+  accessToken: string,
+  fallbackFriendCount: number | null,
+  onBasis?: (basis: FriendCountBasis) => void,
+): TargetResolverDeps {
   let fsEnv: FirestoreEnv | null = null;
   try {
     fsEnv = getFirestoreEnv(env);
   } catch {
     fsEnv = null;
   }
-
-  // 直近の見積がどこから来たか（実測 / env フォールバック）。台帳の注記に使う。
-  //   runDeliveryOnce は 1 ページずつ直列に「解決 → 送信」を回すため、
-  //   送信直後に読む値は必ずそのページの解決結果に対応する。
-  let lastEstimateBasis: FriendCountBasis | null = null;
-
-  const targetDeps: TargetResolverDeps = {
+  return {
     loadLinkages: () => loadLinkages(env),
     loadPersonaUsers: async (persona) => {
       if (!fsEnv) throw new Error("Firestore 未設定のためペルソナ対象を解決できない");
       return loadPersonaUsers(fsEnv, persona);
     },
-    // ブロック1: lineUsers 直読み（未連携ユーザーのペルソナ）を宛先解決の和集合に加える。
     loadPersonaLineUsers: async (persona) => {
       if (!fsEnv) throw new Error("Firestore 未設定のため lineUsers 直読みができない");
       return loadPersonaLineUsers(fsEnv, persona);
     },
-    // 全員配信の受信者数は**送信のたびに LINE から数える**（2026-09-11・オーナー判断）。
-    //   全員配信は宛先指定なしで送るため実到達はその時点の友だち全員。固定値は必ず陳腐化する。
-    //   実測できなければ env のフォールバック値に退避する（この数字は到達人数に一切影響しない
-    //   帳簿用の値なので、取得失敗を理由に配信を止めるのは筋が悪い）。
-    //   ⚠ fail-closed は緩めていない: 実測も env も無ければ従来どおり null を返し、
-    //     resolveTargets の既存判定（見積 null → kind:"error"）で送信不可になる。
+    // 全員配信の受信者数は送信のたびに LINE から数える（固定値は必ず陳腐化する・2026-09-11）。
     broadcastEstimate: async () => {
       const result = await resolveBroadcastRecipientEstimate({
-        fetchPage: createLineFollowerPageFetcher(channel.accessToken),
-        envFallback: channel.fallbackFriendCount,
+        fetchPage: createLineFollowerPageFetcher(accessToken),
+        envFallback: fallbackFriendCount,
       });
-      lastEstimateBasis = result.basis;
+      onBasis?.(result.basis);
       console.log(
         `[delivery] friend-count basis=${result.basis} count=${result.count ?? "-"} ` +
           `pages=${result.pages}${result.reason ? ` reason=${result.reason}` : ""}`,
       );
       return result.count;
     },
-    // 社内 allowlist は env が唯一の供給元（PII 非記載）。空/未設定は resolveTargets が fail-closed。
     loadAllowlistUserIds: async () => parseAllowlist(env.LINE_INTERNAL_USER_IDS),
   };
+}
 
-  const ledger = createSupabaseLedgerStore(supabase);
+/** 承認 pin 時に配信対象人数を数えるための解決（送信経路と同じ resolver を通す）。 */
+async function resolveTargetsForEnv(
+  env: Env,
+  audience: AudienceSpec,
+): Promise<ResolvedTargets> {
+  const channel = resolveDeliveryChannel(env);
+  const supabase = createSupabaseClient(env);
+  const deps = buildTargetDeps(env, channel.accessToken, channel.fallbackFriendCount);
+  return resolveTargetsWithCdp(env, supabase, audience, deps);
+}
 
-  // 送信側の恒久R2 URL 再構成には公開ベースのみ必要（R2 token 不要）。
-  // pin 時に broadcast/<pageId>/<index>.jpg へ put 済みなので、枚数から決定的に URL を組める。
-  const r2Base = resolveR2PublicBase(env);
-  const withR2Urls = <T extends { id: string; imageCount: number }>(p: T): T => ({
-    ...p,
-    imageUrls: r2UrlsForPage(p.id, p.imageCount ?? 0, r2Base),
-  });
-
-  const deps: OrchestratorDeps = {
-    repo: {
-      queryApproved: async () =>
-        (await queryApprovedDeliveries(request, dbId)).map(withR2Urls),
-      querySending: async () =>
-        (await querySendingDeliveries(request, dbId)).map(withR2Urls),
-      setStatus: (pageId, status) => setStatus(request, pageId, status),
-      writeResult: (pageId, result) => writeDeliveryResult(request, pageId, result),
-      resetApproval: (pageId, reason) => resetApproval(request, pageId, reason),
+/** Notion の一時失敗を「保留」に翻訳する承認確認ポート（読み取りのみ）。 */
+export function createApprovalTaskPort(env: Env): ApprovalTaskPort {
+  const request = createNotionRequest(env);
+  const translate = (err: unknown): never => {
+    if (err instanceof NotionHttpError && isRetryableNotionStatus(err.status)) {
+      throw new RetryableApprovalError(`Notion ${err.status}`);
+    }
+    if (err instanceof TypeError) {
+      // fetch 自体が失敗した（ネットワーク）。無効ではなく保留。
+      throw new RetryableApprovalError(`network: ${err.message}`);
+    }
+    throw err;
+  };
+  return {
+    fetchTask: async (taskPageId) => {
+      try {
+        return await fetchApprovalTask(request, taskPageId);
+      } catch (err) {
+        return translate(err);
+      }
     },
-    ledger,
-    consumption: consumptionFetcherForToken(channel.accessToken),
-    // 送信直後の台帳注記（best-effort）。requestId は「実際に何通届いたか」を後から
-    //   LINE に問い合わせる唯一の鍵で、ここで残さないと二度と手に入らない（統計は 14 日で消える）。
-    annotateLedger: async (notionPageId, month, requestId) => {
-      await ledger.annotate?.(
-        { notionPageId, month },
-        {
-          recipientsBasis: lastEstimateBasis ?? undefined,
-          lineRequestId: requestId,
-        },
-      );
-      console.log(
-        `[delivery] ledger annotated page=${notionPageId} basis=${lastEstimateBasis ?? "-"} ` +
-          `requestId=${requestId ? "captured" : "none"}`,
-      );
+    resolveUserEmail: async (userId) => {
+      try {
+        return await fetchNotionUserEmail(request, userId);
+      } catch (err) {
+        return translate(err);
+      }
     },
-    ledgerHasClaim: async (notionPageId, month) => {
+  };
+}
+
+/**
+ * 送信予約ポート（claim-before-send）。
+ *
+ * 原子性の出所は line_message_ledger の UNIQUE (notion_page_id, month)。
+ * `INSERT ... ON CONFLICT DO NOTHING` が挿入できた 1 本だけが送ってよい（N-06 / N-07）。
+ * ⚠ アプリ層で「読んで、無ければ書く」に書き換えないこと（並列 2 本が同時に読む窓が開く）。
+ * 要 migration 056（reservation_id / send_state / sent_count）。
+ */
+export function createSupabaseReservationPort(
+  supabase: ReturnType<typeof createSupabaseClient>,
+): SendReservationPort {
+  return {
+    async claim(input): Promise<ReservationClaim> {
       const { data, error } = await supabase
         .from(LEDGER_TABLE)
-        .select("id")
-        .eq("notion_page_id", notionPageId)
-        .eq("month", month)
-        .limit(1);
-      if (error) throw new Error(`ledger hasClaim 失敗: ${error.message}`);
-      return (data?.length ?? 0) > 0;
-    },
-    // CDP 統合 Stage 4: 既定は shadow（旧 3 本が決め、新 SQL 1 本は数えるだけ）。
-    //   切替は env CDP_SEGMENT_MODE=cdp（そのとき新が引けなければ **送らない**）。
-    resolveTargets: (audience: AudienceSpec) =>
-      resolveTargetsWithCdp(env, supabase, audience, targetDeps),
-    // 実送信スイッチ撤去（2026-08-22）: 常に実 sender を配線する。
-    // 送信先 OA は resolveDeliveryChannel が env（DELIVERY_TARGET_ENV）から決める
-    // （本番 Worker=本番 OA / staging Worker=テスト OA）。
-    sender: createLineSender(channel),
-    now: () => new Date(),
-    // テスト環境限定の自己承認緩和（prod では selfApprovalRelaxed が常に false）。
-    allowSelfApproval: selfApprovalRelaxed(env),
-    // 順序付き画像URL群（恒久HTTPS・env が唯一の供給元）。orchestrator は audience が
-    // allowlist(社内) または all(全員=broadcast) のときだけ本文に続けて image N を組む
-    // （persona には注入しない。Notion 複数画像UIの本実装 v2 までの暫定）。
-    testImageUrls: parseAllowlist(env.DELIVERY_TEST_IMAGE_URLS),
-  };
+        .upsert(
+          {
+            month: input.month,
+            source: "broadcast",
+            recipients: input.recipients,
+            notion_page_id: input.pageId,
+            aggregation_unit: input.aggregationUnit ?? null,
+            reservation_id: input.reservationId,
+            send_state: "sending",
+          },
+          { onConflict: "notion_page_id,month", ignoreDuplicates: true },
+        )
+        .select("id");
+      if (error) throw new Error(`send reservation claim failed: ${error.message}`);
+      if ((data?.length ?? 0) > 0) return { kind: "claimed" };
 
-  const result = await runDeliveryOnce(deps);
-  // 可観測性（実送信スイッチ撤去後の唯一の実績ログ）: 「実送信したか / 何通 / どの行が何故落ちたか」を
-  // 1 行で追えるようにする。以前は sendEnabled= を見て dry-run/実送信を判別していたため、
-  // 撤去に伴い disposition 別内訳と実送信通数（recipients 合計）をログに載せる。
-  const count = (d: string) =>
-    result.processed.filter((p) => p.disposition === d).length;
-  const delivered = result.processed
-    .filter((p) => p.disposition === "sent")
-    .reduce((sum, p) => sum + p.recipients, 0);
-  console.log(
-    `[delivery] env=${channel.label} month=${currentLineMonth()} ` +
-      `scanned=${result.scanned} processed=${result.processed.length} ` +
-      `sent=${count("sent")} recipients=${delivered} skipped=${count("skipped")} ` +
-      `reset=${count("reset")} failed=${count("failed")} reaper=${result.reaper.length}`,
-  );
-  // 実送信した行は個別にも残す（PII 非記載: pageId / タイトル / 対象種別 / 通数のみ）。
-  for (const p of result.processed) {
-    if (p.disposition === "sent" || p.disposition === "failed") {
-      console.log(
-        `[delivery] ${p.disposition} page=${p.pageId} audience=${p.audience ?? "-"} ` +
-          `recipients=${p.recipients} reason=${p.reason}`,
+      // 取れなかった = 既存の予約がいる。誰の予約で、いまどの状態かを読んで判断する。
+      const existing = await supabase
+        .from(LEDGER_TABLE)
+        .select("reservation_id,send_state,sent_count")
+        .eq("notion_page_id", input.pageId)
+        .eq("month", input.month)
+        .limit(1);
+      if (existing.error) {
+        throw new Error(`send reservation read failed: ${existing.error.message}`);
+      }
+      const row = (existing.data ?? [])[0] as
+        | {
+            reservation_id: string | null;
+            send_state: string | null;
+            sent_count: number | null;
+          }
+        | undefined;
+      const state = row?.send_state;
+      return {
+        kind: "duplicate",
+        sameReservation: (row?.reservation_id ?? null) === input.reservationId,
+        sendState:
+          state === "sending" || state === "sent" || state === "failed"
+            ? state
+            : "unknown",
+        sentCount: row?.sent_count ?? null,
+      };
+    },
+
+    async finish(input): Promise<void> {
+      const { error } = await supabase
+        .from(LEDGER_TABLE)
+        .update({
+          send_state: input.sendState,
+          sent_count: input.sentCount,
+          ...(input.lineRequestId ? { line_request_id: input.lineRequestId } : {}),
+        })
+        .eq("notion_page_id", input.pageId)
+        .eq("month", input.month);
+      if (error) throw new Error(`send reservation finish failed: ${error.message}`);
+    },
+  };
+}
+
+function rejectedResponse(
+  code: SendOneResponse["code"],
+  reason: string,
+  reservationId: string,
+): SendOneResponse {
+  return {
+    status: "rejected",
+    code,
+    reason,
+    sentCount: 0,
+    audienceCount: 0,
+    ledgerRemaining: null,
+    reservationId,
+  };
+}
+
+/**
+ * 1 件指定送信（runtime 配線）。`POST /api/delivery/send-one` からのみ呼ばれる。
+ * preflight（台帳テーブル / 配信 DB の env 分離 / チャネル）は送信前に fail-closed で塞ぐ。
+ */
+export async function runSendOneDelivery(
+  env: Env,
+  req: SendOneRequest,
+): Promise<SendOneResponse> {
+  const reservationId = typeof req?.reservationId === "string" ? req.reservationId : "";
+  const supabase = createSupabaseClient(env);
+
+  // preflight 1: 通数台帳テーブル（不在なら送信経路に載せない）。
+  const ledgerErr = await checkLedgerTables(supabase);
+  if (ledgerErr) {
+    return rejectedResponse("ledger_error", `preflight 失敗: ${ledgerErr}`, reservationId);
+  }
+
+  // preflight 2: 配信 DB の env 分離（test ワーカーが本番 DB を指す誤配線を塞ぐ）。
+  try {
+    resolveDeliveryDbId(env);
+  } catch (e) {
+    if (e instanceof DeliveryDbConfigError) {
+      return rejectedResponse(
+        "bad_request",
+        `配信 DB 解決 fail-closed: ${e.message}`,
+        reservationId,
       );
     }
+    throw e;
   }
-  return result;
-}
 
-// ---------------------------------------------------------------------------
-// 承認 → オンデマンド配信 の配線（POST /api/delivery/run が唯一の起動経路）
-// ---------------------------------------------------------------------------
-//
-// QA 指摘①: 運用者が Notion で Status=Approved にしても、承認 pin（画像R2化・
-//   ハッシュ凍結）は別 API（POST /api/delivery/approve）を叩かないと起きず、
-//   ハッシュ未設定のまま runDelivery に載ると承認リセットされ「送られない」。
-//
-// 対処: オンデマンド実行が Approved & 未送信 の行を拾い、まだ pin されていなければ
-//   pinDeliveryApproval で凍結してから runDelivery に渡す。
-//   → 運用者は「Notion で Status を Approved にして、配信を実行してもらう」だけで完結する。
-//
-// 2026-08-22（完全オンデマンド化）: 旧 cron ポーリング（15分毎）は廃止した。
-//   拾う条件から「予定日時 <= now」を外し、**Approved であれば拾う**ようにした
-//   （承認済み＝送る準備ができている、という意味付け）。
-//
-// 冪等・安全:
-//   - 既に pin 済み（コンテンツハッシュあり）の行は pin を skip（二重 pin しない）。
-//   - pin 失敗（HEIC 等の LINE 非対応形式 / R2 未設定 / 自己承認）は fail-closed で
-//     resetApproval（Status を Draft に戻し、平易な日本語をエラー詳細へ）。
-//     → 承認を通さないので runDelivery の対象からも外れる（壊れた配信を出さない）。
-//   - 本 pin 前処理は「拾って承認 pin まで」を担い、送信可否は一切変えない。
-//     送信可否は runDelivery 側の多層ガード（承認者独立性・ハッシュ照合・通数台帳）が握る。
-
-/** 承認 pin 前処理（phase 1）の注入依存（テストは fake、runtime は実 I/O を配線）。 */
-export interface OnDemandPinDeps {
-  /** Approved & 未送信 の行（id と contentHash だけ見る）。予定日時は条件に含めない。 */
-  queryApproved(): Promise<Array<{ id: string; contentHash: string | null }>>;
-  /** 承認 pin（画像R2化・ハッシュ凍結）。既存 pinDeliveryApproval を配線。 */
-  pin(pageId: string): Promise<PinApprovalResult>;
-  /** pin 失敗時の fail-closed（Draft 戻し + エラー詳細書込）。 */
-  resetApproval(pageId: string, reason: string): Promise<void>;
-  /** pin 成功時の後始末（過去の失敗メッセージを消す）。 */
-  clearError(pageId: string): Promise<void>;
-  // ⚠ now() は廃止（2026-08-22）。予定日時が拾う条件でなくなり、pin 前処理は時刻を使わない。
-}
-
-/** phase 1（pin 前処理）の 1 行あたり結果。 */
-export interface PinPassOutcome {
-  pageId: string;
-  action: "pinned" | "already_pinned" | "reset_failed";
-  reason?: string;
-}
-
-/** オンデマンド実行 1 巡の結果（pin 前処理 + 本処理）。 */
-export interface OnDemandDeliveryResult {
-  pinPass: PinPassOutcome[];
-  run: DeliveryRunResult;
-}
-
-/** phase 1（pin 前処理）の全注入依存 + 本処理ランナー。 */
-export interface OnDemandDeliveryDeps extends OnDemandPinDeps {
-  run(): Promise<DeliveryRunResult>;
-}
-
-/**
- * phase 1: Approved & 未送信 のうち未 pin 行を承認 pin する（純粋・注入依存）。
- * queryApproved が失敗したら空を返し、本処理（runDelivery）側の fail-closed に委ねる。
- */
-export async function pinApprovedRows(
-  deps: OnDemandPinDeps,
-): Promise<PinPassOutcome[]> {
-  let approved: Array<{ id: string; contentHash: string | null }>;
+  // preflight 3: 送信先 OA（token 未設定は throw = fail-closed）。
+  let channel;
   try {
-    approved = await deps.queryApproved();
-  } catch {
-    return [];
+    channel = resolveDeliveryChannel(env);
+  } catch (err) {
+    return rejectedResponse(
+      "bad_request",
+      `送信先チャネル未設定: ${err instanceof Error ? err.message : String(err)}`,
+      reservationId,
+    );
   }
 
-  const out: PinPassOutcome[] = [];
-  for (const page of approved) {
-    // 既に pin 済み（ハッシュあり）は skip（二重 pin 回避）。
-    if (page.contentHash) {
-      out.push({ pageId: page.id, action: "already_pinned" });
-      continue;
-    }
-    let res: PinApprovalResult;
-    try {
-      res = await deps.pin(page.id);
-    } catch (err) {
-      res = { ok: false, reason: err instanceof Error ? err.message : String(err) };
-    }
-    if (res.ok) {
-      // 成功: 過去の失敗メッセージを消す（承認済み行に赤字を残さない）。
-      await deps.clearError(page.id).catch(() => {});
-      out.push({ pageId: page.id, action: "pinned" });
-    } else {
-      // 失敗: fail-closed。承認を通さず Draft に戻し、平易な理由をエラー詳細へ。
-      await deps.resetApproval(page.id, res.reason).catch(() => {});
-      out.push({ pageId: page.id, action: "reset_failed", reason: res.reason });
-    }
-  }
-  return out;
-}
-
-/**
- * オンデマンド配信 1 巡（注入版）。phase 1（pin 前処理）→ phase 2（runDelivery）を
- * この順で直列実行する。テストは fake deps で pin→run 順・fail-closed を検証する。
- */
-export async function runOnDemandDeliveryWith(
-  deps: OnDemandDeliveryDeps,
-): Promise<OnDemandDeliveryResult> {
-  const pinPass = await pinApprovedRows(deps);
-  const run = await deps.run();
-  return { pinPass, run };
-}
-
-/**
- * オンデマンド配信 1 巡（runtime 配線）。
- * `POST /api/delivery/run` からのみ呼ばれる（cron 経路は 2026-08-22 に廃止）。
- * 本関数は送信可否を変えない（送信可否は runDelivery の多層ガードが握る）。
- */
-export async function runOnDemandDelivery(
-  env: Env,
-): Promise<OnDemandDeliveryResult> {
   const request = createNotionRequest(env);
-  // env 分離 + fail-closed。解決不能な env（例: 専用 test DB 未設定の staging）では
-  // 対象取得を空にし pin/送信を一切行わない（run() 側の runDelivery も同じく fail-closed）。
-  let dbId: string | null;
-  try {
-    dbId = resolveDeliveryDbId(env);
-  } catch (e) {
-    if (!(e instanceof DeliveryDbConfigError)) throw e;
-    dbId = null;
-  }
-  return runOnDemandDeliveryWith({
-    queryApproved: async () => {
-      if (dbId === null) return [];
-      const pages = await queryApprovedDeliveries(request, dbId);
-      return pages.map((p) => ({ id: p.id, contentHash: p.contentHash }));
+  const ledger = createSupabaseLedgerStore(supabase);
+  const r2Base = resolveR2PublicBase(env);
+  let lastEstimateBasis: FriendCountBasis | null = null;
+  const targetDeps = buildTargetDeps(
+    env,
+    channel.accessToken,
+    channel.fallbackFriendCount,
+    (basis) => {
+      lastEstimateBasis = basis;
     },
-    pin: (pageId) => pinDeliveryApproval(env, pageId),
-    resetApproval: (pageId, reason) => resetApproval(request, pageId, reason),
-    clearError: (pageId) => clearDeliveryError(request, pageId),
-    run: () => runDelivery(env),
-  });
+  );
+
+  const deps: SendOneDeps = {
+    repo: {
+      fetchPage: (pageId) => fetchDeliveryPage(request, pageId),
+      setStatus: (pageId, status) => setStatus(request, pageId, status),
+      writeResult: (pageId, result) => writeDeliveryResult(request, pageId, result),
+      writeError: (pageId, reason) => writeDeliveryError(request, pageId, reason),
+    },
+    reservation: createSupabaseReservationPort(supabase),
+    confirmedConsumption: (month) => ledger.confirmedConsumption(month),
+    consumption: consumptionFetcherForToken(channel.accessToken),
+    approvalTask: createApprovalTaskPort(env),
+    // 照合に使うメールは設定 1 か所に 1 件だけ（既定値を持たない・N-05）。
+    ownerEmail: env.DELIVERY_OWNER_EMAIL,
+    resolveTargets: (audience: AudienceSpec) =>
+      resolveTargetsWithCdp(env, supabase, audience, targetDeps),
+    sender: createLineSender(channel),
+    now: () => new Date(),
+    imageUrlsFor: (page) => r2UrlsForPage(page.id, page.imageCount ?? 0, r2Base),
+  };
+
+  const res = await sendOneDelivery(deps, req);
+
+  // 送信 1 回を指す鍵と人数の出所を台帳に注記する（best-effort・送信結果は変えない）。
+  if (res.status === "sent" && lastEstimateBasis) {
+    await ledger
+      .annotate?.(
+        { notionPageId: req.pageId, month: currentLineMonth() },
+        { recipientsBasis: lastEstimateBasis ?? undefined },
+      )
+      .catch((err: unknown) => {
+        console.warn(
+          `[delivery] 台帳注記に失敗（送信は成立・帳簿の精度だけの問題）: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+
+  console.log(
+    `[delivery] send-one env=${channel.label} month=${currentLineMonth()} ` +
+      `page=${req?.pageId ?? "-"} reservation=${reservationId || "-"} ` +
+      `status=${res.status} code=${res.code} sent=${res.sentCount} ` +
+      `audience=${res.audienceCount} remaining=${res.ledgerRemaining ?? "-"}`,
+  );
+  return res;
 }

@@ -142,11 +142,12 @@ async function main(): Promise<void> {
   );
 
   // pin 時と送信時で同じ枚数なら同じ URL 群 → コンテンツハッシュ一致（TOCTOU 防止）
-  const hashPin = await computeContentHash({ format: "image", body: "", imageUrls: urls });
+  const hashPin = await computeContentHash({ format: "image", body: "", imageUrls: urls, audience: "all" });
   const hashSend = await computeContentHash({
     format: "image",
     body: "",
     imageUrls: r2UrlsForPage(PAGE_ID, IMAGE_COUNT, base),
+    audience: "all",
   });
   check("pin/送信で同一枚数なら content hash 一致（凍結）", hashPin === hashSend);
 
@@ -156,7 +157,7 @@ async function main(): Promise<void> {
   //    ⚠ ここでコメント行を除くのは、撤去の経緯コメントに旧フラグ名が残るため。
   const sendPathSources = [
     "src/lib/delivery-runtime.ts",
-    "src/lib/delivery-orchestrator.ts",
+    "src/lib/delivery-send-one.ts",
     "src/index.ts",
   ];
   const codeLinesOf = (relPath: string): string[] =>
@@ -174,7 +175,7 @@ async function main(): Promise<void> {
   }
   // 一斉配信の送信経路そのものには sendEnabled ゲートを一切持たない
   // （休眠 DORMANT / マルシェ MARCHE は別機能の別ゲートなので index.ts は対象外）。
-  for (const rel of ["src/lib/delivery-runtime.ts", "src/lib/delivery-orchestrator.ts"]) {
+  for (const rel of ["src/lib/delivery-runtime.ts", "src/lib/delivery-send-one.ts"]) {
     check(
       `${rel}: 実コードに sendEnabled ゲートが存在しない`,
       !codeLinesOf(rel).some((l) => /\bsendEnabled\b/.test(l)),

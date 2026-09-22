@@ -422,7 +422,7 @@ describe("月の締め記録 — member_count と row_count", () => {
 
 describe("送信は一切呼ばない — 送信系を import していないことをソースで固定", () => {
   const FORBIDDEN = [
-    "delivery-orchestrator",
+    "delivery-send-one",
     "delivery-runtime",
     "delivery-audience",
     "delivery-approval",

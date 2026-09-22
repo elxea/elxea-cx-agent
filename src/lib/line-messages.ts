@@ -196,12 +196,41 @@ export interface LineSender {
      * 未指定なら従来どおり付与しない（後方互換）。命名検証は呼び出し側（orchestrator）で済ませる。
      */
     aggregationUnit?: string,
+    /**
+     * LINE の再試行キー（`X-Line-Retry-Key`）。同じ鍵の送信要求は LINE 側が重複として扱う。
+     * 結果不明時の再試行が二重送信にならない最後の防御（失敗シナリオ N-08 / E-02）。
+     * 一斉配信では **必須**（呼び出し側が予約 ID から決定的に導出して渡す）。
+     */
+    retryKey?: string,
   ): Promise<SendOutcome>;
   broadcast(
     messages: LineMessage[],
     estimatedRecipients: number,
     aggregationUnit?: string,
+    /** 同上（`X-Line-Retry-Key`）。全試行で同一の鍵を使う。 */
+    retryKey?: string,
   ): Promise<SendOutcome>;
+}
+
+/**
+ * 予約 ID から `X-Line-Retry-Key` 用の UUID を **決定的に** 導出する（N-08 / E-02）。
+ *
+ * LINE は retry key に UUID 形式を要求するため、SHA-256 の先頭 16 バイトを
+ * UUID v4 の形（version / variant ビット）に整えて返す。同じ予約 ID なら常に同じ鍵に
+ * なることが要点で、乱数を使ってはならない（再試行で鍵が変わると重複判定が効かない）。
+ */
+export async function deterministicRetryKey(reservationId: string): Promise<string> {
+  const data = new TextEncoder().encode(`line-retry-key:${reservationId}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  const b = digest.slice(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4 の形
+  b[8] = (b[8] & 0x3f) | 0x80; // variant
+  let hex = "";
+  for (let i = 0; i < b.length; i++) hex += b[i].toString(16).padStart(2, "0");
+  return (
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-` +
+    `${hex.slice(16, 20)}-${hex.slice(20)}`
+  );
 }
 
 /**
@@ -214,7 +243,7 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
   const authHeader = { Authorization: `Bearer ${channel.accessToken}` };
 
   return {
-    async multicast(batches, messages, aggregationUnit) {
+    async multicast(batches, messages, aggregationUnit, retryKey) {
       let delivered = 0;
       const errors: string[] = [];
       // P0-7a: unit を付けると LINE が unit 別の開封/クリック統計を保持する（後付け不可）。
@@ -227,7 +256,11 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         try {
           const res = await fetch("https://api.line.me/v2/bot/message/multicast", {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...authHeader },
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeader,
+              ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
+            },
             body: JSON.stringify({ to: batch, messages, ...unitPayload }),
           });
           if (res.ok) {
@@ -250,7 +283,7 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
       };
     },
 
-    async broadcast(messages, estimatedRecipients, _aggregationUnit) {
+    async broadcast(messages, estimatedRecipients, _aggregationUnit, retryKey) {
       // ⚠ LINE 仕様: broadcast は customAggregationUnits（unit 別統計）に**非対応**。
       //   よって unit は送信ペイロードに付けない（付けても無効なため）。第3引数 _aggregationUnit は
       //   LineSender インターフェースの対称性のために残すが broadcast では使用しない。
@@ -259,7 +292,12 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
       try {
         const res = await fetch("https://api.line.me/v2/bot/message/broadcast", {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeader,
+            // 再試行キー（N-08）: 同一予約の再試行で LINE 側が重複を弾ける最後の防御。
+            ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
+          },
           body: JSON.stringify({ messages }),
         });
         if (res.ok) {
@@ -317,18 +355,20 @@ export function createRecordingSender(
     kind: "multicast" | "broadcast";
     recipients: number;
     aggregationUnit?: string;
+    retryKey?: string;
   }>;
 } {
   const calls: Array<{
     kind: "multicast" | "broadcast";
     recipients: number;
     aggregationUnit?: string;
+    retryKey?: string;
   }> = [];
   return {
     calls,
-    async multicast(batches, _messages, aggregationUnit) {
+    async multicast(batches, _messages, aggregationUnit, retryKey) {
       const count = batches.reduce((s, b) => s + b.length, 0);
-      calls.push({ kind: "multicast", recipients: count, aggregationUnit });
+      calls.push({ kind: "multicast", recipients: count, aggregationUnit, retryKey });
       return {
         ok: outcome?.ok ?? true,
         deliveredRecipients: outcome?.deliveredRecipients ?? count,
@@ -336,13 +376,19 @@ export function createRecordingSender(
         error: outcome?.error,
       };
     },
-    async broadcast(_messages, estimatedRecipients, aggregationUnit) {
-      calls.push({ kind: "broadcast", recipients: estimatedRecipients, aggregationUnit });
+    async broadcast(_messages, estimatedRecipients, aggregationUnit, retryKey) {
+      calls.push({
+        kind: "broadcast",
+        recipients: estimatedRecipients,
+        aggregationUnit,
+        retryKey,
+      });
       return {
         ok: outcome?.ok ?? true,
         deliveredRecipients: outcome?.deliveredRecipients ?? estimatedRecipients,
         partial: outcome?.partial ?? false,
         error: outcome?.error,
+        requestId: outcome?.requestId,
       };
     },
   };

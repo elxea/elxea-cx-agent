@@ -162,7 +162,14 @@ it("scheduled ハンドラの delivery 分岐が配信ランナーを呼ばな�
   const branchEnd = rest.indexOf('if (cronKind === "stats")');
   assertTrue(branchEnd > 0, "delivery 分岐の終端が特定できない");
   const branch = rest.slice(0, branchEnd);
-  for (const banned of ["runOnDemandDelivery", "runDelivery", "pinDeliveryApproval"]) {
+  // 2026-09-22: 全件送る口（runOnDemandDelivery / runDelivery）はコードから削除した。
+  // 名前を禁止語に残すのは「復活したら落ちる」ラチェットとして意味があるため。
+  for (const banned of [
+    "runOnDemandDelivery",
+    "runDelivery",
+    "runSendOneDelivery",
+    "pinDeliveryApproval",
+  ]) {
     assertTrue(
       !branch.includes(banned),
       `cron の delivery 分岐が ${banned} を呼んでいる（自動配信が復活している）`,
@@ -171,18 +178,37 @@ it("scheduled ハンドラの delivery 分岐が配信ランナーを呼ばな�
   assertTrue(branch.includes("return"), "delivery 分岐は return で抜けること（sync へ落とさない）");
 });
 
-it("配信ランナーはオンデマンド API からのみ呼ばれる（scheduled 内に呼び出しが無い）", () => {
+it("配信ランナーは 1 件指定 API からのみ呼ばれる（scheduled 内に呼び出しが無い）", () => {
   const schedIdx = INDEX_SRC.indexOf("scheduled: async (");
   assertTrue(schedIdx >= 0, "scheduled ハンドラが見つからない");
   const scheduledBody = INDEX_SRC.slice(schedIdx);
+  for (const banned of ["runOnDemandDelivery(", "runSendOneDelivery("]) {
+    assertTrue(
+      !scheduledBody.includes(banned),
+      `scheduled ハンドラ内から配信ランナー（${banned}）が呼ばれている`,
+    );
+  }
+  // 一方で HTTP 側（scheduled より前）には 1 件指定 API の呼び出しが存在すること。
   assertTrue(
-    !scheduledBody.includes("runOnDemandDelivery("),
-    "scheduled ハンドラ内から配信ランナーが呼ばれている",
+    INDEX_SRC.slice(0, schedIdx).includes("runSendOneDelivery(c.env"),
+    "1 件指定 API から配信ランナーが呼ばれていない",
   );
-  // 一方で HTTP 側（scheduled より前）には run API の呼び出しが存在すること。
+});
+
+it("全件送る口が復活していない（ルートと関数名の両方で固定・2026-09-22）", () => {
+  for (const banned of [
+    '"/api/delivery/run"',
+    "runOnDemandDelivery",
+    "runDeliveryOnce",
+  ]) {
+    assertTrue(
+      !INDEX_SRC.includes(banned),
+      `全件送る口が復活している: ${banned}（プラン v6.2 §4-2 の 1 / §7-5）`,
+    );
+  }
   assertTrue(
-    INDEX_SRC.slice(0, schedIdx).includes("runOnDemandDelivery(c.env)"),
-    "オンデマンド API から配信ランナーが呼ばれていない",
+    INDEX_SRC.includes('app.post("/api/delivery/send-one"'),
+    "1 件指定の送信口が存在しない",
   );
 });
 

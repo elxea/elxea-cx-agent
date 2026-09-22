@@ -155,6 +155,29 @@ export type NotionRequest = (
   body?: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
 
+/**
+ * Notion REST の非 2xx を表す明示エラー（HTTP ステータスを保持する）。
+ *
+ * なぜ必要か: 承認確認では「解決できて不一致（=無効）」と「一時的に解決できない
+ * （=保留して再試行）」を取り違えてはならない（失敗シナリオ N-03 / S-02）。
+ * ステータスを落とすと 429 / 5xx を「不一致」と誤読して承認を殺してしまう。
+ * message は従来形式（`Notion API error <status>: <body>`）を保つ（既存の文言依存を壊さない）。
+ */
+export class NotionHttpError extends Error {
+  constructor(
+    readonly status: number,
+    body: string,
+  ) {
+    super(`Notion API error ${status}: ${body}`);
+    this.name = "NotionHttpError";
+  }
+}
+
+/** 一時失敗（保留して再試行すべき）か。429 と 5xx のみ true。 */
+export function isRetryableNotionStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
 /** 実 Notion REST 実装（2022-06-28・knowledge.ts と同一方針）。 */
 export function createNotionRequest(env: Env): NotionRequest {
   return async (path, method, body) => {
@@ -168,7 +191,7 @@ export function createNotionRequest(env: Env): NotionRequest {
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
-      throw new Error(`Notion API error ${res.status}: ${await res.text()}`);
+      throw new NotionHttpError(res.status, await res.text().catch(() => "unknown"));
     }
     return (await res.json()) as Record<string, unknown>;
   };
@@ -265,50 +288,11 @@ export function normalizeDeliveryPage(page: {
 // ---------------------------------------------------------------------------
 
 /**
- * 送信候補を取得する: Status=Approved AND 送信済み != true。
- *
- * ⚠ 2026-08-22（完全オンデマンド化・Setaka 指示）: **配信予定日時の条件を外した**。
- *   以前は `配信予定日時 <= now` を AND していたが、配信は cron の自動発火ではなく
- *   `POST /api/delivery/run` を明示的に叩いたときにだけ走るようになったため、
- *   「承認済み＝送る準備ができている」を送信条件にする。予定日時が未来でも空でも拾う。
- *   予定日時（P.scheduled）は運用者の記録用メモとして残るだけで、送信判定には使わない。
+ * ⚠ 全件走査（Status=Approved の行をまとめて拾う `queryApprovedDeliveries`）は
+ *   2026-09-22 に **削除した**。配信は `POST /api/delivery/send-one` の 1 件指定のみで走り、
+ *   対象は呼び出しが渡す pageId だけ（`fetchDeliveryPage`）。互換の再追加をしないこと
+ *   （プラン v6.2 §4-2 の 1 / §7-5「全件送る方式には戻さない」）。
  */
-export async function queryApprovedDeliveries(
-  request: NotionRequest,
-  dbId: string = DEFAULT_DELIVERY_DB_ID,
-): Promise<DeliveryPage[]> {
-  const P = DELIVERY_PROPS;
-  const pages: DeliveryPage[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const body: Record<string, unknown> = {
-      page_size: 100,
-      filter: {
-        and: [
-          { property: P.status, select: { equals: "Approved" } },
-          { property: P.sent, checkbox: { equals: false } },
-        ],
-      },
-    };
-    if (cursor) body.start_cursor = cursor;
-
-    const data = (await request(`/databases/${dbId}/query`, "POST", body)) as {
-      results: Array<{
-        id: string;
-        last_edited_time?: string;
-        properties: Record<string, RawProp>;
-      }>;
-      has_more: boolean;
-      next_cursor?: string;
-    };
-
-    for (const r of data.results) pages.push(normalizeDeliveryPage(r));
-    cursor = data.has_more ? data.next_cursor : undefined;
-  } while (cursor);
-
-  return pages;
-}
 
 /** Status=Sending のページを取得（reaper 用）。 */
 export async function querySendingDeliveries(
@@ -380,14 +364,73 @@ export async function pinApproval(
   request: NotionRequest,
   pageId: string,
   contentHash: string,
+  /**
+   * 承認時点の配信対象人数（スナップショット・N-12）。「通数見積」に書く。
+   * 送信直前の実測がこの値より許容（+10%）を超えて増えていたら送らない。
+   */
+  approvedAudienceCount?: number,
 ): Promise<void> {
   const P = DELIVERY_PROPS;
-  await request(`/pages/${pageId}`, "PATCH", {
-    properties: {
-      [P.contentHash]: { rich_text: [{ text: { content: contentHash } }] },
-      [P.status]: { select: { name: "Approved" } },
-    },
-  });
+  const properties: Record<string, unknown> = {
+    [P.contentHash]: { rich_text: [{ text: { content: contentHash } }] },
+    [P.status]: { select: { name: "Approved" } },
+  };
+  if (typeof approvedAudienceCount === "number") {
+    properties[P.estimate] = { number: approvedAudienceCount };
+  }
+  await request(`/pages/${pageId}`, "PATCH", { properties });
+}
+
+// ---------------------------------------------------------------------------
+// All Tasks 判定行（承認確認・読み取りのみ）
+// ---------------------------------------------------------------------------
+
+/** All Tasks 側で承認の意思表示を置くプロパティ名（Notion 実スキーマ・日本語）。 */
+export const APPROVAL_TASK_PROPS = {
+  judgment: "判定",
+} as const;
+
+/**
+ * All Tasks の判定行を読む（判定 / 最終編集者 / 最終編集時刻だけ）。
+ * 書き込みは一切しない（承認確定後に機械が判定行を触ると最終編集者が変わるため）。
+ */
+export async function fetchApprovalTask(
+  request: NotionRequest,
+  taskPageId: string,
+): Promise<{
+  judgment: string | null;
+  lastEditedById: string | null;
+  lastEditedTime: string | null;
+}> {
+  const data = (await request(`/pages/${taskPageId}`, "GET")) as {
+    last_edited_time?: string;
+    last_edited_by?: { id?: string };
+    properties?: Record<string, RawProp>;
+  };
+  const props = data.properties ?? {};
+  return {
+    judgment: selectName(props[APPROVAL_TASK_PROPS.judgment]),
+    lastEditedById: data.last_edited_by?.id ?? null,
+    lastEditedTime: data.last_edited_time ?? null,
+  };
+}
+
+/**
+ * Notion user id からメールを引く（`GET /v1/users/<id>` の `person.email`）。
+ *
+ * ⚠ integration に **ユーザー情報の読み取り capability** が無いと `person.email` は
+ *   返らない（null になる）。その場合は「メール空」として無効に倒れる（永久に不一致で
+ *   止まる）ので、疎通確認の必須項目として docs/deploy-runbook.md に記した。
+ */
+export async function fetchNotionUserEmail(
+  request: NotionRequest,
+  userId: string,
+): Promise<string | null> {
+  const data = (await request(`/users/${userId}`, "GET")) as {
+    person?: { email?: string };
+  };
+  const email = data.person?.email;
+  return typeof email === "string" && email.length > 0 ? email : null;
 }
 
 /** 単一ページを取得して正規化する（承認 pin で現在値を読むのに使う）。 */
@@ -415,6 +458,27 @@ export async function clearDeliveryError(
   await request(`/pages/${pageId}`, "PATCH", {
     properties: {
       [DELIVERY_PROPS.errorDetail]: { rich_text: [] },
+    },
+  });
+}
+
+/**
+ * 「エラー詳細」に理由を書く（Status は変えない）。
+ *
+ * 送信が止まったときに **黙って止まらない** ための記録（プラン v6.2 §7-4）。
+ * 承認確認で落ちた場合は Status を機械が動かさない（Setaka 以外が判定行・配信行を
+ * 書き換えると承認の照合そのものが壊れるため）。理由だけを残す。
+ */
+export async function writeDeliveryError(
+  request: NotionRequest,
+  pageId: string,
+  reason: string,
+): Promise<void> {
+  await request(`/pages/${pageId}`, "PATCH", {
+    properties: {
+      [DELIVERY_PROPS.errorDetail]: {
+        rich_text: [{ text: { content: reason.slice(0, 1900) } }],
+      },
     },
   });
 }

@@ -35,11 +35,11 @@ import { runLinkageReconcile } from "./lib/linkage-reconcile";
 import { runStage2Parity } from "./lib/cdp/stage2-parity";
 import { runStage4Parity } from "./lib/cdp/stage4-parity";
 import {
-  runDelivery,
-  runOnDemandDelivery,
+  runSendOneDelivery,
   compareSegmentTargets,
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
+import { httpStatusFor, type SendOneRequest } from "./lib/delivery-send-one";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
 import { runBroadcastRecipientReconcile } from "./lib/broadcast-reconcile";
 import { runDormantReengagement } from "./lib/dormant-reengagement";
@@ -54,8 +54,8 @@ import {
 /**
  * 配信の起動経路（2026-08-22 完全オンデマンド化・Setaka 指示）。
  *
- * 一斉配信は **cron から発火しない**。`POST /api/delivery/run` を明示的に叩いたときだけ、
- * 承認 pin 前処理 → runDelivery が走る（runOnDemandDelivery）。
+ * 一斉配信は **cron から発火しない**。`POST /api/delivery/send-one` を明示的に叩いたときだけ、
+ * 承認 pin は `POST /api/delivery/approve`、送信は `POST /api/delivery/send-one`（1 件指定）。
  * 旧「15分毎 cron が承認済み・予定時刻到来の行を拾って自動送信」は廃止した
  * （wrangler.toml の crons からも削除済み。scheduled 側にも no-op ガードを残してある）。
  *
@@ -141,6 +141,16 @@ export type Env = {
   LINE_BROADCAST_ESTIMATED_RECIPIENTS_TEST?: string;
   /** Notion 配信コンテンツ DB の database_id（未設定は既定 ID）。 */
   NOTION_DELIVERY_DB_ID?: string;
+  /**
+   * 承認者（Setaka）の照合メール。1 件指定送信が All Tasks 判定行の最終編集者と突き合わせる。
+   *
+   * ⚠ **既定値を持たない**（未設定なら送信不可 = fail-closed）。複数アカウントを許さず
+   *   設定 1 か所に 1 件だけ置く（失敗シナリオ N-05 / プラン v6.2 §7-6）。
+   *   既定は CIRCL 側のアドレス。別アカウント（elxea ワークスペース等）での承認は無効。
+   * ⚠ Notion 接続に **ユーザー情報の読み取り capability** が必要（`users/<id>.person.email`）。
+   *   無いとメールが空になり永久に不一致で止まる（docs/deploy-runbook.md の疎通確認項目）。
+   */
+  DELIVERY_OWNER_EMAIL?: string;
   /**
    * 社内テスト配信(allowlist)の宛先 LINE user ID（カンマ区切り）。
    * 未設定/空は allowlist 配信を fail-closed（対象0 → 送信不可）。PII のためコード非記載。
@@ -700,23 +710,41 @@ app.post("/api/delivery/approve", async (c) => {
   if (!result.ok) {
     return c.json({ status: "rejected", reason: result.reason }, 422);
   }
-  return c.json({ status: "approved", pinned: true });
+  // 承認スナップショットを呼び出し側（Mac 側の準備段）へ返す。判定タスクに載せる値で、
+  // 送信直前の「対象人数が +10% 超に増えていないか」(N-12) の基準になる。
+  return c.json({
+    status: "approved",
+    pinned: true,
+    approvedAudienceCount: result.approvedAudienceCount,
+    audienceKey: result.audienceKey,
+  });
 });
 
 /**
- * 配信 オンデマンド実行 API（T8 → 2026-08-22 に **唯一の配信起動経路** になった）。
- * Bearer(SYNC_API_SECRET) 必須・fail-closed。冪等性は台帳 claim 経路で担保。
+ * 配信 1 件指定送信 API（段1-A・2026-09-22）。
  *
- * これを叩いたときにだけ配信が走る（cron の自動配信は廃止）。処理内容:
- *   phase 1: Status=Approved かつ未送信の行を承認 pin（画像R2化・ハッシュ凍結）
- *   phase 2: runDelivery（承認者独立性・ハッシュ照合・通数台帳 claim・宛先解決の各ガードを通した行を実送信）
- * ⚠ 配信予定日時は送信条件ではない（Approved なら未来でも空でも送る）。
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。**指定された 1 行だけを送る**。
+ * 旧「全件送る口」`POST /api/delivery/send-one`（Approved を全件走査）は削除した。互換残置しない
+ * （プラン v6.2 §4-2 の 1。全件送る方式には戻さず、成り立たないなら止めて相談する = §7-5）。
  *
- * 結果は **同期で返す**（旧実装は waitUntil で投げっぱなしだったため「回したのに送られたか
- * 分からない」状態だった）。オンデマンドが唯一の経路になった以上、実行者がその場で
- * 「何行スキャンし・何行送り・何行落ちたか」を確認できることを配線の要件とする。
+ * body:
+ *   {
+ *     pageId: "<配信DBの行 id>",
+ *     approvalRef: {
+ *       taskPageId: "<All Tasks 判定行 id>",
+ *       approvedEditorEmail: "<承認を初めて観測した時点の最終編集者>",
+ *       approvedEditedTime: "<同時点の last_edited_time>",
+ *       approvedAudienceCount: <同時点の配信対象人数>
+ *     },
+ *     reservationId: "<予約 ID・冪等キー>"
+ *   }
+ *
+ * 応答は同期 JSON（回したのに送られたか分からない状態を作らない）:
+ *   { status, code, reason, sentCount, audienceCount, ledgerRemaining, reservationId }
+ *   200 = sent（同一 reservationId の二重到達も再送せず 200）/ 409 = 既に送信中・送信済
+ *   422 = 承認や指紋・人数の確認で拒否 / 503 = 一時失敗（保留・再試行可）/ 502 = 送信失敗
  */
-app.post("/api/delivery/run", async (c) => {
+app.post("/api/delivery/send-one", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
     !c.env.SYNC_API_SECRET ||
@@ -725,62 +753,28 @@ app.post("/api/delivery/run", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // 送信の前に、前回までの配信の「実際に何通届いたか」で台帳を正しておく（best-effort・GET のみ）。
-  //   理由: 台帳は無料枠(200通/月)を守る唯一の権威で、走行合計がズレたまま次を送ると
-  //   残枠の判断そのものがズレる。直前に実数へ寄せておけば、このあとのガードが正しい数で判定できる。
-  //   ⚠ これは補正であって送信可否ではない。失敗しても配信は止めない（ログだけ残す）。
-  const reconcile = await runBroadcastRecipientReconcile(c.env).catch((err) => ({
-    ok: false as const,
-    reason: err instanceof Error ? err.message : String(err),
-    scanned: 0,
-    corrected: 0,
-    details: [] as never[],
+  const body = await c.req
+    .json<SendOneRequest>()
+    .catch(() => ({}) as SendOneRequest);
+
+  const result = await runSendOneDelivery(c.env, body).catch((err) => ({
+    status: "retryable" as const,
+    code: "row_fetch_failed" as const,
+    reason: `想定外の例外（保留・再試行可）: ${err instanceof Error ? err.message : String(err)}`,
+    sentCount: 0,
+    audienceCount: 0,
+    ledgerRemaining: null,
+    reservationId: typeof body?.reservationId === "string" ? body.reservationId : "",
   }));
-  console.log(
-    "Pre-delivery ledger reconcile:",
-    JSON.stringify({
-      ok: reconcile.ok,
-      reason: reconcile.reason,
-      scanned: reconcile.scanned,
-      corrected: reconcile.corrected,
-    }),
-  );
-
-  const result = await runOnDemandDelivery(c.env).catch((err) => ({
-    error: err instanceof Error ? err.message : String(err),
-  }));
-
-  if ("error" in result) {
-    console.error("On-demand LINE delivery threw:", result.error);
-    return c.json({ status: "delivery_failed", reason: result.error }, 500);
-  }
-
-  const summary = {
-    pinned: result.pinPass.filter((p) => p.action === "pinned").length,
-    alreadyPinned: result.pinPass.filter((p) => p.action === "already_pinned").length,
-    resetFailed: result.pinPass.filter((p) => p.action === "reset_failed").length,
-    scanned: result.run.scanned,
-    sent: result.run.processed.filter((p) => p.disposition === "sent").length,
-    recipients: result.run.processed
-      .filter((p) => p.disposition === "sent")
-      .reduce((sum, p) => sum + p.recipients, 0),
-    skipped: result.run.processed.filter((p) => p.disposition === "skipped").length,
-    reset: result.run.processed.filter((p) => p.disposition === "reset").length,
-    failed: result.run.processed.filter((p) => p.disposition === "failed").length,
-    reaper: result.run.reaper.length,
-  };
-  console.log("On-demand LINE delivery completed:", JSON.stringify(summary));
 
   // 送信先 OA を明示して返す（「どこへ送ったか」の確認点）。
-  return c.json({
-    status: "delivery_completed",
-    targetEnv: c.env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test",
-    summary,
-    // 行単位の内訳（PII 非記載: pageId / タイトル / 対象種別 / 通数 / 理由のみ）。
-    processed: result.run.processed,
-    pinPass: result.pinPass,
-    reaper: result.run.reaper,
-  });
+  return c.json(
+    {
+      ...result,
+      targetEnv: c.env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test",
+    },
+    httpStatusFor(result),
+  );
 });
 
 /**
@@ -966,7 +960,7 @@ app.post("/api/marche-activation/run", async (c) => {
  * - scheduled: Cron Trigger による定期処理
  *   - 毎日 18:00 UTC (03:00 JST): ナレッジ同期 + karte 照合 + Shopify Metafield 同期
  *   - 毎日 19:00 UTC (04:00 JST・staging 限定): 配信計測 fetch + 休眠検知 + マルシェ活性化
- *   ⚠ 一斉配信は cron に **無い**（2026-08-22 完全オンデマンド化）。POST /api/delivery/run のみ。
+ *   ⚠ 一斉配信は cron に **無い**（2026-08-22 完全オンデマンド化）。POST /api/delivery/send-one のみ。
  */
 export default {
   fetch: app.fetch,
@@ -993,10 +987,10 @@ export default {
     //   (1) crons に "*/15 * * * *" が誤って復活しても、配信は発火しない（no-op で return）
     //   (2) classifyCron が "delivery" を返すことで、日次同期（sync 安全網）への誤爆も防ぐ
     //       ＝「15分毎にナレッジ同期が走る」事故を起こさない
-    // 配信の唯一の起動経路は `POST /api/delivery/run`（オンデマンド）。
+    // 配信の唯一の起動経路は `POST /api/delivery/send-one`（オンデマンド）。
     if (cronKind === "delivery") {
       console.warn(
-        "[delivery] cron tick ignored: 一斉配信はオンデマンド専用（POST /api/delivery/run）。" +
+        "[delivery] cron tick ignored: 一斉配信はオンデマンド専用（POST /api/delivery/send-one）。" +
           `pattern=${event.cron} — この警告が出る場合は wrangler.toml の crons に配信パターンが残っている。`,
       );
       return;
