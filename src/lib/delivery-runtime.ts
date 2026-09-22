@@ -37,7 +37,10 @@ import {
   createSupabaseLedgerStore,
   createLineConsumptionFetcher,
   checkLedgerTables,
+  computeRemaining,
   currentLineMonth,
+  DEFAULT_SAFETY_HEADROOM,
+  FREE_TIER_CAP,
   LEDGER_TABLE,
 } from "./message-ledger";
 import {
@@ -102,10 +105,12 @@ import {
 } from "./delivery-send-one";
 import {
   RetryableApprovalError,
+  parseApprovalJudgments,
   type ApprovalTaskPort,
 } from "./delivery-approval-task";
 import {
   audienceFingerprintKey,
+  audienceLabel,
   parseAudience,
   type AudienceSpec,
 } from "./delivery-audience";
@@ -723,6 +728,156 @@ function rejectedResponse(
     audienceCount: 0,
     ledgerRemaining: null,
     reservationId,
+    requestId: null,
+  };
+}
+
+/** 残枠照会（`GET /api/delivery/ledger`）の応答。読み取り専用・副作用ゼロ。 */
+export interface DeliveryLedgerQueryResult {
+  /** 残枠と対象人数の **両方** が取れたか。false のときは呼び出し側が fail-closed で止まる。 */
+  ok: boolean;
+  /** 会計対象月（LINE 基準 JST の "YYYY-MM"）。 */
+  monthKey: string;
+  /** 無料枠の上限（通/月）。 */
+  freeTierCap: number;
+  /** 安全マージン（実効上限 = freeTierCap - headroom）。 */
+  headroom: number;
+  /** 判定時点の残枠。取得不能は null。 */
+  ledgerRemaining: number | null;
+  /** 指定行の配信対象人数（実測）。解決不能は null。 */
+  audienceCount: number | null;
+  /** 配信対象の表示ラベル（「全員」「社内」ペルソナ名）。解釈不能は null。 */
+  audience: string | null;
+  /** 送信先 OA の env（どちらの残枠を見たかの確認点）。 */
+  targetEnv: "prod" | "test";
+  /** ok=false の理由（平易な日本語・PII 非記載）。 */
+  reason?: string;
+}
+
+/**
+ * 残枠と対象人数を読むだけの照会（段1-B2 契約・2026-09-22）。
+ *
+ * なぜ要るか: Mac 側パイプラインの準備段（prepare）が「この行を送ると無料枠に収まるか」を
+ *   **送る前に** 判断する必要がある。これが無いと prepare は残枠不明のまま fail-closed で止まる。
+ *
+ * ⚠ 副作用ゼロ。配信 DB にも台帳にも書かない。外部 I/O は読み取りのみ
+ *   （Notion GET / LINE consumption GET / LINE followers GET / Supabase SELECT）。
+ *   LINE 送信系 API（broadcast / multicast / push / narrowcast / reply）には一切触れない。
+ *
+ * 人数の解決は送信経路と同じ resolver を通す（prepare と送信で数え方がずれないようにする）。
+ * 残枠の計算も送信経路と同じ `computeRemaining`（台帳の確定消費が主・consumption API は
+ * 厳しい方向のみ）を使う。ここだけ別式にすると「照会は通ったのに送信で落ちる」が起きる。
+ */
+export async function runDeliveryLedgerQuery(
+  env: Env,
+  pageId: string,
+): Promise<DeliveryLedgerQueryResult> {
+  const monthKey = currentLineMonth();
+  const targetEnv: "prod" | "test" = env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test";
+  const base: DeliveryLedgerQueryResult = {
+    ok: false,
+    monthKey,
+    freeTierCap: FREE_TIER_CAP,
+    headroom: DEFAULT_SAFETY_HEADROOM,
+    ledgerRemaining: null,
+    audienceCount: null,
+    audience: null,
+    targetEnv,
+  };
+
+  if (typeof pageId !== "string" || pageId.trim().length === 0) {
+    return { ...base, reason: "pageId が空（配信DBの行 id が必要）" };
+  }
+
+  const supabase = createSupabaseClient(env);
+
+  // preflight: 台帳テーブル（不在なら残枠を語れない）。
+  const ledgerErr = await checkLedgerTables(supabase);
+  if (ledgerErr) {
+    return { ...base, reason: `preflight 失敗: ${ledgerErr}` };
+  }
+
+  // preflight: 配信 DB の env 分離（照会でも cross-env の読みを塞ぐ）。
+  try {
+    resolveDeliveryDbId(env);
+  } catch (e) {
+    if (e instanceof DeliveryDbConfigError) {
+      return { ...base, reason: `配信 DB 解決 fail-closed: ${e.message}` };
+    }
+    throw e;
+  }
+
+  // preflight: 送信先 OA（token 未設定は残枠も人数も引けない）。
+  let channel;
+  try {
+    channel = resolveDeliveryChannel(env);
+  } catch (err) {
+    return {
+      ...base,
+      reason: `送信先チャネル未設定: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const reasons: string[] = [];
+
+  // (1) 残枠。台帳の確定消費（主）と consumption API（照合）の厳しい方を採る。
+  let ledgerRemaining: number | null = null;
+  try {
+    const ledger = createSupabaseLedgerStore(supabase);
+    const confirmed = await ledger.confirmedConsumption(monthKey);
+    const snapshot = await consumptionFetcherForToken(channel.accessToken)();
+    if (!snapshot.ok || typeof snapshot.totalUsage !== "number") {
+      reasons.push("LINE の当月消費が取得できない（残枠を判定できない）");
+    } else {
+      ledgerRemaining = computeRemaining(
+        FREE_TIER_CAP,
+        DEFAULT_SAFETY_HEADROOM,
+        confirmed,
+        snapshot.totalUsage,
+      );
+    }
+  } catch (err) {
+    reasons.push(
+      `通数台帳を読めない: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // (2) 指定行の配信対象人数（送信経路と同じ解決）。
+  let audienceCount: number | null = null;
+  let audienceName: string | null = null;
+  try {
+    const request = createNotionRequest(env);
+    const page = await fetchDeliveryPage(request, pageId);
+    const audience = parseAudience(page.audienceRaw);
+    if (!audience) {
+      reasons.push("配信対象が空/未知（fail-closed）");
+    } else {
+      audienceName = audienceLabel(audience);
+      const targetDeps = buildTargetDeps(
+        env,
+        channel.accessToken,
+        channel.fallbackFriendCount,
+      );
+      const targets = await resolveTargetsWithCdp(env, supabase, audience, targetDeps);
+      if (targets.kind === "error") {
+        reasons.push(`対象解決失敗: ${targets.reason}`);
+      } else {
+        audienceCount = targets.estimatedRecipients;
+      }
+    }
+  } catch (err) {
+    reasons.push(
+      `配信DB行を読めない: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return {
+    ...base,
+    ok: ledgerRemaining !== null && audienceCount !== null,
+    ledgerRemaining,
+    audienceCount,
+    audience: audienceName,
+    reason: reasons.length > 0 ? reasons.join(" / ") : undefined,
   };
 }
 
@@ -795,6 +950,8 @@ export async function runSendOneDelivery(
     approvalTask: createApprovalTaskPort(env),
     // 照合に使うメールは設定 1 か所に 1 件だけ（既定値を持たない・N-05）。
     ownerEmail: env.DELIVERY_OWNER_EMAIL,
+    // 承認と見なす判定オプション名の完全一致 allowlist（差し替え口は env 1 か所・QA MID-5）。
+    approvalJudgments: parseApprovalJudgments(env.DELIVERY_APPROVAL_JUDGMENTS),
     resolveTargets: (audience: AudienceSpec) =>
       resolveTargetsWithCdp(env, supabase, audience, targetDeps),
     sender: createLineSender(channel),

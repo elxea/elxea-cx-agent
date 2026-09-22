@@ -179,6 +179,15 @@ export interface SendOutcome {
    *   （multicast の計測は customAggregationUnits 経由で別に取れる）。
    */
   requestId?: string;
+  /**
+   * LINE が「同じ再試行キーの要求は既に受理済み」(409 + `x-line-accepted-request-id`) を
+   * 返したことで成功と判定した場合に true。
+   *
+   * なぜ持つか: この経路は **実際には届いている**。ok=true と同じ扱いだが、記録上は
+   *   「今回の呼び出しで送った」のではなく「前回の呼び出しが受理されていた」ので、
+   *   理由文に出して運用者が経緯を追えるようにする（N-15 = 記録の正しさ）。
+   */
+  alreadyAccepted?: boolean;
 }
 
 /**
@@ -234,6 +243,53 @@ export async function deterministicRetryKey(reservationId: string): Promise<stri
 }
 
 /**
+ * LINE が「その再試行キーの要求は既に受理済み」と返すときのヘッダ名。
+ *
+ * LINE 仕様（Retrying an API request）: 同じ `X-Line-Retry-Key` の要求が既に受理されていると
+ * **409 Conflict + `x-line-accepted-request-id`** が返る。この 409 は失敗ではなく
+ * 「前回の要求が通っている」という意味で、**メッセージは既に届いている**。
+ * 参照: https://developers.line.biz/en/docs/messaging-api/retrying-api-request/
+ */
+export const LINE_ACCEPTED_REQUEST_ID_HEADER = "x-line-accepted-request-id";
+
+/**
+ * 応答が「再試行キーで受理済み」を意味するなら、その request id を返す（純粋・判定のみ）。
+ *
+ * 409 でない / ヘッダが無い・空なら null（= 本当の失敗として扱う）。
+ * 409 をひとくちに失敗にすると、初回がタイムアウトして実は受理されていた場合に
+ * 「届いたのに Failed」と記録してしまう（QA HIGH-1）。
+ */
+export function acceptedRequestIdFrom(res: {
+  status: number;
+  headers: { get(name: string): string | null };
+}): string | null {
+  if (res.status !== 409) return null;
+  const v = res.headers.get(LINE_ACCEPTED_REQUEST_ID_HEADER);
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * multicast のバッチ別 `X-Line-Retry-Key` を **決定的に** 導出する（純粋・QA MID-1）。
+ *
+ * なぜバッチごとに変えるか: LINE 仕様は「同じ再試行キーで本文・宛先を変えてはならない」。
+ * 1 配信が 500 人ずつ複数リクエストに割れるとき全バッチに同じ鍵を付けると、
+ * 2 バッチ目以降は「同じ鍵の別要求」として 409 で弾かれ **後半の人に届かない**。
+ *
+ * 決定性は維持する（再試行で鍵が変わると重複判定が効かない）。
+ * batchIndex=0 は基底キーそのままにする。理由は 2 つ:
+ *   - 1 バッチで収まる現行運用（数十人規模）では鍵が本改修の前後で変わらない
+ *     = 改修デプロイを挟んだ再試行でも LINE 側の重複判定が効き続ける
+ *   - broadcast（常に 1 リクエスト）と同じ鍵の導出規則になり、追跡しやすい
+ */
+export async function batchRetryKey(
+  baseRetryKey: string,
+  batchIndex: number,
+): Promise<string> {
+  if (batchIndex <= 0) return baseRetryKey;
+  return deterministicRetryKey(`${baseRetryKey}:${batchIndex}`);
+}
+
+/**
  * 実送信 sender（fetch で LINE API を叩く）。
  *
  * ⚠ 本タスクでは発火しない。オーケストレータは feature flag off で noopSender を使う。
@@ -251,24 +307,36 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
       const unitPayload = aggregationUnit
         ? { customAggregationUnits: [aggregationUnit] }
         : {};
-      for (const batch of batches) {
+      let alreadyAccepted = false;
+      // バッチごとに鍵を変える（同一鍵で宛先を変えると 2 バッチ目以降が 409 で落ちる）。
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
         if (batch.length === 0) continue;
+        const batchKey = retryKey ? await batchRetryKey(retryKey, i) : undefined;
         try {
           const res = await fetch("https://api.line.me/v2/bot/message/multicast", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               ...authHeader,
-              ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
+              ...(batchKey ? { "X-Line-Retry-Key": batchKey } : {}),
             },
             body: JSON.stringify({ to: batch, messages, ...unitPayload }),
           });
           if (res.ok) {
             delivered += batch.length;
-          } else {
-            const t = await res.text().catch(() => "unknown");
-            errors.push(`multicast ${res.status}: ${t.slice(0, 120)}`);
+            continue;
           }
+          // 409 + x-line-accepted-request-id = このバッチは前回の要求で既に受理済み
+          //   （= 届いている）。失敗として数えると「届いたのに Failed」になる。
+          const accepted = acceptedRequestIdFrom(res);
+          if (accepted) {
+            delivered += batch.length;
+            alreadyAccepted = true;
+            continue;
+          }
+          const t = await res.text().catch(() => "unknown");
+          errors.push(`multicast ${res.status}: ${t.slice(0, 120)}`);
         } catch (err) {
           errors.push(
             `multicast exception: ${err instanceof Error ? err.message : String(err)}`,
@@ -280,6 +348,7 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         deliveredRecipients: delivered,
         partial: errors.length > 0 && delivered > 0,
         error: errors.length > 0 ? errors.join("; ") : undefined,
+        alreadyAccepted: alreadyAccepted || undefined,
       };
     },
 
@@ -308,6 +377,20 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
             deliveredRecipients: estimatedRecipients,
             partial: false,
             requestId,
+          };
+        }
+        // 409 + x-line-accepted-request-id = 同じ再試行キーの要求が既に受理済み。
+        //   初回が fetch 例外（タイムアウト等）で結果不明だったが実は通っていた場合に
+        //   必ずここに来る。**届いているので成功として扱い**、request id はこの値を採る
+        //   （後から実配信数を引く鍵はこれしか残らない）。QA HIGH-1。
+        const accepted = acceptedRequestIdFrom(res);
+        if (accepted) {
+          return {
+            ok: true,
+            deliveredRecipients: estimatedRecipients,
+            partial: false,
+            requestId: accepted,
+            alreadyAccepted: true,
           };
         }
         const t = await res.text().catch(() => "unknown");
@@ -389,6 +472,7 @@ export function createRecordingSender(
         partial: outcome?.partial ?? false,
         error: outcome?.error,
         requestId: outcome?.requestId,
+        alreadyAccepted: outcome?.alreadyAccepted,
       };
     },
   };

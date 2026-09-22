@@ -81,24 +81,59 @@ export class RetryableApprovalError extends Error {
 }
 
 /**
- * 「判定」の値が承認系かを判定する（純粋・fail-closed）。
+ * 承認と見なす「判定」select の **実オプション名**（完全一致 allowlist・正本はここ 1 か所）。
  *
- * 否定・保留系（未承認 / 非承認 / 却下 / 差し戻し / 修正して / 保留）を **先に** 弾く。
- * 「未承認」は文字列として「承認」を含むため、含有判定だけでは通ってしまう。
+ * なぜ allowlist か: 以前は `startsWith("承認")` の許容判定だったため、否定リストに無い
+ * 将来のオプション（例「承認前確認」「承認予定」）が**承認として通ってしまう**。
+ * select に選択肢が 1 つ増えるだけで配信が飛ぶ構造は、取り消しの効かない処理には置けない
+ * （QA MID-5）。よって「一致したものだけ通す」に倒す。
+ *
+ * 差し替え方: All Tasks の「判定」select の実オプション名は段1-B で実地確認する。
+ * ずれていたらこの定数 1 か所（または env `DELIVERY_APPROVAL_JUDGMENTS`）を直す。
+ * 値は NFKC 正規化 + 空白除去した形で書く（比較側と同じ正規化を通す）。
  */
-export function isApprovedJudgment(raw: string | null | undefined): boolean {
-  if (typeof raw !== "string") return false;
-  const v = raw.normalize("NFKC").replace(/[\s　]/g, "");
+export const DEFAULT_APPROVAL_JUDGMENTS: readonly string[] = ["承認"];
+
+/** 判定値の比較用正規化（NFKC + 全角/半角空白除去）。allowlist 側にも同じものを通す。 */
+function normalizeJudgment(raw: string | null | undefined): string {
+  if (typeof raw !== "string") return "";
+  return raw.normalize("NFKC").replace(/[\s　]/g, "");
+}
+
+/**
+ * env `DELIVERY_APPROVAL_JUDGMENTS`（カンマ区切り）を allowlist として読む。
+ * 未設定・空・実質空は既定（`DEFAULT_APPROVAL_JUDGMENTS`）に倒す = 緩めない方向の既定。
+ */
+export function parseApprovalJudgments(raw: string | null | undefined): string[] {
+  const parsed = (typeof raw === "string" ? raw.split(",") : [])
+    .map((v) => normalizeJudgment(v))
+    .filter((v) => v.length > 0);
+  return parsed.length > 0 ? parsed : [...DEFAULT_APPROVAL_JUDGMENTS];
+}
+
+/**
+ * 「判定」の値が承認かを判定する（純粋・fail-closed）。
+ *
+ * **完全一致 allowlist**。allowlist に無い値はすべて承認ではない（未知の新オプションは通さない）。
+ * 否定・保留系（未承認 / 却下 / 差し戻し / 保留 …）は allowlist に無いので自動的に落ちる。
+ * さらに二重の安全として、allowlist が誤って否定語を含むよう設定された場合でも弾く
+ * （env の設定ミスが「未承認で配信」に化けないようにする）。
+ */
+export function isApprovedJudgment(
+  raw: string | null | undefined,
+  allowlist: readonly string[] = DEFAULT_APPROVAL_JUDGMENTS,
+): boolean {
+  const v = normalizeJudgment(raw);
   if (v.length === 0) return false;
+  // 設定ミスの保険: 否定・保留系の語を含む値は allowlist にあっても承認にしない。
   if (
-    /(未|非|不|要)承認|承認(しない|不要|不可|待ち|取消|取り消)|却下|差し戻|修正|保留|reject|pending|hold/i.test(
+    /(未|非|不|要)承認|承認(しない|不要|不可|待ち|取消|取り消|前|予定)|却下|差し戻|修正|保留|reject|pending|hold/i.test(
       v,
     )
   ) {
     return false;
   }
-  if (/^approved?$/i.test(v)) return true;
-  return v.startsWith("承認");
+  return allowlist.some((allowed) => normalizeJudgment(allowed) === v);
 }
 
 /** メール比較の正規化（前後空白除去 + 小文字化。ドメインの大小を無視する）。 */
@@ -115,6 +150,7 @@ export async function verifyApprovalTask(
   port: ApprovalTaskPort,
   ref: ApprovalRef,
   ownerEmail: string | undefined,
+  approvalJudgments: readonly string[] = DEFAULT_APPROVAL_JUDGMENTS,
 ): Promise<ApprovalTaskVerdict> {
   const owner = normalizeEmail(ownerEmail);
   if (owner.length === 0) {
@@ -142,7 +178,7 @@ export async function verifyApprovalTask(
     throw err;
   }
 
-  if (!isApprovedJudgment(task.judgment)) {
+  if (!isApprovedJudgment(task.judgment, approvalJudgments)) {
     return {
       ok: false,
       retryable: false,

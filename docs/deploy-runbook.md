@@ -347,6 +347,21 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 >   （判定=承認 / 最終編集者 = `DELIVERY_OWNER_EMAIL`）→ ③ 指紋照合（**本文・画像・配信対象**）
 >   → ④ 対象人数が承認時比 +10% 以内かつ台帳残枠内 → ⑤ claim-before-send（原子的に「送信中」を取る）
 >   → ⑥ `X-Line-Retry-Key` 付きで送信（同一実行内で最大 2 回再試行）→ ⑦ **成功応答を確認してのみ Sent**。
+>
+> **2026-09-22 追加（段1-A2 / QA 指摘の是正 + Mac 側パイプライン契約）**
+>
+> - **「届いたのに Failed」をなくした**: LINE が 409 + `x-line-accepted-request-id` を返すのは
+>   「その再試行キーの要求は既に受理済み」（= **届いている**）の意。これを成功として扱い、
+>   request id にその値を採る。初回がタイムアウトして実は通っていた場合に必ずここを通る。
+> - **multicast はバッチごとに再試行キーを変える**（LINE 仕様「同じ鍵で宛先を変えない」。
+>   500 人を超えたときに後半が 409 で弾かれて届かない事故を塞ぐ）。決定性は維持。
+> - **承認判定は実オプション名の完全一致 allowlist**（既定 `承認`）。「承認」で始まる別オプション
+>   （例「承認前確認」）は通さない。差し替えは secret `DELIVERY_APPROVAL_JUDGMENTS`（カンマ区切り）1 か所。
+> - **応答に `requestId` を追加**（送れたときだけ・それ以外は `null`）。
+> - **残枠照会の口を新設**: `GET /api/delivery/ledger?pageId=&env=`（読み取り専用・副作用ゼロ）。
+>   旧・全件走査の口の冒頭にあった**台帳の自動補正は再配線しない**（Boss 判断）。
+>   代わりに **Mac 側の準備段が `POST /api/broadcast-recipients/reconcile` を叩いてから照会する**
+>   （下記「送る前に残枠を照会する」）。送信 API の側は台帳を自動で直さない。
 > - **`Status=Approved` は人が入れる欄ではなくなった**（承認の置き場は All Tasks の判定行 1 か所）。
 >   誰かが手で Approved にしても、判定行の承認確認と指紋照合を通らない限り送られない。
 > - 承認 pin（`POST /api/delivery/approve`）は**配信対象も指紋に含め**、承認時の対象人数を
@@ -374,103 +389,162 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
-| **配信の起動方法** | **完全オンデマンド（2026-08-22）**。cronの自動配信は**廃止**。`POST /api/delivery/send-one` を叩いたときにだけ配信が走る | Setaka指示（「承認済みが勝手に飛ぶより、回したときに送るほうが安全」）。`wrangler.toml` のcronsに配信パターンなし + `src/index.ts` のdelivery分岐はno-op（`tests/unit/cron-routing.test.ts` が両方を機械検知） |
-| **配信予定日時** | **送信条件ではない**。Approvedなら未来でも空でも送られる。記録用のメモとして残るだけ | `queryApprovedDeliveries()` のフィルタからdate条件を削除 / `processPage()` の日時ゲートを廃止（`delivery-time.ts` ごと削除） |
+| **配信の起動方法** | **1 件指定のオンデマンドのみ（2026-09-22 / 段1-A）**。cronの自動配信は**廃止**、全件走査の口も**撤去**。`POST /api/delivery/send-one` に `pageId` を渡したときだけ、**その 1 行だけ**が送られる | Setaka指示（「承認済みが勝手に飛ぶより、回したときに送るほうが安全」）。`wrangler.toml` のcronsに配信パターンなし + `src/index.ts` のdelivery分岐はno-op（`tests/unit/cron-routing.test.ts` が両方を機械検知） |
+| **配信予定日時** | **送信条件ではない**。運用者の記録用メモとして残るだけ（空でも構わない） | 送信判定（`sendOneDelivery()`・`delivery-send-one.ts`）はこの値を一切参照しない（`delivery-time.ts` ごと削除済み） |
 | 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。オンデマンド実行で拾われた行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
 | prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
 | 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
 | **全員配信の受信者数** | **送信のたびに LINE から実測（2026-09-11）**。env 固定値は**フォールバック専用**へ降格 | `line-audience-size.ts`（`GET /v2/bot/followers/ids`・ページング + 安全弁・userId は数えるだけで保持しない）。実測不能時のみ `LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` を使い、**どちらを使ったかはログの `[delivery] friend-count basis=` に出る**。実測も env も無ければ従来どおり fail-closed（送信不可） |
-| **送信後の台帳補正** | **有効（2026-09-11）**。送信時に控えた `X-Line-Request-Id` を鍵に実配信数で `line_message_ledger.recipients` を直す | `broadcast-reconcile.ts`（`GET /v2/bot/insight/message/event?requestId=` の `overview.delivered`）。`POST /api/delivery/send-one` の冒頭で自動実行 + 手動は `POST /api/broadcast-recipients/reconcile`。**GET のみ・送信系 API 非接触**。LINE の統計は**送信から 14 日**で消えるため、それを過ぎた行は見積のまま残す。要 migration 055 |
+| **送信後の台帳補正** | **手動トリガのみ（2026-09-22 訂正）**。送信時に控えた `X-Line-Request-Id` を鍵に実配信数で `line_message_ledger.recipients` を直す。**送信 API の側では自動実行しない** | `broadcast-reconcile.ts`（`GET /v2/bot/insight/message/event?requestId=` の `overview.delivered`）。口は `POST /api/broadcast-recipients/reconcile` **のみ**。旧・全件走査の口の冒頭にあった自動補正は、その口ごと撤去された（段1-A）。**呼ぶのは Mac 側パイプラインの準備段の責務**（下記「送る前に残枠を照会する」）。**GET のみ・送信系 API 非接触**。LINE の統計は**送信から 14 日**で消えるため、それを過ぎた行は見積のまま残す。要 migration 055 |
 
-#### ⚠ 最重要の運用ルール: 承認しただけでは送られない。「回した瞬間」に送られる
+#### ⚠ 最重要の運用ルール: 送られるのは「指定した 1 行」だけ
 
-**2026-08-22に (1) 実送信スイッチ `DELIVERY_SEND_ENABLED` を撤去し、(2) cronの自動配信を廃止した。**
-以後、配信が走るのは **`POST /api/delivery/send-one` を叩いた瞬間だけ**である。
-時刻が来ても、承認しただけでも、何も起きない。
+**2026-09-22（段1-A）に「全件送る口」を撤去した。** 以後、配信が走るのは
+**`POST /api/delivery/send-one` の body に `pageId` を書いて叩いた瞬間だけ**で、
+送られるのは **その 1 行だけ**である。時刻が来ても、承認しただけでも、何も起きない。
+他の行が一緒に飛ぶことは構造的に起こらない（配信 DB を走査するコードが存在しない）。
 
-オンデマンド実行時に送信されるのは次を **すべて** 満たす行（`queryApprovedDeliveries()` + `processPage()`）:
+その 1 行が送られるには、次を **すべて** 満たす必要がある（`sendOneDelivery()` の順序。
+1 つでも満たさなければ送らずに理由を返す = fail-closed）:
 
-1. `Status=Approved` かつ `送信済み=false`
-2. **承認者が存在する**（`承認者` 空は常に拒否。単独運用モードでも空は不可）
-3. **コンテンツハッシュが承認時と一致**（承認後に本文・画像を編集すると承認が自動リセットされる）
-4. 宛先が解決できる（`社内`=allowlist未設定、ペルソナ0件などはfail-closedでskip）
-5. **通数台帳claimに成功**（同一 `notion_page_id` × 月の二重送信を排他）+ 無料枠ガード内
+1. 配信 DB 行が `Status=Approved` かつ `送信済み=false`（`Sending` は二重送信防止で受け付けない）
+2. **All Tasks の判定行で承認が確認できる** — 判定が承認 allowlist に一致（既定 `承認`・完全一致）
+   かつ最終編集者のメールが `DELIVERY_OWNER_EMAIL` と一致
+3. **指紋が承認時と一致**（本文・画像・**配信対象**の 3 点。承認後にどれかを変えると不一致で止まる）
+4. 対象人数が承認時から **+10% 以内**、かつ当月の**無料枠の残りに収まる**
+5. **claim-before-send に成功**（同一 `notion_page_id` × 月の二重送信を DB の排他で拒否）
+6. `X-Line-Retry-Key` 付きで送信（同一実行内で最大 2 回再試行・鍵は予約 ID から決定的）
+7. **成功応答を確認してのみ `Sent`**（LINE が「その鍵は既に受理済み」= 409 を返した場合も
+   **届いているので `Sent`**。この場合の request id は `x-line-accepted-request-id` を採る）
 
-**`配信予定日時` は上のリストに入っていない。** これは意図的な仕様変更である（2026-08-22）。
-運用者が明示的に「配信して」と回した以上、Approvedの行は予定日時が未来でも空でも送る
-（「承認済み＝送る準備ができている」という意味付け）。予定日時プロパティ自体は
-**運用者の記録用メモとして残す**（いつ出す予定だったかの記録・空でも構わない）。
-コード上、送信判定はこの値を一切参照しない。
-
-> **運用ルール（守ること）**: `POST /api/delivery/send-one` を叩く前に、**配信DBの `Status=Approved` の行を
-> 必ず一覧で確認する**。そこに写っている行は「予定日時に関わらず全部その場で飛ぶ」。
-> 出したくない行が混じっていたら、先にDraftに戻してから回す。
+> **運用ルール（守ること）**: 叩く前に **body の `pageId` が送りたい行の id であること**を確認する。
+> 確認すべきは「Approved の一覧」ではなく **その 1 つの id** である（一覧に何が写っていても飛ばない）。
 > 練習は必ず **staging + テスト用DB + テストOA（@426vlcyb）** で行う（後述「テスト配信の手順」）。
 
-#### オンデマンド実行のしかた（唯一の配信起動経路）
+#### 送る前に残枠を照会する（`GET /api/delivery/ledger`）
+
+**送信 API は台帳を自動で直さない。** 旧・全件走査の口の冒頭にあった台帳の自動補正は、
+その口ごと撤去された（段1-A）。**代わりに、送る前に次の 2 つをこの順で叩く**
+（Mac 側パイプラインの準備段がこれを行う。手で送るときも同じ順序でやる）:
+
+```bash
+BASE=https://elxea-agent-staging.setaka-on.workers.dev   # 本番は https://elxea-agent.setaka-on.workers.dev
+SECRET=$SYNC_API_SECRET_STAGING                          # 本番は $SYNC_API_SECRET
+PAGE_ID=<配信DBの行 id>
+
+# 1. 台帳の後追い補正（見積で建てた通数を実数へ直す・GET のみ・送信系 API 非接触）
+curl -sS -X POST "$BASE/api/broadcast-recipients/reconcile" \
+  -H "Authorization: Bearer $SECRET" | jq .
+
+# 2. 残枠と対象人数の照会（読み取り専用・副作用ゼロ）
+curl -sS "$BASE/api/delivery/ledger?pageId=$PAGE_ID&env=staging" \
+  -H "Authorization: Bearer $SECRET" | jq .
+```
+
+補正（1）を先に叩く理由: 残枠の主判定は台帳の確定消費なので、見積のまま膨らんだ行が残っていると
+**残枠を実際より少なく見て送信が止まる**。補正してから照会すると、残枠が実態に一致する。
+
+照会（2）の応答:
+
+```json
+{
+  "ok": true,
+  "monthKey": "2026-09",
+  "freeTierCap": 200,
+  "headroom": 10,
+  "ledgerRemaining": 150,
+  "audienceCount": 79,
+  "audience": "全員",
+  "targetEnv": "test"
+}
+```
+
+- `ok` が `false` なら **送ってはいけない**（残枠か対象人数のどちらかが取れていない）。理由は `reason`。
+- 実効上限は `freeTierCap - headroom`（= 190 通/月）。`audienceCount > ledgerRemaining` なら送信は
+  `ledger_exhausted` で止まる。**照会の段階で分かるので、叩く前に気づける。**
+- `env` は **呼び出し側の思い込みと実物の突合せ**に使う（`prod` / `staging`。`staging` は `test` の別名）。
+  この Worker の送信先と食い違うと **400 で弾かれる**（staging の残枠を本番のものと取り違える事故を塞ぐ）。
+- 副作用ゼロ。配信 DB にも台帳にも書かず、Status も動かさない。外部 I/O は読み取りのみ。
+
+#### 1 件指定送信のしかた（唯一の配信起動経路）
 
 `SYNC_API_SECRET` によるBearer認証必須（未設定・不一致は401でfail-closed）。
-**結果は同期で返る**（旧実装は投げっぱなしで結果が分からなかった）。
+**結果は同期で返る**（回したのに送られたか分からない状態を作らない）。
 
 ```bash
 # --- staging（テストOA @426vlcyb 宛て・練習はこちら）---
-curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/run \
-  -H "Authorization: Bearer $SYNC_API_SECRET_STAGING" | jq .
+curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/send-one \
+  -H "Authorization: Bearer $SYNC_API_SECRET_STAGING" \
+  -H "Content-Type: application/json" \
+  -d '{"pageId":"<配信DBの行 id>","reservationId":"<予約 ID>","approvalRef":{"taskPageId":"<All Tasks 判定行 id>","approvedEditorEmail":"<承認者のメール>","approvedEditedTime":"<承認観測時の last_edited_time>","approvedAudienceCount":<承認時の対象人数>}}' | jq .
 
 # --- 本番（実顧客OA @307tzhkw 宛て・Tier 2 = Setaka承認が必要）---
 curl -sS -X POST https://elxea-agent.setaka-on.workers.dev/api/delivery/send-one \
   -H "Authorization: Bearer $SYNC_API_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"pageId":"<配信DBの行 id>","reservationId":"<予約 ID>","approvalRef":{"taskPageId":"<All Tasks 判定行 id>","approvedEditorEmail":"<承認者のメール>","approvedEditedTime":"<承認観測時の last_edited_time>","approvedAudienceCount":<承認時の対象人数>}}'
+  -d '{"pageId":"<配信DBの行 id>","reservationId":"<予約 ID>","approvalRef":{"taskPageId":"<All Tasks 判定行 id>","approvedEditorEmail":"<承認者のメール>","approvedEditedTime":"<承認観測時の last_edited_time>","approvedAudienceCount":<承認時の対象人数>}}' | jq .
 ```
 
-レスポンス例（`targetEnv` で送信先OAを、`summary` で実績を確認する）:
+`approvalRef` の 4 つの値は **`POST /api/delivery/approve`（承認 pin）の応答と判定行から取る**。
+手で組み立てるものではない（Mac 側パイプラインの準備段が固定する）。
+`reservationId` は 1 回の送信意図につき 1 つ。同じ値で再度叩いても **再送されない**（冪等）。
+
+レスポンス例（`targetEnv` で送信先OAを、`status` / `sentCount` で実績を確認する）:
 
 ```json
 {
-  "status": "delivery_completed",
-  "targetEnv": "test",
-  "summary": {
-    "pinned": 1, "alreadyPinned": 0, "resetFailed": 0,
-    "scanned": 1, "sent": 1, "recipients": 4,
-    "skipped": 0, "reset": 0, "failed": 0, "reaper": 0
-  },
-  "processed": [ { "pageId": "...", "disposition": "sent", "reason": "Sent: 実送信 4/4", "recipients": 4 } ]
+  "status": "sent",
+  "code": "sent",
+  "reason": "Sent: 実送信 79/79（1 回試行）",
+  "sentCount": 79,
+  "audienceCount": 79,
+  "ledgerRemaining": 150,
+  "reservationId": "<予約 ID>",
+  "requestId": "<X-Line-Request-Id>",
+  "targetEnv": "test"
 }
 ```
 
-- `sent` / `recipients` が実送信の実績。`0` なら1通も出ていない。
-- `skipped` / `reset` / `failed` の理由は `processed[]` の `reason` に平易な日本語で入る。
+- `status` / `code` が結果。`sent` 以外は 1 通も出ていない（`sentCount` も 0）。
+- `requestId` は **送れたときだけ入る**（それ以外は `null`）。送信 1 回を指す鍵で、
+  後から実配信数を引くのに使う。**この場で受け取らないと二度と手に入らない**
+  （LINE の統計は送信から 14 日で消える）。multicast と冪等応答は鍵が定まらないため `null`。
+- `reason` に「受理済み」と出たら、**前回の呼び出しが既に届いていた**という意味
+  （409 + `x-line-accepted-request-id`）。重複送信は起きていない。
 - **`targetEnv` が `prod` のレスポンスは実顧客に届いたことを意味する。** 練習時は必ず `test` を確認する。
-- 対象0件でも正常終了する（`scanned: 0` / HTTP 200）。疎通確認はこれで安全にできる。
+- HTTP: `200` = 送った（同一 `reservationId` の二重到達も再送せず 200）/ `400` = 要求不正 /
+  `409` = 既に送信中・送信済 / `422` = 承認・指紋・人数の確認で拒否 /
+  `502` = 送信失敗 / `503` = 一時失敗（保留・再試行可）。
 
 ##### 実際に送られたかを確認する方法（すべて読み取りのみ）
 
 0. **実行時のレスポンスを読む**（いちばん速い）: 上の `POST /api/delivery/send-one` は結果を同期で返す。
-   `summary.sent` / `summary.recipients` がその実行で実際に送った件数・通数。
+   `status` / `sentCount` がその実行の結果。`code` に止まった理由が入る。
 1. **配信DBを見る**: 実行後に `Sent` / `送信済み=true` になっていれば送信済み。
-   `Failed` / `PartialFail` ならエラー詳細を読む。`Approved` のまま残っている場合は上の2〜5の
-   いずれかで止まっている（`エラー詳細` 欄かログを見る）。
+   `Failed` / `PartialFail` なら `エラー詳細` を読む。`Approved` のまま残っている場合は
+   上の関門 1〜5 のいずれかで止まっている（`エラー詳細` 欄かログを見る）。
 2. **通数台帳を見る**: `line_message_ledger` の当月行の `recipients` の増分が実送信通数。
+   送信後に `POST /api/broadcast-recipients/reconcile` を叩くと実数へ直る。
 3. **Workerログを読む**（読み取り専用・実行と並行して流す）:
 
 ```bash
 # 本番 Worker のログを追う（--env を付けない = 本番 elxea-agent）。読み取り専用。
 pnpm exec wrangler tail --format pretty
-# run を叩いたときだけ次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
-#   [delivery] env=prod(@307tzhkw) month=2026-08 scanned=1 processed=1 sent=1 recipients=48 \
-#     skipped=0 reset=0 failed=0 reaper=0
-# sent / recipients が実送信の実績。skipped / reset / failed は理由が後続行に出る:
-#   [delivery] sent page=<id> audience=全員 recipients=48 reason=Sent: 実送信 48/48
+# send-one を叩いたときだけ次の 1 行が出る（env ラベルで対象 OA も同時に確認できる）:
+#   [delivery] send-one env=prod(@307tzhkw) month=2026-09 page=<id> reservation=<id> \
+#     status=sent code=sent sent=79 audience=79 remaining=150
+# status / sent が実送信の実績。status が sent 以外なら code に理由が入る。
+# 全員配信の人数の出所は別行に出る:
+#   [delivery] friend-count basis=measured count=79 pages=1
 #
-# ⚠ もし run を叩いていないのに [delivery] 行が出たら異常（自動配信が復活している）。
+# ⚠ send-one を叩いていないのに [delivery] send-one 行が出たら異常。
 #   併せて次の警告が出ていないか確認する（cron に配信パターンが残っている印）:
 #   [delivery] cron tick ignored: 一斉配信はオンデマンド専用（POST /api/delivery/send-one）。
 ```
 
-出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] ...")`、
+出力箇所は `src/lib/delivery-runtime.ts` の `console.log("[delivery] send-one ...")`、
 ラベル `prod(@307tzhkw)` / `test(@426vlcyb)` は `src/lib/delivery-channel.ts` が組み立てる。
 
 > **本番secretを調査目的で触らない**: 本番secretへの `put` / `delete` は事故（誤削除・誤投入）

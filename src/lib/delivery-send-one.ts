@@ -48,6 +48,7 @@ import type { DeliveryPage, DeliveryResult } from "./delivery-repository";
 import type { ResolvedTargets } from "./target-resolver";
 import {
   verifyApprovalTask,
+  DEFAULT_APPROVAL_JUDGMENTS,
   type ApprovalRef,
   type ApprovalTaskPort,
 } from "./delivery-approval-task";
@@ -112,6 +113,17 @@ export interface SendOneResponse {
   /** 判定時点の台帳残枠（取得前・取得不能は null）。 */
   ledgerRemaining: number | null;
   reservationId: string;
+  /**
+   * LINE が返した送信 1 回ぶんの鍵（`X-Line-Request-Id` / 再試行キー受理済みなら
+   * `x-line-accepted-request-id`）。**送れたときだけ入る。それ以外は null**。
+   *
+   * なぜ応答に載せるか: 呼び出し側（Mac 側パイプライン）が実配信数の後追い照合に使う鍵で、
+   *   この場で受け取らないと二度と手に入らない（LINE の統計は送信から 14 日で消える）。
+   * multicast は 1 配信が複数リクエストに割れて鍵が 1 本に定まらないため null
+   *   （multicast の計測は customAggregationUnits 経由で別に取る）。
+   * 同一 reservationId の二重到達（冪等応答）も、前回の鍵は保持していないため null。
+   */
+  requestId: string | null;
 }
 
 /** claim の結果（原子的に取れたか / 既存がいるか）。 */
@@ -171,6 +183,12 @@ export interface SendOneDeps {
   approvalTask: ApprovalTaskPort;
   /** 照合に使う唯一のメール（env DELIVERY_OWNER_EMAIL。既定なし＝未設定は送信不可）。 */
   ownerEmail?: string;
+  /**
+   * 承認と見なす「判定」select の実オプション名（完全一致 allowlist）。
+   * 未指定は `DEFAULT_APPROVAL_JUDGMENTS`（= ["承認"]）。差し替えは env
+   * `DELIVERY_APPROVAL_JUDGMENTS` 1 か所（runtime が parse して渡す）。
+   */
+  approvalJudgments?: readonly string[];
   resolveTargets(audience: AudienceSpec): Promise<ResolvedTargets>;
   sender: LineSender;
   now(): Date;
@@ -272,6 +290,7 @@ function reject(
     audienceCount: extra?.audienceCount ?? 0,
     ledgerRemaining: extra?.ledgerRemaining ?? null,
     reservationId,
+    requestId: null,
   };
 }
 
@@ -288,6 +307,7 @@ function retryable(
     audienceCount: 0,
     ledgerRemaining: null,
     reservationId,
+    requestId: null,
   };
 }
 
@@ -341,6 +361,7 @@ export async function sendOneDelivery(
     deps.approvalTask,
     req.approvalRef,
     deps.ownerEmail,
+    deps.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS,
   );
   if (!verdict.ok) {
     if (verdict.retryable) {
@@ -490,6 +511,7 @@ export async function sendOneDelivery(
         audienceCount,
         ledgerRemaining,
         reservationId,
+        requestId: null,
       };
     }
     if (claim.sameReservation && claim.sendState === "failed") {
@@ -501,6 +523,7 @@ export async function sendOneDelivery(
         audienceCount,
         ledgerRemaining,
         reservationId,
+        requestId: null,
       };
     }
     if (claim.sameReservation) {
@@ -584,6 +607,7 @@ export async function sendOneDelivery(
       audienceCount,
       ledgerRemaining,
       reservationId,
+      requestId: outcome.requestId ?? null,
     };
   }
 
@@ -606,14 +630,19 @@ export async function sendOneDelivery(
     errorDetail: outcome.partial ? outcome.error : undefined,
   });
 
+  // 「前回の要求が受理済みだった」ことは記録に残す（今回送ったのではない）。
+  const acceptedNote = outcome.alreadyAccepted
+    ? "・再試行キーで受理済みと判明（重複送信なし）"
+    : "";
   return {
     status: "sent",
     code: "sent",
-    reason: `${status}: 実送信 ${delivered}/${audienceCount}（${attempts} 回試行）`,
+    reason: `${status}: 実送信 ${delivered}/${audienceCount}（${attempts} 回試行${acceptedNote}）`,
     sentCount: delivered,
     audienceCount,
     ledgerRemaining,
     reservationId,
+    requestId: outcome.requestId ?? null,
   };
 }
 

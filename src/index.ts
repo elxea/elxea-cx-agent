@@ -36,6 +36,7 @@ import { runStage2Parity } from "./lib/cdp/stage2-parity";
 import { runStage4Parity } from "./lib/cdp/stage4-parity";
 import {
   runSendOneDelivery,
+  runDeliveryLedgerQuery,
   compareSegmentTargets,
   pinDeliveryApproval,
 } from "./lib/delivery-runtime";
@@ -59,8 +60,9 @@ import {
  * 旧「15分毎 cron が承認済み・予定時刻到来の行を拾って自動送信」は廃止した
  * （wrangler.toml の crons からも削除済み。scheduled 側にも no-op ガードを残してある）。
  *
- * 送りたくない行は Notion で Status を Draft に戻す。そもそも run を叩かなければ何も送られない
- * （docs/deploy-runbook.md「配信を止める」節）。
+ * そもそも `POST /api/delivery/send-one` を叩かなければ何も送られない。叩いたときも
+ * **body で指定した 1 行だけ**が対象で、他の行は構造的に送れない（走査しない）。
+ * 止め方は docs/deploy-runbook.md「配信を止める」節。
  */
 // ⚠ 非 export（module-level const）。Workers ランタイムはエントリの named export を
 //   すべてハンドラとして解釈するため、文字列の named export は起動を壊す
@@ -151,6 +153,14 @@ export type Env = {
    *   無いとメールが空になり永久に不一致で止まる（docs/deploy-runbook.md の疎通確認項目）。
    */
   DELIVERY_OWNER_EMAIL?: string;
+  /**
+   * 承認と見なす All Tasks「判定」select の実オプション名（カンマ区切り・完全一致 allowlist）。
+   *
+   * 未設定は既定 `["承認"]`（`delivery-approval-task.ts` の `DEFAULT_APPROVAL_JUDGMENTS`）。
+   * allowlist に無い値はすべて承認ではない（select に選択肢が増えても勝手に通らない）。
+   * 実オプション名がずれていたらここ 1 か所を直す（段1-B の実地確認結果を反映する差し替え口）。
+   */
+  DELIVERY_APPROVAL_JUDGMENTS?: string;
   /**
    * 社内テスト配信(allowlist)の宛先 LINE user ID（カンマ区切り）。
    * 未設定/空は allowlist 配信を fail-closed（対象0 → 送信不可）。PII のためコード非記載。
@@ -724,7 +734,7 @@ app.post("/api/delivery/approve", async (c) => {
  * 配信 1 件指定送信 API（段1-A・2026-09-22）。
  *
  * Bearer(SYNC_API_SECRET) 必須・fail-closed。**指定された 1 行だけを送る**。
- * 旧「全件送る口」`POST /api/delivery/send-one`（Approved を全件走査）は削除した。互換残置しない
+ * 旧「全件送る口」`POST /api/delivery/run`（Approved を全件走査）は削除した。互換残置しない
  * （プラン v6.2 §4-2 の 1。全件送る方式には戻さず、成り立たないなら止めて相談する = §7-5）。
  *
  * body:
@@ -740,7 +750,10 @@ app.post("/api/delivery/approve", async (c) => {
  *   }
  *
  * 応答は同期 JSON（回したのに送られたか分からない状態を作らない）:
- *   { status, code, reason, sentCount, audienceCount, ledgerRemaining, reservationId }
+ *   { status, code, reason, sentCount, audienceCount, ledgerRemaining, reservationId,
+ *     requestId, targetEnv }
+ *   requestId = LINE が返した送信 1 回ぶんの鍵。**送れたときだけ入り、それ以外は null**
+ *   （後追いで実配信数を引く鍵。multicast と冪等応答は鍵が定まらないため null）。
  *   200 = sent（同一 reservationId の二重到達も再送せず 200）/ 409 = 既に送信中・送信済
  *   422 = 承認や指紋・人数の確認で拒否 / 503 = 一時失敗（保留・再試行可）/ 502 = 送信失敗
  */
@@ -765,6 +778,7 @@ app.post("/api/delivery/send-one", async (c) => {
     audienceCount: 0,
     ledgerRemaining: null,
     reservationId: typeof body?.reservationId === "string" ? body.reservationId : "",
+    requestId: null,
   }));
 
   // 送信先 OA を明示して返す（「どこへ送ったか」の確認点）。
@@ -775,6 +789,77 @@ app.post("/api/delivery/send-one", async (c) => {
     },
     httpStatusFor(result),
   );
+});
+
+/**
+ * 残枠照会 API（読み取り専用・段1-B2 契約・2026-09-22）。
+ *
+ * `GET /api/delivery/ledger?pageId=<配信DBの行 id>&env=<prod|staging>`
+ * Bearer(SYNC_API_SECRET) 必須・fail-closed。
+ *
+ * 何をするか: 指定行の**配信対象人数**と**当月の残枠**を、送信経路と同じ数え方で返すだけ。
+ *   Mac 側パイプラインの準備段（prepare）が「送る前に無料枠に収まるか」を判断するために使う。
+ *
+ * ⚠ 副作用ゼロ。配信 DB にも通数台帳にも**書かない**。Status も動かさない。
+ *   外部 I/O は読み取りのみ（Notion GET / LINE consumption GET / LINE followers GET /
+ *   Supabase SELECT）。LINE 送信系 API には一切触れない（実配信ゼロ）。
+ *
+ * `env` は**呼び出し側の思い込みと実物の突合せ**に使う（必須ではないが渡すのが既定）。
+ *   この Worker の送信先 OA と食い違ったら 400 で弾く。staging の残枠を本番のものと
+ *   取り違えて判断する事故を、照会の段階で塞ぐ。`staging` は `test` の別名として受ける。
+ *
+ * 応答: `{ ok, monthKey, freeTierCap, headroom, ledgerRemaining, audienceCount, audience,
+ *          targetEnv, reason? }`
+ *   200 = 照会できた（`ok=false` でも 200。残枠か人数が取れなかった理由は `reason`）
+ *   400 = pageId 不正 / env 不一致 / 401 = 認証失敗。
+ */
+app.get("/api/delivery/ledger", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const pageId = (c.req.query("pageId") ?? "").trim();
+  if (pageId.length === 0) {
+    return c.json({ error: "pageId is required" }, 400);
+  }
+
+  const targetEnv = c.env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test";
+  const requestedEnvRaw = (c.req.query("env") ?? "").trim().toLowerCase();
+  if (requestedEnvRaw.length > 0) {
+    // staging は test の別名（送信先 OA のラベルは test / prod の 2 値）。
+    const requested = requestedEnvRaw === "staging" ? "test" : requestedEnvRaw;
+    if (requested !== "prod" && requested !== "test") {
+      return c.json({ error: "env must be prod or staging" }, 400);
+    }
+    if (requested !== targetEnv) {
+      return c.json(
+        {
+          error: "env mismatch",
+          reason: `この Worker の送信先は ${targetEnv}。指定された ${requestedEnvRaw} の残枠は返せない（取り違え防止）`,
+          targetEnv,
+        },
+        400,
+      );
+    }
+  }
+
+  const result = await runDeliveryLedgerQuery(c.env, pageId).catch((err) => ({
+    ok: false as const,
+    monthKey: "",
+    freeTierCap: 0,
+    headroom: 0,
+    ledgerRemaining: null,
+    audienceCount: null,
+    audience: null,
+    targetEnv,
+    reason: `想定外の例外: ${err instanceof Error ? err.message : String(err)}`,
+  }));
+
+  return c.json(result);
 });
 
 /**

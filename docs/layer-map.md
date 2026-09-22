@@ -8,7 +8,7 @@
 npx tsx scripts/layer-map.ts --out docs/layer-map.md
 ```
 
-生成日時: 2026-08-22 08:10 UTC
+生成日時: 2026-09-22 11:28 UTC
 
 ## 層の定義
 
@@ -22,10 +22,11 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 
 | 層 | ファイル数 |
 |---|---|
-| CDP | 35 |
+| CDP | 52 |
 | CX | 42 |
 | shared | 11 |
-| **合計** | **88** |
+| unknown | 8 |
+| **合計** | **113** |
 
 ## 境界が曖昧なファイル（明示宣言あり）
 
@@ -34,15 +35,44 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 | ファイル | 層 | 宣言の理由 |
 |---|---|---|
 | `src/lib/account-link.ts` | CDP | CDP 所有。LINE 上の導線に見えるが、本体は「同一人物である」と確定させる名寄せ処理。 連携成立の条件は本人性の判定であり、体験（誘い文句・ボタン）とは切り離して扱う。 セキュリティ境界（SEC-1: email 等値では連携させない）もこの層が守る。 |
+| `src/lib/cdp/canonical.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/delivery-history.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/event-vocabulary.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/events-gateway.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/profile-intake.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/segment-resolver.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/shipment.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/stage2-parity.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/stage4-parity.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/subject-links.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/subject-profile.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/subjects.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/taste-axes.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/lib/cdp/ulid.ts` | CDP | ファイル内の @layer 宣言による |
 | `src/lib/customer-karte.ts` | CDP | CDP 所有。顧客カルテという事実の読み出し口（I/O シーム）であり、 複数の CX 面（会話・次の一杯）へ同じ源から供給する役割を持つ。見せ方は持たない （提示は my-karte＝CX 側）。 |
 | `src/lib/delivery-audience.ts` | CDP | CDP 所有。日本語ラベルと内部ペルソナ enum の対応は「顧客をどう区切るか」という データ側の語彙定義であり、配信文面（CX）とは独立に決まる。ここを変えると顧客の分類が 変わるため、CX の都合で書き換えない。 |
+| `src/routes/cdp-delivery.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/routes/cdp-export.ts` | CDP | ファイル内の @layer 宣言による |
+| `src/routes/events.ts` | CDP | ファイル内の @layer 宣言による |
 | `src/routes/identity.ts` | CDP | CDP 所有。src/routes 配下は既定では CX（チャネルの入口）だが、この経路だけは 例外で、やっていることは本人同定と会話履歴の統合＝名寄せそのもの。 誤って CX 扱いにすると「文言の都合で名寄せ条件を触る」事故につながるため CDP を明示する。 |
 | `src/agent/system-prompt.ts` | CX | CX 所有・CDP を読む。この文言は会話の振る舞いを決める体験側の資産であり、 所有は CX にある。CDP が持つ事実（カルテ・嗜好・購買）は personalization-context 経由で 読み込んで文脈に載せるが、ここから CDP のデータを書き換えることはしない。 よって「CDP の都合でこの文面を変える」のは越境であり、変更は CX 側の判断で行う。 |
-| `src/lib/delivery-orchestrator.ts` | CX | CX 所有・CDP を読む。宛先集合（delivery-audience / target-resolver）と 通数台帳（message-ledger）は CDP に問い合わせるだけで、ここが決めるのは 「いつ・どの文面を・どのチャネルへ出すか」という体験側の判断。台帳の形は持たない。 |
 | `src/lib/my-karte.ts` | CX | CX 所有・CDP を読む。カルテの中身を保持するのは CDP（customer-karte）で、 ここが持つのは「その事実を人間の言葉でどう見せるか」だけ。数値・生スコアを出さない という判断は体験側の責務なので CX に置く。 |
 | `src/lib/next-cup.ts` | CX | CX 所有・CDP を読む。カルテ（persona / tasteProfile）と銘柄データを 受け取って「次に何を薦めるか」を決める提案ロジック。データは引数で渡される純粋関数で、 自分では読み書きしない（I/O は customer-karte 側＝CDP が担う）。 |
 | `src/lib/personalization-context.ts` | CX | CX 所有・CDP を読む。両層の接合点にあたる。CDP が持つ事実（ペルソナ・嗜好）を 受け取り、会話に載せてよい形の文へ変換する。どの事実を出してよいか（positive/neutral 限定）は 体験側の判断なので CX に置く。事実そのものの保持・更新はしない。 |
 | `src/lib/roji-survey-handler.ts` | CX | CX 所有・CDP へ書かせる。ここは LINE 上の対話進行（次に何を聞くか・何を返すか）を 受け持つ。答えの保存そのものは CDP（roji-survey-record）に委ね、ここは呼ぶだけ。 「返す前に器に入れる」という順序は体験の担保なので CX 側の判断として持つ。 |
+
+## 要対応: 未分類
+
+以下は規則にもアノテーションにも当たらなかった。`scripts/layer-map.ts` の `LIB_RULES` に 1 行足すか、当該ファイルに `@layer` を書くこと。
+
+- `src/lib/broadcast-reconcile.ts`
+- `src/lib/chat-session.ts`
+- `src/lib/clm-protocol.ts`
+- `src/lib/delivery-approval-task.ts`
+- `src/lib/delivery-send-one.ts`
+- `src/lib/line-audience-size.ts`
+- `src/lib/linkage-notify.ts`
+- `src/lib/linkage-reconcile.ts`
 
 ## CDP
 
@@ -53,6 +83,20 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 | `src/lib/account-link.ts` | 宣言: CDP 所有。LINE 上の導線に見えるが、本体は「同一人物である」と確定させる名寄せ処理。 連携成立の条件は本人性の判定であり、体験（誘い文句・ボタン）とは切り離して扱う。 セキュリティ境界（SEC-1: email 等値では連携させない）もこの層が守る。 | LINE Account Link（LINE 純正のアカウント連携）— linkToken 発行 / nonce 発行・消費 / 連携成立。 |
 | `src/lib/aggregation-unit.ts` | パス規則: 集計単位の定義 | 配信計測の集計単位（customAggregationUnit）生成 — P0-7a（後付け不可・次回配信までが締切）。 |
 | `src/lib/broadcast-stats.ts` | パス規則: 配信計測の実績データ | 配信計測 fetch ジョブ（P0-7b・後付け不可の計測基盤）。 |
+| `src/lib/cdp/canonical.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/delivery-history.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/event-vocabulary.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/events-gateway.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/profile-intake.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/segment-resolver.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/shipment.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/stage2-parity.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/stage4-parity.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/subject-links.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/subject-profile.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/subjects.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/taste-axes.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/lib/cdp/ulid.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
 | `src/lib/customer-karte.ts` | 宣言: CDP 所有。顧客カルテという事実の読み出し口（I/O シーム）であり、 複数の CX 面（会話・次の一杯）へ同じ源から供給する役割を持つ。見せ方は持たない （提示は my-karte＝CX 側）。 | 「次の一杯」選定用カルテ（persona / tasteProfile）のローダ（fail-safe・I/O シーム）。 |
 | `src/lib/customer-linkage.ts` | パス規則: 連携レコードの保持（名寄せの実体） | customer_linkages 連携行の upsert（案A: LIFF 連携の中心ギャップを埋める書き込み経路）。 |
 | `src/lib/delivery-audience.ts` | 宣言: CDP 所有。日本語ラベルと内部ペルソナ enum の対応は「顧客をどう区切るか」という データ側の語彙定義であり、配信文面（CX）とは独立に決まる。ここを変えると顧客の分類が 変わるため、CX の都合で書き換えない。 | 配信対象（audience）の日本語 ↔ enum 変換層（純粋・I/O なし）。 |
@@ -82,6 +126,9 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 | `src/lib/subscription.ts` | パス規則: 定期便の契約状態データ | 定期便（サブスク）判定モジュール（純粋・I/O なし）。 |
 | `src/lib/supabase.ts` | パス規則: データストア接続 | true の場合、channel フィルターを外して全チャネルの会話を取得する。 |
 | `src/lib/target-resolver.ts` | パス規則: 配信対象の解決（データ問い合わせ） | 対象解決の汎用化（T4）。 |
+| `src/routes/cdp-delivery.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/routes/cdp-export.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
+| `src/routes/events.ts` | 宣言: ファイル内の @layer 宣言による | @layer CDP |
 | `src/routes/identity.ts` | 宣言: CDP 所有。src/routes 配下は既定では CX（チャネルの入口）だが、この経路だけは 例外で、やっていることは本人同定と会話履歴の統合＝名寄せそのもの。 誤って CX 扱いにすると「文言の都合で名寄せ条件を触る」事故につながるため CDP を明示する。 | Identity Link Route -- POST /api/identity/link |
 | `src/sync/knowledge.ts` | パス規則: 外部（Shopify / ナレッジ）からのデータ取り込み | ナレッジ同期モジュール（Workers 互換）。 |
 | `src/sync/shopify-metafield.ts` | パス規則: 外部（Shopify / ナレッジ）からのデータ取り込み | Firestore -> Shopify Customer Metafield 同期レイヤー |
@@ -92,14 +139,13 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 
 | ファイル | 根拠 | 概要 |
 |---|---|---|
-| `src/agent/core.ts` | パス規則: 会話エージェント本体（応答の生成） | ストリーミング用コールバック型。 |
+| `src/agent/core.ts` | パス規則: 会話エージェント本体（応答の生成） | Anthropic クライアントを作る。 |
 | `src/agent/system-prompt.ts` | 宣言: CX 所有・CDP を読む。この文言は会話の振る舞いを決める体験側の資産であり、 所有は CX にある。CDP が持つ事実（カルテ・嗜好・購買）は personalization-context 経由で 読み込んで文脈に載せるが、ここから CDP のデータを書き換えることはしない。 よって「CDP の都合でこの文面を変える」のは越境であり、変更は CX 側の判断で行う。 | elxea Customer Agent の System Prompt。 |
 | `src/agent/tools.ts` | パス規則: 会話エージェント本体（応答の生成） | エージェントが使用できるツール定義。 |
 | `src/lib/brand-copy.ts` | パス規則: ブランド文言の SoT | ユーザー向けブランド文言の正本集約（single source of truth）。 |
 | `src/lib/brand-guard.ts` | パス規則: 文言のブランド適合チェック | brand-guard — ランタイム出力 egress の brand-fact ガード（runtime lint）。 |
 | `src/lib/broadcast-optout.ts` | パス規則: 配信停止の受け付け（対話） | 配信 opt-out（受け取り停止 / 再開）の実行 — UX レビュー指摘 #3。 |
 | `src/lib/broadcast-templates.ts` | パス規則: 配信文面のテンプレート | セグメント別配信メッセージテンプレート |
-| `src/lib/delivery-orchestrator.ts` | 宣言: CX 所有・CDP を読む。宛先集合（delivery-audience / target-resolver）と 通数台帳（message-ledger）は CDP に問い合わせるだけで、ここが決めるのは 「いつ・どの文面を・どのチャネルへ出すか」という体験側の判断。台帳の形は持たない。 | 配信オーケストレータ（T9）。 |
 | `src/lib/dormant-reengagement.ts` | パス規則: 休眠客への静かな一通 | 休眠検知＋「静かな一通」（ブロック3-B）— 送信ゲート付きの再エンゲージ機構。 |
 | `src/lib/feedback-quick-reply.ts` | パス規則: 感想収集の対話 UI | 会話フィードバック（👍/👎）Quick Reply の生成と提示頻度（監査 #5「常時付与 → 静か原則に整合」）。 |
 | `src/lib/flex-templates.ts` | パス規則: LINE Flex の見た目 | LINE Flex Message テンプレート。 |
@@ -130,6 +176,7 @@ npx tsx scripts/layer-map.ts --out docs/layer-map.md
 | `src/prober/regression-runner.ts` | パス規則: コンテンツ生成と応答品質の検査 | Regression Runner -- Weekly regression test execution |
 | `src/prober/response-evaluator.ts` | パス規則: コンテンツ生成と応答品質の検査 | Response Evaluator -- CX Agent response quality evaluation |
 | `src/prober/types.ts` | パス規則: コンテンツ生成と応答品質の検査 | Knowledge Prober -- Shared type definitions |
+| `src/routes/clm.ts` | パス規則: 外部からの受け口（チャネルの入口） | CLM Route — POST /v1/chat/completions（OpenAI 互換・SSE） |
 | `src/routes/line.ts` | パス規則: 外部からの受け口（チャネルの入口） | オンボーディング Quick Reply のトリガーテキスト（従来 3 択）は |
 | `src/routes/shopify-webhook.ts` | パス規則: 外部からの受け口（チャネルの入口） | Shopify 注文 webhook ハンドラ（受け口を作って待つ・稼働で即通電）。 |
 | `src/routes/survey.ts` | パス規則: 外部からの受け口（チャネルの入口） | Survey Route -- POST /api/survey |

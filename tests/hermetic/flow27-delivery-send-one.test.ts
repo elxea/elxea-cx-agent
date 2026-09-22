@@ -32,9 +32,22 @@ import {
 } from "../../src/lib/delivery-send-one";
 import { computeContentHash } from "../../src/lib/content-hash";
 import { audienceFingerprintKey, parseAudience } from "../../src/lib/delivery-audience";
-import { deterministicRetryKey, type SendOutcome } from "../../src/lib/line-messages";
-import { isApprovedJudgment } from "../../src/lib/delivery-approval-task";
+import {
+  acceptedRequestIdFrom,
+  batchRetryKey,
+  chunkForMulticast,
+  createLineSender,
+  deterministicRetryKey,
+  LINE_ACCEPTED_REQUEST_ID_HEADER,
+  type SendOutcome,
+} from "../../src/lib/line-messages";
+import {
+  DEFAULT_APPROVAL_JUDGMENTS,
+  isApprovedJudgment,
+  parseApprovalJudgments,
+} from "../../src/lib/delivery-approval-task";
 import { RetryableApprovalError } from "../../src/lib/delivery-approval-task";
+import type { DeliveryChannel } from "../../src/lib/delivery-channel";
 import type { DeliveryPage, DeliveryResult } from "../../src/lib/delivery-repository";
 
 const OWNER = "owner@example.test";
@@ -523,5 +536,246 @@ describe("1 件指定送信: 形式の検証（要求そのものが組み立て
     const res = await sendOneDelivery(deps, req);
     expect(res.status).toBe("retryable");
     expect(res.code).toBe("task_fetch_retryable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 実 sender（createLineSender）を通す検証のための fetch 差し替え
+//
+// ⚠ ネットワークへは出ない。globalThis.fetch を **このテストの中だけ** 差し替え、
+//   LINE の応答（成功 / 409 受理済み / 例外）を手で作って返す。
+//   差し替えは finally で必ず戻す（グローバルガードの afterEach も重ねて戻す）。
+// ---------------------------------------------------------------------------
+
+interface StubCall {
+  url: string;
+  retryKey?: string;
+  to?: string[];
+}
+
+function stubFetch(
+  handler: (call: StubCall, index: number) => Response | Promise<Response>,
+): { calls: StubCall[]; restore: () => void } {
+  const calls: StubCall[] = [];
+  const prev = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    const headers = new Headers((init?.headers ?? {}) as HeadersInit);
+    let to: string[] | undefined;
+    if (typeof init?.body === "string") {
+      const parsed = JSON.parse(init.body) as { to?: string[] };
+      to = parsed.to;
+    }
+    const call: StubCall = {
+      url,
+      retryKey: headers.get("X-Line-Retry-Key") ?? undefined,
+      to,
+    };
+    calls.push(call);
+    return handler(call, calls.length - 1);
+  }) as unknown as typeof fetch;
+  return { calls, restore: () => { globalThis.fetch = prev; } };
+}
+
+const TEST_CHANNEL: DeliveryChannel = {
+  targetEnv: "test",
+  accessToken: "hermetic-mock-token",
+  fallbackFriendCount: null,
+  label: "test(hermetic)",
+};
+
+describe("1 件指定送信: 再試行キーが受理済みだった場合（届いたのに Failed にしない・QA C-1）", () => {
+  it("初回 fetch 例外 → 2 回目 409 受理済み → Sent を記録し sentCount が正しい", async () => {
+    const { deps, rec } = await makeDeps();
+    // 実 sender を使う（409 の読み方そのものを検証するため stub sender では意味がない）。
+    deps.sender = createLineSender(TEST_CHANNEL);
+
+    const stub = stubFetch((_call, index) => {
+      // 1 回目: タイムアウト相当の例外。実は LINE 側では受理されていた、という状況。
+      if (index === 0) throw new Error("network timeout");
+      // 2 回目: 同じ再試行キーの要求が既に受理済み → 409 + 受理済み request id。
+      return new Response("conflict", {
+        status: 409,
+        headers: { [LINE_ACCEPTED_REQUEST_ID_HEADER]: "accepted-req-9" },
+      });
+    });
+
+    let res;
+    try {
+      res = await sendOneDelivery(deps, req);
+    } finally {
+      stub.restore();
+    }
+
+    // 「届いている」ので Sent。0 通や Failed にしてはいけない。
+    expect(res.status).toBe("sent");
+    expect(res.code).toBe("sent");
+    expect(res.sentCount).toBe(100);
+    // 後追いで実配信数を引く鍵は受理済み request id を採る（ここで拾わないと二度と手に入らない）。
+    expect(res.requestId).toBe("accepted-req-9");
+    expect(res.reason).toContain("受理済み");
+
+    expect(rec.results).toHaveLength(1);
+    expect(rec.results[0].status).toBe("Sent");
+    expect(rec.results[0].consumed).toBe(100);
+    expect(rec.finishes).toEqual([{ sendState: "sent", sentCount: 100 }]);
+
+    // 送信要求は 2 回（初回 + 再試行 1 回）で、**同じ再試行キー**を使っている。
+    expect(stub.calls).toHaveLength(2);
+    const expectedKey = await deterministicRetryKey(RESERVATION);
+    expect(stub.calls.map((c) => c.retryKey)).toEqual([expectedKey, expectedKey]);
+  });
+
+  it("409 でもヘッダが無ければ受理済みとは見なさない（本当の失敗は Failed のまま）", async () => {
+    const { deps, rec } = await makeDeps();
+    deps.sender = createLineSender(TEST_CHANNEL);
+
+    const stub = stubFetch(() => new Response("conflict", { status: 409 }));
+    let res;
+    try {
+      res = await sendOneDelivery(deps, req);
+    } finally {
+      stub.restore();
+    }
+
+    expect(res.status).toBe("failed");
+    expect(res.code).toBe("send_failed");
+    expect(res.sentCount).toBe(0);
+    expect(res.requestId).toBeNull();
+    expect(rec.results[0].status).toBe("Failed");
+  });
+
+  it("acceptedRequestIdFrom: 409 + ヘッダのときだけ request id を返す（純粋）", () => {
+    const with409 = new Response(null, {
+      status: 409,
+      headers: { [LINE_ACCEPTED_REQUEST_ID_HEADER]: "req-abc" },
+    });
+    expect(acceptedRequestIdFrom(with409)).toBe("req-abc");
+    // 200 のヘッダ付きは対象外（成功経路は x-line-request-id を読む）。
+    expect(
+      acceptedRequestIdFrom(
+        new Response(null, {
+          status: 200,
+          headers: { [LINE_ACCEPTED_REQUEST_ID_HEADER]: "req-abc" },
+        }),
+      ),
+    ).toBeNull();
+    expect(acceptedRequestIdFrom(new Response(null, { status: 409 }))).toBeNull();
+    expect(acceptedRequestIdFrom(new Response(null, { status: 500 }))).toBeNull();
+  });
+});
+
+describe("multicast の再試行キーはバッチごとに分かれる（後半の人に届かない事故を防ぐ・QA MID-1）", () => {
+  it("batchRetryKey: 決定的・バッチごとに別・0 は基底キーそのまま", async () => {
+    const base = await deterministicRetryKey(RESERVATION);
+    expect(await batchRetryKey(base, 0)).toBe(base);
+    const k1 = await batchRetryKey(base, 1);
+    const k2 = await batchRetryKey(base, 2);
+    expect(k1).not.toBe(base);
+    expect(k1).not.toBe(k2);
+    // 決定的（再試行で鍵が変わると LINE 側の重複判定が効かない）。
+    expect(await batchRetryKey(base, 1)).toBe(k1);
+    // UUID 形（LINE が要求する形式）。
+    expect(k1).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it("2 バッチの multicast は別々の鍵で送り、409 受理済みのバッチも届いた扱いにする", async () => {
+    const sender = createLineSender(TEST_CHANNEL);
+    const userIds = Array.from({ length: 600 }, (_v, i) => `U${String(i).padStart(4, "0")}`);
+    const batches = chunkForMulticast(userIds);
+    expect(batches.map((b) => b.length)).toEqual([500, 100]);
+
+    const base = await deterministicRetryKey(RESERVATION);
+    const stub = stubFetch((_call, index) =>
+      index === 0
+        ? new Response("{}", { status: 200 })
+        : // 2 バッチ目は前回の呼び出しで受理済みだった（= 届いている）。
+          new Response("conflict", {
+            status: 409,
+            headers: { [LINE_ACCEPTED_REQUEST_ID_HEADER]: "accepted-batch-2" },
+          }),
+    );
+
+    let outcome: SendOutcome;
+    try {
+      outcome = await sender.multicast(
+        batches,
+        [{ type: "text", text: "テスト本文" }],
+        undefined,
+        base,
+      );
+    } finally {
+      stub.restore();
+    }
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.deliveredRecipients).toBe(600);
+    expect(outcome.partial).toBe(false);
+    expect(outcome.alreadyAccepted).toBe(true);
+
+    expect(stub.calls).toHaveLength(2);
+    // 鍵が分かれていること（同一鍵だと 2 バッチ目が「同じ鍵の別宛先」で弾かれる）。
+    expect(stub.calls[0].retryKey).toBe(base);
+    expect(stub.calls[1].retryKey).toBe(await batchRetryKey(base, 1));
+    expect(stub.calls[0].retryKey).not.toBe(stub.calls[1].retryKey);
+    // 宛先もバッチごとに違う（鍵と宛先の対応が 1:1）。
+    expect(stub.calls[0].to).toHaveLength(500);
+    expect(stub.calls[1].to).toHaveLength(100);
+  });
+});
+
+describe("承認判定は実オプション名の完全一致 allowlist（未知の新オプションを通さない・QA MID-5）", () => {
+  it("allowlist にある値だけが承認。「承認」で始まる別オプションは通さない", () => {
+    expect(isApprovedJudgment("承認")).toBe(true);
+    expect(isApprovedJudgment(" 承認 ")).toBe(true);
+    // 旧実装（startsWith）ではこれらが承認として通っていた。
+    expect(isApprovedJudgment("承認前確認")).toBe(false);
+    expect(isApprovedJudgment("承認済み")).toBe(false);
+    expect(isApprovedJudgment("承認予定")).toBe(false);
+    // allowlist に無い英語表記も通さない（実オプション名だけを通す）。
+    expect(isApprovedJudgment("approved")).toBe(false);
+    expect(isApprovedJudgment("未承認")).toBe(false);
+    expect(isApprovedJudgment("")).toBe(false);
+    expect(isApprovedJudgment(null)).toBe(false);
+  });
+
+  it("allowlist は差し替え可能。ただし否定語を含む値は設定ミスとして弾く", () => {
+    // 実オプション名として明示的に allowlist に入れたものは通る（意図的な opt-in）。
+    expect(isApprovedJudgment("承認済み", ["承認済み"])).toBe(true);
+    // ただし既定 allowlist では通らない（差し替えは設定 1 か所の明示行為）。
+    expect(isApprovedJudgment("承認済み")).toBe(false);
+    expect(isApprovedJudgment("OK", ["OK", "承認"])).toBe(true);
+    expect(isApprovedJudgment("承認", ["OK"])).toBe(false);
+    // env に誤って否定系を入れても承認にはならない（fail-closed の保険）。
+    expect(isApprovedJudgment("未承認", ["未承認"])).toBe(false);
+    expect(isApprovedJudgment("却下", ["却下"])).toBe(false);
+  });
+
+  it("parseApprovalJudgments: 未設定・空は既定に倒す（緩めない）", () => {
+    expect(parseApprovalJudgments(undefined)).toEqual([...DEFAULT_APPROVAL_JUDGMENTS]);
+    expect(parseApprovalJudgments("")).toEqual([...DEFAULT_APPROVAL_JUDGMENTS]);
+    expect(parseApprovalJudgments(" , ")).toEqual([...DEFAULT_APPROVAL_JUDGMENTS]);
+    expect(parseApprovalJudgments("承認, 承認OK")).toEqual(["承認", "承認OK"]);
+  });
+
+  it("判定が allowlist 外なら送らない。allowlist を差し替えれば送れる", async () => {
+    // 実オプション名が「承認 (送信可)」だった場合を模す。
+    const blocked = await makeDeps({ judgment: "承認 (送信可)" });
+    const res1 = await sendOneDelivery(blocked.deps, req);
+    expect(res1.code).toBe("judgment_not_approved");
+    expect(blocked.rec.sends).toHaveLength(0);
+
+    const allowed = await makeDeps({ judgment: "承認 (送信可)" });
+    allowed.deps.approvalJudgments = ["承認(送信可)"]; // 比較は NFKC + 空白除去後
+    const res2 = await sendOneDelivery(allowed.deps, req);
+    expect(res2.status).toBe("sent");
+    expect(allowed.rec.sends).toHaveLength(1);
   });
 });
