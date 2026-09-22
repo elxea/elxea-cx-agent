@@ -368,7 +368,10 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 >   - `POST /api/delivery/pin`（prepare 段）= 本文・画像・配信対象の**指紋を固定するだけ**。
 >     画像は R2 に取り込んで凍結し、ハッシュを「コンテンツハッシュ」列に書く。
 >     **Status は動かさない（Draft のまま）**＝人が承認する前に Approved の行を作らない。
->     承認前なので**再 pin は上書き可**。
+>     受け付けるのは **`Status=Draft`（未承認）の行だけ**。Draft の間は誰も承認していないので
+>     **再 pin は上書き可**だが、承認後（`Approved` / `Sending` / `Sent` / `Failed`）の行は
+>     409 `pin_not_allowed_in_status` で拒否する（承認済みの内容と指紋を別々にさせない）。
+>     承認後に内容を直したいときは **人が Status を Draft に戻してから** 1 からやり直す。
 >   - `POST /api/delivery/approve`（reserve 段）= **All Tasks 判定行**（判定=承認 /
 >     最終編集者のメール = `DELIVERY_OWNER_EMAIL`）を検証し、**pin 時の指紋と現在値が一致する**
 >     ことを確かめてから **Status=Approved を機械が書く**。pin 後に本文・画像・配信対象が
@@ -520,6 +523,7 @@ curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/
 | `owner_email_unset` | 422 | secret `DELIVERY_OWNER_EMAIL` が未設定 | secret を入れる（照合先が無いと全拒否） |
 | `email_lookup_retryable` / `task_fetch_retryable` / `audience_unresolved` | 503 | 一時失敗（Notion 429/5xx・人数を数えられない） | そのまま再試行してよい（何も書いていない） |
 | `row_already_sent` / `row_sending` | 409 | 既に送信済み・送信中 | 触らない |
+| `pin_not_allowed_in_status` | 409 | 承認後の行（`Approved` / `Sending` / `Sent` / `Failed`）に pin をやり直そうとした | 内容を直すなら人が Status を `Draft` に戻してから 1 からやり直す（承認も取り直す） |
 
 #### 1 件指定送信のしかた（唯一の配信起動経路）
 

@@ -81,6 +81,7 @@ export type DeliveryApproveCode =
   | "row_already_sent"
   | "row_sending"
   | "row_already_approved"
+  | "pin_not_allowed_in_status"
   | "audience_unknown"
   | "message_invalid"
   | "image_blocked"
@@ -209,8 +210,12 @@ function validateContent(page: DeliveryPage, imageUrls: string[]): ContentCheck 
 /**
  * 本文・画像・配信対象の指紋を固定する（**Status は変えない**）。
  *
- * 承認前なので **再 pin は上書き可**（人がまだ承認していない = 何も確定していない）。
- * 承認後の変更は approve 側の指紋照合と send-one 側の再照合で弾かれる。
+ * 受け付けるのは **Status=Draft（未承認）の行だけ**。Draft の間は人がまだ承認していない
+ * = 何も確定していないので **再 pin は上書き可**。承認後（Approved / Sending / Sent / Failed）は
+ * 409 `pin_not_allowed_in_status` で拒否する（指紋の上書きで未承認の内容が
+ * approve / send-one の指紋照合を通るのを防ぐ）。承認後に内容を直したい場合は
+ * Status を Draft に戻す（= 人の操作）ことが必要で、承認後の本文変更自体は
+ * approve の指紋照合と send-one 側の再照合が引き続き弾く。
  */
 export async function pinDeliveryContent(
   deps: DeliveryApproveDeps,
@@ -230,12 +235,20 @@ export async function pinDeliveryContent(
     );
   }
 
-  // 送信済み・送信中の行は pin し直さない（確定済みの指紋を動かさない）。
+  // 送信済みの行は pin し直さない（確定済みの指紋を動かさない）。
   if (page.sent) {
     return reject("row_already_sent", "この行は既に送信済み（pin しない）");
   }
-  if (page.status === "Sending") {
-    return reject("row_sending", "この行は送信中（pin しない）");
+  // pin は **Draft（未承認）の行だけ** 受け付ける。
+  // 承認後（Approved / Sending / Sent / Failed）に再 pin を許すと、人が承認した内容とは
+  // 別の本文で指紋だけを上書きでき、approve の指紋照合も send-one の再照合も
+  // 「一致」と答えてしまう（= 未承認の内容が送信経路を通る）。Status は動かさず 409 で拒す。
+  if (page.status !== "Draft") {
+    return reject(
+      "pin_not_allowed_in_status",
+      `Status=${page.status || "(空)"} の行は pin できない（pin は Draft のみ）。` +
+        "内容を直すなら Status を Draft に戻して prepare からやり直す",
+    );
   }
 
   // 画像は Notion 一時URL → R2 恒久URL に取り込んで凍結する（TOCTOU 対策）。
@@ -442,6 +455,11 @@ export function httpStatusForApprove(
 ): 200 | 400 | 409 | 422 | 503 {
   if (res.ok) return 200;
   if (res.code === "bad_request") return 400;
-  if (res.code === "row_already_sent" || res.code === "row_sending") return 409;
+  if (
+    res.code === "row_already_sent" ||
+    res.code === "row_sending" ||
+    res.code === "pin_not_allowed_in_status"
+  )
+    return 409;
   return res.retryable ? 503 : 422;
 }

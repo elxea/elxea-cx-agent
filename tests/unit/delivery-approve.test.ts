@@ -3,6 +3,9 @@
  *
  * 何を実証するか（すべて注入依存・ネットワーク非接触）:
  *   - pin は Status を動かさない（コンテンツハッシュだけを書く）
+ *   - pin は **Draft（未承認）の行だけ** 受け付ける。Draft なら再 pin で上書き可（200）、
+ *     承認後（Approved / Sending / Sent / Failed）は 409（pin_not_allowed_in_status）で
+ *     拒否し Status も指紋も動かさない（承認済み内容と指紋の乖離を作らせない）
  *   - approve は **配信DB行の「承認者」people が空でも** All Tasks 判定行の検証で通る
  *     （承認 1 点化。旧 2 点承認の門を撤去した非回帰検査）
  *   - 判定行が未承認なら 422（judgment_not_approved）・Status を書かない
@@ -202,6 +205,47 @@ describe("pin: 指紋を固定するだけで Status を動かさない", () => 
     const res = await pinDeliveryContent(deps, { pageId: PAGE_ID });
     assertEqual(codeOf(res), "message_invalid", "code");
     assertEqual(rec.pinned.length, 0, "書かない");
+  });
+
+  // 承認後の再 pin 封じ（QA 指摘・2026-09-23）。
+  // 承認済みの行に再 pin を許すと「人が承認した内容」と「指紋」を別々にできてしまい、
+  // approve の指紋照合も send-one の再照合も通ってしまう（未承認の内容が送信経路に乗る）。
+  it("承認後（Approved / Sending / Sent / Failed）の行は再 pin を 409 で拒否・Status は変えない", async () => {
+    for (const status of ["Approved", "Sending", "Sent", "Failed"]) {
+      const approvedHash = "pinned-before-approval";
+      const row = page({ status, body: "承認された本文", contentHash: approvedHash });
+      const { deps, rec } = buildDeps(row);
+      // 承認後に本文だけ差し替えて再 pin を試みる（指紋上書きの攻撃筋）。
+      row.body = "承認後にこっそり差し替えた本文";
+      const res = await pinDeliveryContent(deps, { pageId: PAGE_ID });
+      assertEqual(codeOf(res), "pin_not_allowed_in_status", `code (status=${status})`);
+      assertEqual(httpStatusForApprove(res), 409, `HTTP 409 (status=${status})`);
+      assertEqual(rec.pinned.length, 0, `指紋を書かない (status=${status})`);
+      assertEqual(row.contentHash, approvedHash, `承認時の指紋が残る (status=${status})`);
+      assertEqual(rec.approved.length, 0, `Status を書かない (status=${status})`);
+      assertEqual(row.status, status, `Status は ${status} のまま`);
+    }
+  });
+
+  it("Draft（未承認）の行は再 pin を 200 で受け付け指紋を上書きする", async () => {
+    const row = page({ body: "最初の本文" });
+    const { deps, rec } = buildDeps(row);
+    const first = await pinDeliveryContent(deps, { pageId: PAGE_ID });
+    assertTrue(first.ok, `1 回目 pin ok (code=${codeOf(first)})`);
+    assertEqual(httpStatusForApprove(first), 200, "1 回目 HTTP 200");
+    const firstHash = row.contentHash;
+
+    // まだ誰も承認していない（Draft）ので、本文を直しての再 pin は正当。
+    row.body = "推敲した本文";
+    const second = await pinDeliveryContent(deps, { pageId: PAGE_ID });
+    assertTrue(second.ok, `2 回目 pin ok (code=${codeOf(second)})`);
+    assertEqual(codeOf(second), "pinned", "code");
+    assertEqual(httpStatusForApprove(second), 200, "2 回目 HTTP 200");
+    assertEqual(rec.pinned.length, 2, "指紋を 2 回書く");
+    assertEqual(row.contentHash, await hashFor(row), "新しい本文の指紋に更新される");
+    assertTrue(row.contentHash !== firstHash, "指紋が上書きされている");
+    assertEqual(rec.approved.length, 0, "Status を書かない");
+    assertEqual(row.status, "Draft", "Status は Draft のまま");
   });
 });
 
