@@ -11,7 +11,10 @@
  *         本テストは resolveTargets に見積を直接注入するので、その転換の影響を受けない
  *         （= fail-closed の非回帰検査としてそのまま生きる）。実測経路の検証は
  *         tests/unit/broadcast-recipients.test.ts。
- *     - 自己承認 pin 受理: prod 専用フラグで独立性免除・承認者ゼロは常に fail-closed
+ *     - 承認 pin は指紋の固定だけを行い Status を動かさない（承認 1 点化・2026-09-22）。
+ *       配信DB行の people 列「承認者」「担当者」は判定に使わないため、旧「自己承認 pin 受理」
+ *       検査（selfApprovalRelaxed / isApprovalAuthorized）は削除した。承認の検証は
+ *       All Tasks 判定行（delivery-approval-task.ts）が持ち、実証は delivery-approve.test.ts。
  *     - 画像 2 枚の恒久 R2 公開 URL を決定的に再構成（broadcast/<pageId>/<i>.jpg）
  *     - 実送信スイッチ非復活ガード: 送信経路のソースに env 送信フラグが再導入されていない
  *
@@ -28,7 +31,6 @@
 import { readFileSync } from "node:fs";
 import { parseAudience } from "../../src/lib/delivery-audience";
 import { resolveTargets, type TargetResolverDeps } from "../../src/lib/target-resolver";
-import { selfApprovalRelaxed, isApprovalAuthorized } from "../../src/lib/delivery-approval";
 import { r2UrlsForPage, r2KeyForImage } from "../../src/lib/image-ingest";
 import { computeContentHash } from "../../src/lib/content-hash";
 
@@ -94,37 +96,17 @@ async function main(): Promise<void> {
     check("broadcast 見積 null は error（fail-closed）", bad.kind === "error");
   }
 
-  // 3. 自己承認 pin 受理（prod 専用フラグでのみ独立性免除・可逆）
-  const relaxedProd = selfApprovalRelaxed({
-    DELIVERY_TARGET_ENV: "prod",
-    DELIVERY_ALLOW_SELF_APPROVAL_PROD: "true",
-  });
-  check("prod + PROD フラグ true → 自己承認 緩和 true", relaxedProd === true);
-
-  const notRelaxedProdDefault = selfApprovalRelaxed({ DELIVERY_TARGET_ENV: "prod" });
+  // 3. 承認の権威は All Tasks 判定行（承認 1 点化・2026-09-22）。
+  //    配信DB行の people 列を読む旧ゲート（delivery-approval.ts）は撤去済み = 非回帰ラチェット。
+  const runtimeSrc = readFileSync("src/lib/delivery-runtime.ts", "utf8");
   check(
-    "prod + フラグ未設定 → 緩和されない（既定 fail-closed・可逆）",
-    notRelaxedProdDefault === false,
-  );
-
-  const testFlagOnProd = selfApprovalRelaxed({
-    DELIVERY_TARGET_ENV: "prod",
-    DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
-  });
-  check("prod に TEST フラグは効かない（緩和されない）", testFlagOnProd === false);
-
-  // 承認者=担当者（Setaka 単独）の自己承認: 緩和 true でのみ受理
-  check(
-    "自己承認（担当者=承認者）は緩和 true で受理される",
-    isApprovalAuthorized([SETAKA], [SETAKA], relaxedProd) === true,
+    "pin / approve 経路は delivery-approval.ts（承認者 people ゲート）を import しない",
+    !runtimeSrc.includes("delivery-approval\"") &&
+      !runtimeSrc.includes("isApprovalAuthorized"),
   );
   check(
-    "自己承認は緩和 false（既定）では拒否される（独立性ロック維持）",
-    isApprovalAuthorized([SETAKA], [SETAKA], false) === false,
-  );
-  check(
-    "承認者ゼロは緩和 true でも常に fail-closed",
-    isApprovalAuthorized([SETAKA], [], relaxedProd) === false,
+    "承認 pin は Status を書かない（pinContentSnapshot を使う）",
+    runtimeSrc.includes("pinContentSnapshot") && !runtimeSrc.includes("pinApproval("),
   );
 
   // 4. 画像 2 枚の恒久 R2 公開 URL を決定的に再構成

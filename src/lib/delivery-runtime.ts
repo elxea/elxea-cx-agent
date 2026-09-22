@@ -12,7 +12,8 @@
  *   - **配信予定日時は送信条件ではなくなった**（Approved なら予定日時が未来でも空でも送る）。
  *     予定日時は運用者の記録用メモとして残るだけ。
  *   - 送信可否を握る安全弁は次の多層ガードのみ:
- *       (1) Notion Status=Approved かつ独立した承認者がいる（自己承認は fail-closed）
+ *       (1) Notion Status=Approved（機械が書くのは All Tasks 判定行の承認を確認した後だけ。
+ *           2026-09-22 承認 1 点化: 配信DB行の people 列「承認者」「担当者」は読まない）
  *       (2) 承認時コンテンツハッシュ（pin）と現在値が一致する（承認後の編集は自動リセット）
  *       (3) 通数台帳 claim（月内の二重送信を排他）+ 無料枠ガード
  *       (4) 宛先解決（allowlist 未設定・ペルソナ 0 件などは fail-closed）
@@ -49,7 +50,8 @@ import {
   writeDeliveryResult,
   resetApproval,
   clearDeliveryError,
-  pinApproval,
+  pinContentSnapshot,
+  markApproved,
   fetchDeliveryPage,
   fetchApprovalTask,
   fetchNotionUserEmail,
@@ -67,7 +69,13 @@ import {
   resolveR2PublicBase,
   r2UrlsForPage,
 } from "./image-ingest";
-import { isApprovalAuthorized, selfApprovalRelaxed } from "./delivery-approval";
+import {
+  pinDeliveryContent,
+  approveDelivery,
+  type DeliveryApproveDeps,
+  type DeliveryApproveResult,
+  type ApproveRequest,
+} from "./delivery-approve";
 import { resolveDeliveryChannel } from "./delivery-channel";
 import {
   createLineFollowerPageFetcher,
@@ -431,117 +439,122 @@ export async function compareSegmentTargets(
   return out;
 }
 
-/** 承認 pin の結果。 */
-export type PinApprovalResult =
-  | {
-      ok: true;
-      contentHash: string;
-      /** 承認時点の配信対象人数（スナップショット・N-12）。呼び出し側が判定タスクに載せる。 */
-      approvedAudienceCount: number;
-      /** 指紋に載せた配信対象の識別子（"all" / "persona:xxx" / "allowlist"）。 */
-      audienceKey: string;
+/**
+ * pin / approve の runtime 配線（承認 1 点化・段1a-3・2026-09-22）。
+ *
+ * 承認の権威は All Tasks 判定行 1 か所。配信DB行の people 列「承認者」「担当者」は読まない
+ * （旧 2 点承認の門は 1 点化で誰も埋めない項目になり常時 fail になったため撤去。段1 I-C）。
+ */
+function buildApproveDeps(env: Env): DeliveryApproveDeps {
+  const request = createNotionRequest(env);
+  const r2Base = resolveR2PublicBase(env);
+  return {
+    repo: {
+      fetchPage: (pageId) => fetchDeliveryPage(request, pageId),
+      pinContentSnapshot: (pageId, contentHash) =>
+        pinContentSnapshot(request, pageId, contentHash),
+      markApproved: (pageId) => markApproved(request, pageId),
+      writeError: (pageId, reason) => writeDeliveryError(request, pageId, reason),
+    },
+    approvalTask: createApprovalTaskPort(env),
+    // 照合に使うメールは設定 1 か所に 1 件だけ（既定値を持たない・N-05）。
+    ownerEmail: env.DELIVERY_OWNER_EMAIL,
+    approvalJudgments: parseApprovalJudgments(env.DELIVERY_APPROVAL_JUDGMENTS),
+    resolveAudienceCount: async (audience) => {
+      try {
+        const targets = await resolveTargetsForEnv(env, audience);
+        if (targets.kind === "error") return { ok: false, reason: targets.reason };
+        return { ok: true, count: targets.estimatedRecipients };
+      } catch (err) {
+        return {
+          ok: false,
+          reason: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+    ingestImages: async (pageId, srcUrls) => {
+      let cfg;
+      try {
+        cfg = resolveR2Config(env);
+      } catch (err) {
+        return {
+          ok: false,
+          code: "image_config_invalid",
+          reason: `画像アップロード設定不備: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      const ingest = await ingestPageImages(cfg, pageId, srcUrls);
+      if (ingest.warnings.length > 0) {
+        console.warn(
+          `[delivery:pin] page=${pageId} image warnings: ${ingest.warnings.join("; ")}`,
+        );
+      }
+      // fail-closed: LINE 非対応形式（HEIC 等）・非画像・10MB超は pin を通さない。
+      if (ingest.blocking.length > 0) {
+        return {
+          ok: false,
+          code: "image_blocked",
+          reason: describeBlockingImages(ingest.blocking),
+        };
+      }
+      return { ok: true, urls: ingest.urls };
+    },
+    imageUrlsFor: (page) => r2UrlsForPage(page.id, page.imageCount ?? 0, r2Base),
+  };
+}
+
+/** 配信 DB の env 分離 preflight（cross-env 誤配線を pin / approve でも塞ぐ）。 */
+function deliveryDbPreflight(env: Env): DeliveryApproveResult | null {
+  try {
+    resolveDeliveryDbId(env);
+    return null;
+  } catch (e) {
+    if (e instanceof DeliveryDbConfigError) {
+      return {
+        ok: false,
+        retryable: false,
+        code: "bad_request",
+        reason: `配信 DB 解決 fail-closed: ${e.message}`,
+      };
     }
-  | { ok: false; reason: string };
+    throw e;
+  }
+}
 
 /**
- * 承認時のコンテンツ pinning（T12）を実行する。
- * ページの現在値を読み、必須項目（本文 or 画像）+ 自己承認（承認者!=著者）を検証し、
- * files「画像」を R2 に取込（Notion 一時URL → R2 恒久URL）してから、その恒久R2 URL 群で
- * ハッシュを計算し保存して Status=Approved にする。実送信はしない。
- *
- * 形式は自動判定（画像ありなら image / 無ければ text）。運用者は「形式」を触らない。
+ * 承認 pin（`POST /api/delivery/pin`）。指紋を固定するだけで **Status は変えない**。
+ * 実送信はしない。承認者 people は読まない（承認の権威は All Tasks 判定行）。
  */
 export async function pinDeliveryApproval(
   env: Env,
   pageId: string,
-): Promise<PinApprovalResult> {
-  const request = createNotionRequest(env);
-  const page = await fetchDeliveryPage(request, pageId);
+): Promise<DeliveryApproveResult> {
+  const preflight = deliveryDbPreflight(env);
+  if (preflight) return preflight;
+  const res = await pinDeliveryContent(buildApproveDeps(env), { pageId });
+  console.log(
+    `[delivery] pin page=${pageId} ok=${res.ok} code=${res.code}` +
+      (res.ok ? ` audience=${res.approvedAudienceCount}` : ""),
+  );
+  return res;
+}
 
-  // 形式は normalize が files「画像」の有無で自動判定済み。
-  if (page.format !== "text" && page.format !== "image") {
-    return { ok: false, reason: "形式が未設定/未知" };
-  }
-  // 配信対象は指紋の構成要素（2026-09-22）。空・未知は pin しない（fail-closed）。
-  const audience = parseAudience(page.audienceRaw);
-  if (!audience) {
-    return { ok: false, reason: "配信対象が空/未知（fail-closed）" };
-  }
-  // 本文か画像のどちらかは必須（text は本文、image は画像枚数）。
-  const srcUrls = page.imageSourceUrls ?? [];
-  if (page.format === "text" && !(page.body ?? "").trim()) {
-    return { ok: false, reason: "本文が空（本文か画像のどちらかが必須）" };
-  }
-  if (page.format === "image" && srcUrls.length === 0) {
-    return { ok: false, reason: "画像が空（画像をドラッグしてください）" };
-  }
-  if (
-    !isApprovalAuthorized(
-      page.assignees,
-      page.approvers,
-      selfApprovalRelaxed(env),
-    )
-  ) {
-    return { ok: false, reason: "独立した承認者がいない（自己承認・fail-closed）" };
-  }
-
-  // 画像取込（承認 pin 時に実行）: Notion 一時URL → R2 → 恒久公開URL。
-  // これでコンテンツを「凍結」し、送信は R2 スナップショットを参照する（TOCTOU 対策）。
-  let r2Urls: string[] = [];
-  if (srcUrls.length > 0) {
-    let cfg;
-    try {
-      cfg = resolveR2Config(env);
-    } catch (err) {
-      return {
-        ok: false,
-        reason: `画像アップロード設定不備: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-    const ingest = await ingestPageImages(cfg, pageId, srcUrls);
-    r2Urls = ingest.urls;
-    if (ingest.warnings.length > 0) {
-      console.warn(
-        `[delivery:pin] page=${pageId} image warnings: ${ingest.warnings.join("; ")}`,
-      );
-    }
-    // fail-closed: LINE 非対応形式（HEIC 等）・非画像・10MB超は承認を通さない。
-    // 平易な日本語の理由を返し、呼び出し側（poll / approve API）が運用者へ提示する。
-    // これで「壊れた画像が LINE に届く前に」止める（正規化本体は v2）。
-    if (ingest.blocking.length > 0) {
-      return { ok: false, reason: describeBlockingImages(ingest.blocking) };
-    }
-  }
-
-  // 承認時点の配信対象人数（N-12 の基準）。取得できないまま pin すると送信直前の
-  // 「+10% 超で停止」の基準が無くなるので、ここは fail-closed で止める。
-  let approvedAudienceCount: number;
-  try {
-    const targets = await resolveTargetsForEnv(env, audience);
-    if (targets.kind === "error") {
-      return { ok: false, reason: `配信対象の人数を数えられない: ${targets.reason}` };
-    }
-    approvedAudienceCount = targets.estimatedRecipients;
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `配信対象の人数を数えられない: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (!Number.isInteger(approvedAudienceCount) || approvedAudienceCount < 1) {
-    return { ok: false, reason: "配信対象の人数が 0（送る相手がいない・fail-closed）" };
-  }
-
-  // ハッシュは恒久R2 URL 群 + 配信対象で計算（送信時は同じ組み立てで再計算し照合）。
-  const audienceKey = audienceFingerprintKey(audience);
-  const contentHash = await computeContentHash({
-    format: page.format,
-    body: page.body,
-    imageUrls: r2Urls,
-    audience: audienceKey,
-  });
-  await pinApproval(request, pageId, contentHash, approvedAudienceCount);
-  return { ok: true, contentHash, approvedAudienceCount, audienceKey };
+/**
+ * 承認確定（`POST /api/delivery/approve`）。All Tasks 判定行の承認を確認し、
+ * pin 時の指紋と一致していれば Status=Approved を機械が書く。実送信はしない。
+ */
+export async function approveDeliveryRow(
+  env: Env,
+  req: ApproveRequest,
+): Promise<DeliveryApproveResult> {
+  const preflight = deliveryDbPreflight(env);
+  if (preflight) return preflight;
+  const res = await approveDelivery(buildApproveDeps(env), req);
+  console.log(
+    `[delivery] approve page=${req?.pageId ?? "-"} ok=${res.ok} code=${res.code}` +
+      (res.ok ? ` audience=${res.approvedAudienceCount}` : ""),
+  );
+  return res;
 }
 
 // ---------------------------------------------------------------------------

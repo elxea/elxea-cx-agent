@@ -25,6 +25,11 @@ export const DELIVERY_PROPS = {
   body: "本文",
   /** files 型「画像」。運用者が Notion に直接ドラッグ&ドロップする（URL 手入力は廃止）。 */
   image: "画像",
+  /**
+   * ⚠ この列は **prod / staging の実 DB に存在しない**（2026-09-22 実スキーマ確認）。
+   * 読み出しは undefined → null になるだけで害はないが、**書き込むと Notion 400** になる。
+   * 承認時点の配信対象人数は pin / approve API の応答で受け渡す（Notion には持たせない）。
+   */
   estimate: "通数見積",
   consumed: "消費実績",
   contentHash: "コンテンツハッシュ",
@@ -350,35 +355,54 @@ export async function writeDeliveryResult(
 }
 
 /**
- * 承認時のコンテンツ pinning（T12）: 現在の本文＋画像（R2 URL 群）のハッシュを
- * 「コンテンツハッシュ」列に保存し、Status=Approved にする。
+ * 承認 pin（prepare 段・2026-09-22 改訂）: 現在の本文＋画像（恒久 R2 URL 群）＋配信対象の
+ * ハッシュを「コンテンツハッシュ」列に保存する。**Status は動かさない**。
  *
- * これが承認時スナップショット。送信側はこの値と送信直前のハッシュを照合し、
- * 承認後に編集されたら不一致 → 承認自動リセットで送信中止する。
+ * なぜ Status を動かさないか: 承認 1 点化では人が承認の意思を置くのは All Tasks の判定行
+ *   だけで、配信DB行の Status=Approved は「判定行の承認を機械が確認した結果」である。
+ *   pin の段階で Approved にすると「人が承認する前に Approved の行が存在する」窓が開く
+ *   （send-one の第一の門が Status=Approved のため、その窓は事故の入口になる）。
+ *   Status を書くのは markApproved（approve 経路）だけ。
  *
- * 運用: 承認者が Notion で承認するときにこの経路を必ず通す（手動 approve API /
- *   将来の Notion ボタン automation）。ハッシュ計算は呼び出し側（content-hash.ts）で行い、
- *   この関数は書き込みのみを担う（テスト容易性のため）。
+ * ⚠ 承認時点の配信対象人数は **Notion に書かない**。配信DBに「通数見積」列は存在せず
+ *   （prod / staging 双方の実スキーマで確認・2026-09-22）、存在しない列への PATCH は
+ *   Notion 400 になる。人数スナップショットは pin / approve API の応答で受け渡す。
+ *
+ * ハッシュ計算は呼び出し側（content-hash.ts）で行い、この関数は書き込みのみを担う。
  */
-export async function pinApproval(
+export async function pinContentSnapshot(
   request: NotionRequest,
   pageId: string,
   contentHash: string,
-  /**
-   * 承認時点の配信対象人数（スナップショット・N-12）。「通数見積」に書く。
-   * 送信直前の実測がこの値より許容（+10%）を超えて増えていたら送らない。
-   */
-  approvedAudienceCount?: number,
 ): Promise<void> {
-  const P = DELIVERY_PROPS;
-  const properties: Record<string, unknown> = {
-    [P.contentHash]: { rich_text: [{ text: { content: contentHash } }] },
-    [P.status]: { select: { name: "Approved" } },
-  };
-  if (typeof approvedAudienceCount === "number") {
-    properties[P.estimate] = { number: approvedAudienceCount };
-  }
-  await request(`/pages/${pageId}`, "PATCH", { properties });
+  await request(`/pages/${pageId}`, "PATCH", {
+    properties: {
+      [DELIVERY_PROPS.contentHash]: {
+        rich_text: [{ text: { content: contentHash } }],
+      },
+    },
+  });
+}
+
+/**
+ * Status=Approved を書く（approve 経路のみ・2026-09-22 新設）。
+ *
+ * 呼び出せる条件は 1 つだけ: **All Tasks 判定行の承認（判定=承認 / 最終編集者=owner）を
+ * 確認し、pin 時の指紋と現在値が一致している**こと（delivery-approve.ts の approveDelivery）。
+ * 配信DB行の people 列「承認者」「担当者」は判定に使わない（1 点化・Boss 判断 2026-09-22）。
+ *
+ * 承認時刻は書かない（配信DBに「承認日時」列は無く、承認時刻の正本は判定行の
+ * `last_edited_time`。同じ事実を 2 か所に持たない）。
+ */
+export async function markApproved(
+  request: NotionRequest,
+  pageId: string,
+): Promise<void> {
+  await request(`/pages/${pageId}`, "PATCH", {
+    properties: {
+      [DELIVERY_PROPS.status]: { select: { name: "Approved" } },
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

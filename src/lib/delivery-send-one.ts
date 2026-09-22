@@ -428,15 +428,12 @@ export async function sendOneDelivery(
   }
   const audienceCount = targets.estimatedRecipients;
 
-  if (
-    !audienceCountWithinTolerance(
-      req.approvalRef.approvedAudienceCount,
-      audienceCount,
-      tolerance,
-    )
-  ) {
+  // validateSendOneRequest が 1 以上の数値であることを既に要求している（型は任意でも
+  // 送信経路では必須。ここで再度 fail-closed に倒す）。
+  const approvedCount = req.approvalRef.approvedAudienceCount ?? 0;
+  if (!audienceCountWithinTolerance(approvedCount, audienceCount, tolerance)) {
     const reason =
-      `対象人数が承認時から許容を超えて増えた（承認時 ${req.approvalRef.approvedAudienceCount} → ` +
+      `対象人数が承認時から許容を超えて増えた（承認時 ${approvedCount} → ` +
       `現在 ${audienceCount} / 許容 +${Math.round(tolerance * 100)}%）`;
     await deps.repo.writeError(req.pageId, reason).catch(() => {});
     return reject("audience_count_grew", reason, reservationId, { audienceCount });

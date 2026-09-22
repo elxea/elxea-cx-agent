@@ -49,11 +49,6 @@ function assertFalse(value: boolean, label = "") {
 import { parseAudience, audienceLabel } from "../../src/lib/delivery-audience";
 import { computeContentHash, hashesMatch } from "../../src/lib/content-hash";
 import {
-  hasIndependentApprover,
-  isApprovalAuthorized,
-  selfApprovalRelaxed,
-} from "../../src/lib/delivery-approval";
-import {
   buildMessages,
   chunkForMulticast,
   isPermanentHttpsUrl,
@@ -184,114 +179,13 @@ describe("computeContentHash / hashesMatch（TOCTOU pinning）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 自己承認検知
+// 自己承認検知（2026-09-22 削除）
 // ---------------------------------------------------------------------------
-describe("hasIndependentApprover（承認者!=著者）", () => {
-  it("担当者と異なる承認者がいれば true", () => {
-    assertTrue(hasIndependentApprover(["u-author"], ["u-approver"]), "independent");
-  });
-  it("承認者が空は false（fail-closed）", () => {
-    assertFalse(hasIndependentApprover(["u-author"], []), "no approver");
-  });
-  it("承認者が全員担当者を兼ねる（自己承認）は false", () => {
-    assertFalse(hasIndependentApprover(["u-a", "u-b"], ["u-a"]), "self approval");
-    assertFalse(hasIndependentApprover(["u-a"], ["u-a"]), "single self");
-  });
-  it("担当者に無関係な承認者が 1 人でもいれば true", () => {
-    assertTrue(hasIndependentApprover(["u-a"], ["u-a", "u-c"]), "one independent");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 自己承認緩和ポリシー（テスト環境限定・prod では緩和不可）
-// ---------------------------------------------------------------------------
-describe("selfApprovalRelaxed（prod は専用フラグでのみ緩和・既定は fail-closed）", () => {
-  it("test + フラグ true → 緩和 true", () => {
-    assertTrue(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "test",
-        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
-      }),
-      "test relaxed",
-    );
-  });
-  it("prod + TEST フラグ true → 緩和されない（TEST フラグは prod に効かない）", () => {
-    assertFalse(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "prod",
-        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
-      }),
-      "prod not relaxed by TEST flag",
-    );
-  });
-  it("prod + PROD フラグ true → 緩和 true（Tier2 例外ゲート）", () => {
-    assertTrue(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "prod",
-        DELIVERY_ALLOW_SELF_APPROVAL_PROD: "true",
-      }),
-      "prod relaxed only by explicit PROD flag",
-    );
-  });
-  it("prod + PROD フラグ未設定/非true → 緩和されない（既定 fail-closed）", () => {
-    assertFalse(
-      selfApprovalRelaxed({ DELIVERY_TARGET_ENV: "prod" }),
-      "prod no flag → fail-closed",
-    );
-    assertFalse(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "prod",
-        DELIVERY_ALLOW_SELF_APPROVAL_PROD: "1",
-      }),
-      "prod flag must be exactly 'true'",
-    );
-  });
-  it("test + フラグ未設定/非true → 緩和されない", () => {
-    assertFalse(
-      selfApprovalRelaxed({ DELIVERY_TARGET_ENV: "test" }),
-      "no flag",
-    );
-    assertFalse(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "test",
-        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "1",
-      }),
-      "flag must be exactly 'true'",
-    );
-  });
-  it("TARGET_ENV 未設定/不正 は test 扱い（フラグ true で緩和）", () => {
-    assertTrue(
-      selfApprovalRelaxed({ DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true" }),
-      "undefined→test",
-    );
-    assertTrue(
-      selfApprovalRelaxed({
-        DELIVERY_TARGET_ENV: "PRODUCTION",
-        DELIVERY_ALLOW_SELF_APPROVAL_TEST: "true",
-      }),
-      "invalid→test",
-    );
-  });
-});
-
-describe("isApprovalAuthorized（承認者必須は常に維持・緩和は独立性のみ免除）", () => {
-  it("allowSelfApproval=false は hasIndependentApprover と同義", () => {
-    assertTrue(
-      isApprovalAuthorized(["u-a"], ["u-b"], false),
-      "independent ok",
-    );
-    assertFalse(
-      isApprovalAuthorized(["u-a"], ["u-a"], false),
-      "self approval blocked",
-    );
-  });
-  it("allowSelfApproval=true でも承認者ゼロは false（fail-closed 維持）", () => {
-    assertFalse(isApprovalAuthorized(["u-a"], [], true), "no approver even when relaxed");
-  });
-  it("allowSelfApproval=true なら自己承認（担当者=承認者）を許容", () => {
-    assertTrue(isApprovalAuthorized(["u-a"], ["u-a"], true), "self approval allowed in test");
-  });
-});
+// 旧 `delivery-approval.ts`（hasIndependentApprover / selfApprovalRelaxed /
+// isApprovalAuthorized）と DELIVERY_ALLOW_SELF_APPROVAL_* は **撤去した**。
+// 承認の権威は All Tasks 判定行 1 か所に移り（承認 1 点化・Boss 判断 2026-09-22）、
+// 配信DB行の people 列「承認者」「担当者」は読まない。判定行による承認の検証は
+// delivery-approval-task.ts（verifyApprovalTask）と tests/unit/delivery-approve.test.ts が持つ。
 
 // ---------------------------------------------------------------------------
 // buildMessages / isPermanentHttpsUrl / chunk（T6）
@@ -955,7 +849,8 @@ describe("image-ingest: ingestPageImages（fetch 注入・実 R2/LINE 非接触�
 import {
   normalizeDeliveryPage,
   writeDeliveryResult,
-  pinApproval,
+  pinContentSnapshot,
+  markApproved,
   resetApproval as repoResetApproval,
   DELIVERY_PROPS,
   resolveDeliveryDbId,
@@ -1117,7 +1012,7 @@ describe("normalizeDeliveryPage（Notion page → DeliveryPage）", () => {
   });
 });
 
-describe("writeDeliveryResult / pinApproval / resetApproval（PATCH 整形）", () => {
+describe("writeDeliveryResult / pinContentSnapshot / markApproved / resetApproval（PATCH 整形）", () => {
   it("writeResult は送信済み=true, sent_at, 消費実績 を含む", async () => {
     let captured: Record<string, unknown> | undefined;
     const req: NotionRequest = async (_p, _m, body) => {
@@ -1134,16 +1029,34 @@ describe("writeDeliveryResult / pinApproval / resetApproval（PATCH 整形）", 
     assertTrue(props[DELIVERY_PROPS.sent].checkbox === true, "送信済み=true");
     assertEqual(props[DELIVERY_PROPS.consumed].number, 38, "消費実績");
   });
-  it("pinApproval は コンテンツハッシュ を書き Approved にする", async () => {
+  it("pinContentSnapshot は コンテンツハッシュ だけを書く（Status を動かさない・通数見積を書かない）", async () => {
     let captured: Record<string, unknown> | undefined;
     const req: NotionRequest = async (_p, _m, body) => {
       captured = body;
       return {};
     };
-    await pinApproval(req, "pg1", "hash-xyz");
+    await pinContentSnapshot(req, "pg1", "hash-xyz");
     const props = (captured as { properties: Record<string, { select?: { name: string }; rich_text?: Array<{ text: { content: string } }> }> }).properties;
+    assertEqual(
+      props[DELIVERY_PROPS.contentHash].rich_text?.[0].text.content,
+      "hash-xyz",
+      "hash 保存",
+    );
+    // pin は人の承認前。Status を Approved にすると「承認前の Approved 行」の窓が開く。
+    assertTrue(props[DELIVERY_PROPS.status] === undefined, "Status を書かない");
+    // 「通数見積」は prod / staging の実 DB に存在しない列（書くと Notion 400）。
+    assertTrue(props[DELIVERY_PROPS.estimate] === undefined, "通数見積を書かない");
+  });
+  it("markApproved は Status=Approved だけを書く", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const req: NotionRequest = async (_p, _m, body) => {
+      captured = body;
+      return {};
+    };
+    await markApproved(req, "pg1");
+    const props = (captured as { properties: Record<string, { select?: { name: string } }> }).properties;
     assertEqual(props[DELIVERY_PROPS.status].select?.name, "Approved", "Approved");
-    assertEqual(props[DELIVERY_PROPS.contentHash].rich_text?.[0].text.content, "hash-xyz", "hash 保存");
+    assertEqual(Object.keys(props).length, 1, "Status 以外を書かない");
   });
   it("resetApproval は Draft に戻す", async () => {
     let captured: Record<string, unknown> | undefined;

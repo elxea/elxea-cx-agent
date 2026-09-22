@@ -39,8 +39,13 @@ import {
   runDeliveryLedgerQuery,
   compareSegmentTargets,
   pinDeliveryApproval,
+  approveDeliveryRow,
 } from "./lib/delivery-runtime";
 import { httpStatusFor, type SendOneRequest } from "./lib/delivery-send-one";
+import {
+  httpStatusForApprove,
+  type ApproveRequest,
+} from "./lib/delivery-approve";
 import { runBroadcastStatsFetch } from "./lib/broadcast-stats";
 import { runBroadcastRecipientReconcile } from "./lib/broadcast-reconcile";
 import { runDormantReengagement } from "./lib/dormant-reengagement";
@@ -56,7 +61,8 @@ import {
  * 配信の起動経路（2026-08-22 完全オンデマンド化・Setaka 指示）。
  *
  * 一斉配信は **cron から発火しない**。`POST /api/delivery/send-one` を明示的に叩いたときだけ、
- * 承認 pin は `POST /api/delivery/approve`、送信は `POST /api/delivery/send-one`（1 件指定）。
+ * 指紋の固定は `POST /api/delivery/pin`、承認確定は `POST /api/delivery/approve`、
+ * 送信は `POST /api/delivery/send-one`（1 件指定）。
  * 旧「15分毎 cron が承認済み・予定時刻到来の行を拾って自動送信」は廃止した
  * （wrangler.toml の crons からも削除済み。scheduled 側にも no-op ガードを残してある）。
  *
@@ -109,13 +115,10 @@ export type Env = {
   // 【廃止】DELIVERY_SEND_ENABLED（LINE 一斉配信の実送信スイッチ）は 2026-08-22 に撤去した。
   //   承認済み・予定時刻到来の行は staging / 本番のどちらでも常に実送信される。
   //   ※ Cloudflare 側に残っている同名 secret は無害（コードがどこからも読まない）。
-  /**
-   * prod 限定の自己承認緩和フラグ（Tier2 一時例外・Setaka 明示承認 2026-07-25）。
-   * "true" のときだけ prod でも「承認者!=著者」の独立性を免除する（自己承認を許容）。
-   * 未設定/非 "true" は従来どおり fail-closed（独立承認者必須）に戻る＝可逆。
-   * delivery-approval.ts の selfApprovalRelaxed が唯一の参照点。
-   */
-  DELIVERY_ALLOW_SELF_APPROVAL_PROD?: string;
+  // ※ 旧 DELIVERY_ALLOW_SELF_APPROVAL_TEST / _PROD は **撤去した**（2026-09-22・承認 1 点化）。
+  //   承認の権威は All Tasks 判定行 1 か所で、配信DB行の people 列「承認者」「担当者」は
+  //   読まない。よって「独立した承認者」の免除フラグ自体が意味を持たない。
+  //   Cloudflare 側に残っている同名 secret は無害（コードがどこからも読まない）。
   /**
    * 休眠一通（ブロック3-B）の実送信許可フラグ。"true" のときのみ実送信。
    * 既定 未設定=false（dry-run: 候補と本文を台帳へ記録するだけで LINE には送らない）。
@@ -693,10 +696,75 @@ app.post("/api/sync/shopify-metafields", async (c) => {
 });
 
 /**
- * 配信 承認 pin API（T12）。
- * Bearer(SYNC_API_SECRET) 必須・fail-closed。指定ページの現在値をハッシュして
- * 「コンテンツハッシュ」に保存し Status=Approved にする（TOCTOU スナップショット）。
- * 実送信はしない。承認者!=著者もここで検証する。
+ * 配信 承認 pin API（prepare 段・2026-09-22 改訂）。
+ *
+ * `POST /api/delivery/pin { pageId }` / Bearer(SYNC_API_SECRET) 必須・fail-closed。
+ *
+ * 何をするか: 指定行の本文・画像・配信対象の**指紋を固定**する（画像は R2 に取り込んで凍結し、
+ *   そのハッシュを「コンテンツハッシュ」列に保存）。**Status は動かさない（Draft のまま）**。
+ *   人が承認する前に Approved の行を作らないため（Approved は send-one の第一の門）。
+ *   実送信はしない。承認者 people 列は読まない（承認の権威は All Tasks 判定行）。
+ *
+ * 応答: `{ status:"pinned", contentHash, approvedAudienceCount, audienceKey }`
+ *   200 = pin できた / 422 = 内容不備（本文空・画像不正・対象0 等）/ 503 = 一時失敗（再試行可）
+ *   承認前なので **再 pin は上書き可**（何も確定していない）。
+ */
+app.post("/api/delivery/pin", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (
+    !c.env.SYNC_API_SECRET ||
+    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+  ) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const body = await c.req
+    .json<{ pageId?: string }>()
+    .catch(() => ({}) as { pageId?: string });
+  if (!body.pageId || typeof body.pageId !== "string") {
+    return c.json({ error: "pageId is required" }, 400);
+  }
+
+  const result = await pinDeliveryApproval(c.env, body.pageId).catch((err) => ({
+    ok: false as const,
+    retryable: true as const,
+    code: "row_fetch_failed" as const,
+    reason: `想定外の例外（保留・再試行可）: ${err instanceof Error ? err.message : String(err)}`,
+  }));
+
+  if (!result.ok) {
+    return c.json(
+      { status: "rejected", code: result.code, reason: result.reason },
+      httpStatusForApprove(result),
+    );
+  }
+  // 承認スナップショットを呼び出し側（Mac 側の準備段）へ返す。判定タスクに載せる値で、
+  // 送信直前の「対象人数が +10% 超に増えていないか」(N-12) の基準になる。
+  return c.json({
+    status: "pinned",
+    contentHash: result.contentHash,
+    approvedAudienceCount: result.approvedAudienceCount,
+    audienceKey: result.audienceKey,
+  });
+});
+
+/**
+ * 配信 承認確定 API（reserve 段・2026-09-22 改訂＝承認 1 点化）。
+ *
+ * `POST /api/delivery/approve { pageId, approvalRef }` / Bearer(SYNC_API_SECRET) 必須・fail-closed。
+ *   `approvalRef = { taskPageId, approvedEditorEmail, approvedEditedTime }`
+ *
+ * 何をするか: **All Tasks 判定行**（判定=承認 / 最終編集者のメール=DELIVERY_OWNER_EMAIL）を
+ *   検証し、**pin 時の指紋と現在値が一致する**ことを確かめてから Status=Approved を機械が書く。
+ *   実送信はしない。
+ *
+ * ⚠ 配信DB行の people 列「承認者」「担当者」は **読まない**（Boss 判断 Tier 1・2026-09-22）。
+ *   承認 1 点化では人が触るのは判定行だけで、配信DB行の承認者は誰も埋めない。旧 2 点承認の
+ *   門（独立した承認者の要求）は常時 fail になるため撤去した（段1 結合検証 I-C）。
+ *
+ * 応答: `{ status:"approved", pinned:true, approvedAudienceCount, audienceKey, contentHash }`
+ *   200 = 承認できた / 422 = 判定行が未承認・編集者不一致・pin 後に内容が変わった・pin 無し
+ *   409 = 送信済み・送信中 / 503 = 一時失敗（メール解決 / 判定行取得 / 人数解決・再試行可）
  */
 app.post("/api/delivery/approve", async (c) => {
   const authHeader = c.req.header("Authorization");
@@ -707,26 +775,29 @@ app.post("/api/delivery/approve", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const body = await c.req.json<{ pageId?: string }>().catch(() => ({}) as { pageId?: string });
-  if (!body.pageId || typeof body.pageId !== "string") {
-    return c.json({ error: "pageId is required" }, 400);
-  }
+  const body = await c.req
+    .json<ApproveRequest>()
+    .catch(() => ({}) as ApproveRequest);
 
-  const result = await pinDeliveryApproval(c.env, body.pageId).catch((err) => ({
+  const result = await approveDeliveryRow(c.env, body).catch((err) => ({
     ok: false as const,
-    reason: err instanceof Error ? err.message : String(err),
+    retryable: true as const,
+    code: "row_fetch_failed" as const,
+    reason: `想定外の例外（保留・再試行可）: ${err instanceof Error ? err.message : String(err)}`,
   }));
 
   if (!result.ok) {
-    return c.json({ status: "rejected", reason: result.reason }, 422);
+    return c.json(
+      { status: "rejected", code: result.code, reason: result.reason },
+      httpStatusForApprove(result),
+    );
   }
-  // 承認スナップショットを呼び出し側（Mac 側の準備段）へ返す。判定タスクに載せる値で、
-  // 送信直前の「対象人数が +10% 超に増えていないか」(N-12) の基準になる。
   return c.json({
     status: "approved",
     pinned: true,
     approvedAudienceCount: result.approvedAudienceCount,
     audienceKey: result.audienceKey,
+    contentHash: result.contentHash,
   });
 });
 

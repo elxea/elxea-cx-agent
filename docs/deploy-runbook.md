@@ -364,9 +364,23 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 >   （下記「送る前に残枠を照会する」）。送信 API の側は台帳を自動で直さない。
 > - **`Status=Approved` は人が入れる欄ではなくなった**（承認の置き場は All Tasks の判定行 1 か所）。
 >   誰かが手で Approved にしても、判定行の承認確認と指紋照合を通らない限り送られない。
-> - 承認 pin（`POST /api/delivery/approve`）は**配信対象も指紋に含め**、承認時の対象人数を
->   「通数見積」に保存して応答で返す（`approvedAudienceCount`）。
->   **配信対象を含まない旧形式の pin は受け付けない**（旧 pin は全件送信経路の遺物・fail-closed）。
+> - **承認は 2 つの口に分かれた（2026-09-22 / 段1a-3・承認 1 点化）**。
+>   - `POST /api/delivery/pin`（prepare 段）= 本文・画像・配信対象の**指紋を固定するだけ**。
+>     画像は R2 に取り込んで凍結し、ハッシュを「コンテンツハッシュ」列に書く。
+>     **Status は動かさない（Draft のまま）**＝人が承認する前に Approved の行を作らない。
+>     承認前なので**再 pin は上書き可**。
+>   - `POST /api/delivery/approve`（reserve 段）= **All Tasks 判定行**（判定=承認 /
+>     最終編集者のメール = `DELIVERY_OWNER_EMAIL`）を検証し、**pin 時の指紋と現在値が一致する**
+>     ことを確かめてから **Status=Approved を機械が書く**。pin 後に本文・画像・配信対象が
+>     変わっていたら承認しない（`content_changed_since_pin`）。
+>   - **配信DB行の people 列「承認者」「担当者」は読まない**（列は残すが判定に使わない）。
+>     旧 2 点承認（承認者 != 担当者）の門は、1 点化では誰も埋めない項目になり常時 fail に
+>     なったため撤去した。`DELIVERY_ALLOW_SELF_APPROVAL_TEST` / `_PROD` も撤去（コードが
+>     読まないため Cloudflare 側に残る同名 secret は無害）。
+>   - 承認時の対象人数（`approvedAudienceCount`）と `audienceKey` は **応答で返すだけ**で
+>     Notion には書かない（配信DBに「通数見積」「承認日時」列は存在せず、書くと Notion 400。
+>     承認時刻の正本は判定行の `last_edited_time`）。
+>   - **配信対象を含まない旧形式の pin は受け付けない**（旧 pin は全件送信経路の遺物・fail-closed）。
 >
 > **本番反映の前提（未設定だと必ず止まる）**
 >
@@ -392,8 +406,8 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 | **配信の起動方法** | **1 件指定のオンデマンドのみ（2026-09-22 / 段1-A）**。cronの自動配信は**廃止**、全件走査の口も**撤去**。`POST /api/delivery/send-one` に `pageId` を渡したときだけ、**その 1 行だけ**が送られる | Setaka指示（「承認済みが勝手に飛ぶより、回したときに送るほうが安全」）。`wrangler.toml` のcronsに配信パターンなし + `src/index.ts` のdelivery分岐はno-op（`tests/unit/cron-routing.test.ts` が両方を機械検知） |
 | **配信予定日時** | **送信条件ではない**。運用者の記録用メモとして残るだけ（空でも構わない） | 送信判定（`sendOneDelivery()`・`delivery-send-one.ts`）はこの値を一切参照しない（`delivery-time.ts` ごと削除済み） |
 | 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。オンデマンド実行で拾われた行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
-| prod 自己承認（単独運用モード） | **有効**（`DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"`） | `delivery-approval.ts` `selfApprovalRelaxed()` / 決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> |
-| 承認者の存在チェック | **常に必須**（緩和後も空は不可） | `isApprovalAuthorized()` は `approvers.length === 0` で常に false |
+| **承認の権威** | **All Tasks の判定行 1 か所（2026-09-22 / 承認 1 点化）**。配信DB行の people 列「承認者」「担当者」は**読まない** | `delivery-approve.ts`（`approveDelivery`）+ `delivery-approval-task.ts`（`verifyApprovalTask`）。旧 `delivery-approval.ts`（`isApprovalAuthorized` / `selfApprovalRelaxed`）と `DELIVERY_ALLOW_SELF_APPROVAL_*` は**削除済み**（Boss 判断 Tier 1・段1 結合検証 I-C）。旧決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> は本件で置き換え |
+| Status=Approved を書くのは誰か | **機械のみ**（判定行の承認と指紋一致を確認した `POST /api/delivery/approve` だけ） | `markApproved()`（`delivery-repository.ts`）。pin 経路（`pinContentSnapshot()`）は Status を書かない |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
 | staging 実配信の実証 | **済**（写真2枚・4/4 成功 2026-07-27） | 証跡行 <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af> |
 | **全員配信の受信者数** | **送信のたびに LINE から実測（2026-09-11）**。env 固定値は**フォールバック専用**へ降格 | `line-audience-size.ts`（`GET /v2/bot/followers/ids`・ページング + 安全弁・userId は数えるだけで保持しない）。実測不能時のみ `LINE_BROADCAST_ESTIMATED_RECIPIENTS_*` を使い、**どちらを使ったかはログの `[delivery] friend-count basis=` に出る**。実測も env も無ければ従来どおり fail-closed（送信不可） |
@@ -468,6 +482,45 @@ curl -sS "$BASE/api/delivery/ledger?pageId=$PAGE_ID&env=staging" \
   この Worker の送信先と食い違うと **400 で弾かれる**（staging の残枠を本番のものと取り違える事故を塞ぐ）。
 - 副作用ゼロ。配信 DB にも台帳にも書かず、Status も動かさない。外部 I/O は読み取りのみ。
 
+#### 承認の順序（prepare=pin → 人の承認 → reserve=approve → 送信=send-one）
+
+この 4 手をこの順にしか通せない。順序そのものが安全装置である（2026-09-22 / 承認 1 点化）。
+
+| # | 手 | 誰が | 口 | 何が起きるか |
+|---|---|---|---|---|
+| 1 | prepare（pin） | 機械（Mac 側パイプライン） | `POST /api/delivery/pin` | 本文・画像・配信対象の指紋を固定。画像を R2 に凍結。**Status は Draft のまま** |
+| 2 | 承認 | **Setaka（人）** | All Tasks の判定行の「判定」を `承認` にする | 承認の意思はここ 1 か所にしか置かない（配信DB行は触らない） |
+| 3 | reserve（approve） | 機械 | `POST /api/delivery/approve` | 判定行を検証 + 指紋一致を確認 → **Status=Approved を機械が書く** |
+| 4 | 送信 | 機械 | `POST /api/delivery/send-one` | Status=Approved + 指紋 + 判定行を**もう一度**確認してから送る（第二の防御） |
+
+```bash
+# 1. prepare: 指紋を固定する（Status は変わらない。実送信なし）
+curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/pin \
+  -H "Authorization: Bearer $SYNC_API_SECRET_STAGING" \
+  -H "Content-Type: application/json" \
+  -d '{"pageId":"<配信DBの行 id>"}' | jq .
+# → {"status":"pinned","contentHash":"...","approvedAudienceCount":4,"audienceKey":"allowlist"}
+
+# 3. reserve: 判定行の承認を確認して Status=Approved にする（実送信なし）
+curl -sS -X POST https://elxea-agent-staging.setaka-on.workers.dev/api/delivery/approve \
+  -H "Authorization: Bearer $SYNC_API_SECRET_STAGING" \
+  -H "Content-Type: application/json" \
+  -d '{"pageId":"<配信DBの行 id>","approvalRef":{"taskPageId":"<All Tasks 判定行 id>","approvedEditorEmail":"<承認を観測した時点の最終編集者メール>","approvedEditedTime":"<同時点の last_edited_time>"}}' | jq .
+# → {"status":"approved","pinned":true,"approvedAudienceCount":4,"audienceKey":"allowlist","contentHash":"..."}
+```
+
+止まったときの読み方（`code` を見る）:
+
+| code | HTTP | 意味 | 次の手 |
+|---|---|---|---|
+| `pin_missing` | 422 | prepare（pin）を通っていない | 1 からやり直す |
+| `judgment_not_approved` | 422 | 判定行が承認になっていない | 人の承認を待つ |
+| `editor_mismatch` | 422 | 判定行の最終編集者が承認者本人ではない | 承認者本人が判定行を編集し直す |
+| `content_changed_since_pin` | 422 | pin 後に本文・画像・配信対象が変わった | 内容を確定させて 1 からやり直す |
+| `owner_email_unset` | 422 | secret `DELIVERY_OWNER_EMAIL` が未設定 | secret を入れる（照合先が無いと全拒否） |
+| `email_lookup_retryable` / `task_fetch_retryable` / `audience_unresolved` | 503 | 一時失敗（Notion 429/5xx・人数を数えられない） | そのまま再試行してよい（何も書いていない） |
+| `row_already_sent` / `row_sending` | 409 | 既に送信済み・送信中 | 触らない |
+
 #### 1 件指定送信のしかた（唯一の配信起動経路）
 
 `SYNC_API_SECRET` によるBearer認証必須（未設定・不一致は401でfail-closed）。
@@ -487,8 +540,10 @@ curl -sS -X POST https://elxea-agent.setaka-on.workers.dev/api/delivery/send-one
   -d '{"pageId":"<配信DBの行 id>","reservationId":"<予約 ID>","approvalRef":{"taskPageId":"<All Tasks 判定行 id>","approvedEditorEmail":"<承認者のメール>","approvedEditedTime":"<承認観測時の last_edited_time>","approvedAudienceCount":<承認時の対象人数>}}' | jq .
 ```
 
-`approvalRef` の 4 つの値は **`POST /api/delivery/approve`（承認 pin）の応答と判定行から取る**。
-手で組み立てるものではない（Mac 側パイプラインの準備段が固定する）。
+`approvalRef` の 4 つの値は **`POST /api/delivery/approve` の応答と判定行から取る**
+（`approvedAudienceCount` は approve の応答、`taskPageId` / `approvedEditorEmail` /
+`approvedEditedTime` は Mac 側の承認監視が「判定=承認を初めて観測した時点」で固定した値）。
+手で組み立てるものではない。
 `reservationId` は 1 回の送信意図につき 1 つ。同じ値で再度叩いても **再送されない**（冪等）。
 
 レスポンス例（`targetEnv` で送信先OAを、`status` / `sentCount` で実績を確認する）:
@@ -673,24 +728,28 @@ pnpm exec wrangler secret list --env staging
 | すべて止める（本番・staging共通） | **`POST /api/delivery/send-one` を叩かない（1 件指定しかないので、指定しなければ何も送られない）** | 完全オンデマンド化（2026-08-22）により、これだけで新規送信はゼロ。cronの自動配信は存在しない |
 | 特定1件を止める | NotionでStatusを **Approved → Draft** | run を叩く前なら確実に送信対象から外れる。run 実行中は間に合わない可能性あり |
 | 念のため全行を無効化 | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | Approvedの行だけが送信対象。Approvedがゼロなら run を叩いても何も出ない |
-| 自己承認を厳格モードへ戻す | `pnpm exec wrangler secret delete DELIVERY_ALLOW_SELF_APPROVAL_PROD` | 独立承認者必須（fail-closed）へ即復帰。チェック本体はコードに残存＝可逆 |
+| 承認を取り消す | All Tasks 判定行の「判定」を承認以外に戻す（さらに念のため配信DB行を Approved → Draft） | 判定行が承認でなければ send-one は `judgment_not_approved` で止まる（第二の防御）。配信DB行の Status も第一の門として効く |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
 | コードごと戻す | `wrangler rollback` | 直前バージョンへ（secret は消えない・`keep_vars = true`） |
 
 **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
 
-### 残存リスク（単独運用モードの明示）
+### 残存リスク（承認 1 点化の明示）
 
-- **per-配信の人間ゲートが1点に縮退している**。従来の「著者 != 承認者」による二人目の確認は
-  `DELIVERY_ALLOW_SELF_APPROVAL_PROD="true"` の間は働かず、配信ごとの人的チェックは
-  **「Notion に行を作り Status=Approved にする」その一操作**のみになる。
-  さらに2026-08-22に実送信スイッチ（送信直前のTier 2ゲート）も撤去したため、人的ゲートは承認のみ。
-  残る自動ゲートは形式検査（承認者の存在・日時到来・画像形式/サイズ・コンテンツハッシュ照合・無料枠台帳）
-  であり、**内容の妥当性・宛先の妥当性は検査されない**。
-- したがって **Notion「配信コンテンツ」の書き込み権限が、実質的な配信統制そのもの**になる。
-  当該 DB の編集権限を持つ人を増やすことは「本番配信を単独で実行できる人を増やす」ことと等価として扱う。
-- 緩和は可逆。運用体制に二人目を置ける段階でフラグを削除し、独立承認者必須へ戻す。
+- **per-配信の人間ゲートは 1 点**である。配信ごとの人的チェックは **All Tasks 判定行の
+  「判定」を承認にする、その一操作**のみ（2026-09-22 の承認 1 点化。従来の「著者 != 承認者」の
+  二人目の確認は、1 点化で誰も埋めない項目になったため撤去した）。
+  2026-08-22 に実送信スイッチ（送信直前の Tier 2 ゲート）も撤去しているため、人的ゲートは承認のみ。
+  残る自動ゲートは形式検査（判定行の最終編集者 = `DELIVERY_OWNER_EMAIL` / 指紋一致 /
+  対象人数 +10% / 画像形式・サイズ / 無料枠台帳 / claim による二重送信防止）であり、
+  **内容の妥当性・宛先の妥当性は検査されない**。
+- したがって **All Tasks 判定行の編集権限と Notion「配信コンテンツ」の書き込み権限が、
+  実質的な配信統制そのもの**になる。どちらかの編集権限を持つ人を増やすことは
+  「本番配信を単独で実行できる人を増やす」ことと等価として扱う。
+- 判定行の `last_edited_by` は**ページ全体で 1 人**しか持てないため、承認以外の編集
+  （コメント欄の更新等）でも最終編集者は動く。承認の観測時点を固定するのは Mac 側の
+  承認監視であり、配信本体はその固定値を突き合わせる**第二の防御**にとどまる。
 
 ## roji最初のアンケートの停止スイッチ（`ROJI_SURVEY_ENABLED`）
 

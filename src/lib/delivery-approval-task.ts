@@ -25,8 +25,13 @@ export interface ApprovalRef {
   approvedEditorEmail: string;
   /** 同時点の `last_edited_time`（ISO8601）。 */
   approvedEditedTime: string;
-  /** 同時点の配信対象人数（+10% 判定の基準・N-12）。 */
-  approvedAudienceCount: number;
+  /**
+   * 同時点の配信対象人数（+10% 判定の基準・N-12）。
+   * **send-one では必須**（`validateSendOneRequest` が 1 以上を要求する）。
+   * approve 経路は人数を自分で実測して応答で返すため渡さない（任意）。
+   * `verifyApprovalTask` はこの値を判定に使わない。
+   */
+  approvedAudienceCount?: number;
 }
 
 /** 判定行の生の読み取り結果（Notion REST の必要部分だけ）。 */
