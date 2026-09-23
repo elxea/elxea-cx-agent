@@ -170,15 +170,21 @@ export interface SendOutcome {
   /** エラー要約（PII 非記載）。 */
   error?: string;
   /**
-   * LINE が返した送信 1 回ぶんの鍵（応答ヘッダ X-Line-Request-Id）。broadcast のみ設定する。
+   * LINE が返した送信の鍵（応答ヘッダ X-Line-Request-Id / 受理済みなら x-line-accepted-request-id）の
+   * 代表値。broadcast は 1 本しかないのでその値、multicast は **受理されたバッチのうち最初の 1 本**。
    *
-   * なぜ持つか: 全員配信は宛先指定なしで送るため「実際に何通届いたか」は LINE 側にしか無い。
-   *   後から GET /v2/bot/insight/message/event?requestId= で実配信数を引いて台帳を正すための鍵で、
-   *   **この場で拾わないと二度と手に入らない**（統計は送信から 14 日で消える）。
-   * multicast は 1 配信が複数リクエストに割れて鍵が 1 本に定まらないため設定しない
-   *   （multicast の計測は customAggregationUnits 経由で別に取れる）。
+   * なぜ持つか: 「送った」と言える根拠そのもの（N-15: 鍵が 1 本も無い送信は成功と記録しない）。
+   *   broadcast では後から GET /v2/bot/insight/message/event?requestId= で実配信数を引いて
+   *   台帳を正すための鍵にもなり、**この場で拾わないと二度と手に入らない**（統計は 14 日で消える）。
+   * 全件は `requestIds` に入る（multicast は 500 人ごとにリクエストが割れるため）。
    */
   requestId?: string;
+  /**
+   * この送信で LINE が受理した API 呼び出しごとの鍵（呼び出し順）。broadcast は 1 要素。
+   * multicast はバッチごとに 1 要素（鍵が取れなかったバッチは入らない）。
+   * `requestId` はこの先頭と同じ値にそろえる。
+   */
+  requestIds?: string[];
   /**
    * LINE が「同じ再試行キーの要求は既に受理済み」(409 + `x-line-accepted-request-id`) を
    * 返したことで成功と判定した場合に true。
@@ -268,6 +274,22 @@ export function acceptedRequestIdFrom(res: {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+/** LINE が成功応答に付ける送信の鍵のヘッダ名。 */
+export const LINE_REQUEST_ID_HEADER = "x-line-request-id";
+
+/**
+ * 成功応答（2xx）の `x-line-request-id` を返す（純粋・判定のみ）。
+ * ヘッダが無い・空白だけなら null（= 鍵が取れなかった。呼び出し側が「不明」に倒す）。
+ */
+export function requestIdFrom(res: {
+  headers: { get(name: string): string | null };
+}): string | null {
+  const v = res.headers.get(LINE_REQUEST_ID_HEADER);
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+}
+
 /**
  * multicast のバッチ別 `X-Line-Retry-Key` を **決定的に** 導出する（純粋・QA MID-1）。
  *
@@ -308,6 +330,9 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         ? { customAggregationUnits: [aggregationUnit] }
         : {};
       let alreadyAccepted = false;
+      // 受理されたバッチごとの request id（呼び出し順）。宛先を列挙する配信（「社内」等）でも
+      //   「送った」根拠の鍵を返すため、broadcast と同じく応答ヘッダから必ず拾う（N-15）。
+      const requestIds: string[] = [];
       // バッチごとに鍵を変える（同一鍵で宛先を変えると 2 バッチ目以降が 409 で落ちる）。
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
@@ -325,6 +350,8 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
           });
           if (res.ok) {
             delivered += batch.length;
+            const rid = requestIdFrom(res);
+            if (rid) requestIds.push(rid);
             continue;
           }
           // 409 + x-line-accepted-request-id = このバッチは前回の要求で既に受理済み
@@ -333,6 +360,7 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
           if (accepted) {
             delivered += batch.length;
             alreadyAccepted = true;
+            requestIds.push(accepted);
             continue;
           }
           const t = await res.text().catch(() => "unknown");
@@ -349,6 +377,8 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         partial: errors.length > 0 && delivered > 0,
         error: errors.length > 0 ? errors.join("; ") : undefined,
         alreadyAccepted: alreadyAccepted || undefined,
+        requestId: requestIds[0],
+        requestIds,
       };
     },
 
@@ -371,12 +401,13 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         });
         if (res.ok) {
           // 送信 1 回を指す鍵。ここで拾い損ねると実配信数を後から引く手段が無くなる。
-          const requestId = res.headers.get("x-line-request-id") ?? undefined;
+          const requestId = requestIdFrom(res) ?? undefined;
           return {
             ok: true,
             deliveredRecipients: estimatedRecipients,
             partial: false,
             requestId,
+            requestIds: requestId ? [requestId] : [],
           };
         }
         // 409 + x-line-accepted-request-id = 同じ再試行キーの要求が既に受理済み。
@@ -390,6 +421,7 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
             deliveredRecipients: estimatedRecipients,
             partial: false,
             requestId: accepted,
+            requestIds: [accepted],
             alreadyAccepted: true,
           };
         }
@@ -457,6 +489,9 @@ export function createRecordingSender(
         deliveredRecipients: outcome?.deliveredRecipients ?? count,
         partial: outcome?.partial ?? false,
         error: outcome?.error,
+        requestId: outcome?.requestId,
+        requestIds: outcome?.requestIds,
+        alreadyAccepted: outcome?.alreadyAccepted,
       };
     },
     async broadcast(_messages, estimatedRecipients, aggregationUnit, retryKey) {
@@ -472,6 +507,7 @@ export function createRecordingSender(
         partial: outcome?.partial ?? false,
         error: outcome?.error,
         requestId: outcome?.requestId,
+        requestIds: outcome?.requestIds,
         alreadyAccepted: outcome?.alreadyAccepted,
       };
     },

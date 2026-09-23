@@ -39,6 +39,13 @@ export const LINE_INSIGHT_MESSAGE_EVENT_URL =
 /** LINE が統計を保持する期間（日）。これを過ぎた送信はもう引けない。 */
 export const INSIGHT_RETENTION_DAYS = 14;
 
+/**
+ * 補正対象を引く PostgREST の or 条件（出所が未記録、または実数でも宛先列挙でもない行）。
+ * NULL は not.in に掛からないため is.null を併記する。
+ */
+export const RECONCILE_PENDING_FILTER =
+  "recipients_basis.is.null,recipients_basis.not.in.(actual_delivered,addressed_list)";
+
 /** 1 回の実行で補正を試みる行数の上限（LINE への GET を無制限に撃たないための安全弁）。 */
 export const RECONCILE_MAX_ROWS = 50;
 
@@ -183,7 +190,9 @@ export function createSupabaseReconcileStore(
         .select("id, line_request_id, recipients, created_at")
         .not("line_request_id", "is", null)
         // 既に実数で確定した行は対象外（is.null で「未確定 or 見積のまま」を拾う）。
-        .or("recipients_basis.is.null,recipients_basis.neq.actual_delivered")
+        // 宛先を列挙した送信（addressed_list = multicast）も対象外: insight/message/event は
+        //   broadcast/narrowcast の鍵でしか引けず、multicast の鍵で 14 日間 GET し続けるだけになる。
+        .or(RECONCILE_PENDING_FILTER)
         .order("created_at", { ascending: false })
         .limit(limit);
       if (error) {

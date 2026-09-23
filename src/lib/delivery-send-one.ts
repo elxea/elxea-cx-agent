@@ -43,6 +43,7 @@ import {
   DEFAULT_SAFETY_HEADROOM,
   type ConsumptionFetcher,
   type GuardOptions,
+  type RecipientsBasis,
 } from "./message-ledger";
 import type { DeliveryPage, DeliveryResult } from "./delivery-repository";
 import type { ResolvedTargets } from "./target-resolver";
@@ -119,16 +120,23 @@ export interface SendOneResponse {
   ledgerRemaining: number | null;
   reservationId: string;
   /**
-   * LINE が返した送信 1 回ぶんの鍵（`X-Line-Request-Id` / 再試行キー受理済みなら
-   * `x-line-accepted-request-id`）。**送れたときだけ入る。それ以外は null**。
+   * LINE が返した送信の鍵（`X-Line-Request-Id` / 再試行キー受理済みなら
+   * `x-line-accepted-request-id`）。**status=sent のときは必ず空でない値が入る**
+   * （鍵が 1 本も取れない送信は sent にしない・N-15）。送れていないときは null。
    *
-   * なぜ応答に載せるか: 呼び出し側（Mac 側パイプライン）が実配信数の後追い照合に使う鍵で、
+   * なぜ応答に載せるか: 呼び出し側（Mac 側パイプライン）は「sent かつ sentCount>0 かつ
+   *   requestId あり」だけを成功と読む契約。加えて全員配信では実配信数の後追い照合の鍵で、
    *   この場で受け取らないと二度と手に入らない（LINE の統計は送信から 14 日で消える）。
-   * multicast は 1 配信が複数リクエストに割れて鍵が 1 本に定まらないため null
-   *   （multicast の計測は customAggregationUnits 経由で別に取る）。
-   * 同一 reservationId の二重到達（冪等応答）も、前回の鍵は保持していないため null。
+   * 全員配信（broadcast）は 1 本、宛先を列挙する配信（multicast・「社内」等）は
+   *   受理された最初のバッチの鍵。全バッチぶんは `requestIds` に入る。
+   * 同一 reservationId の二重到達（冪等応答）は、前回の鍵を保持していないため null。
    */
   requestId: string | null;
+  /**
+   * この送信で LINE が受理した API 呼び出しごとの鍵（呼び出し順）。先頭は `requestId` と同じ。
+   * multicast は 500 人ごとにリクエストが割れるため複数になりうる。送れていないときは空配列。
+   */
+  requestIds: string[];
 }
 
 /** claim の結果（原子的に取れたか / 既存がいるか）。 */
@@ -165,7 +173,15 @@ export interface SendReservationPort {
     month: string;
     sendState: "sent" | "failed";
     sentCount: number;
+    /** 代表の鍵（台帳 line_request_id）。 */
     lineRequestId?: string;
+    /** 全呼び出しぶんの鍵（multicast で複数バッチのとき 2 件以上）。 */
+    lineRequestIds?: string[];
+    /**
+     * recipients の出所（台帳 recipients_basis）。宛先を列挙した送信は `addressed_list` を渡し、
+     * broadcast 専用の後追い補正（insight/message/event）の対象から外す。
+     */
+    recipientsBasis?: RecipientsBasis;
   }): Promise<void>;
 }
 
@@ -296,6 +312,7 @@ function reject(
     ledgerRemaining: extra?.ledgerRemaining ?? null,
     reservationId,
     requestId: null,
+    requestIds: [],
   };
 }
 
@@ -313,6 +330,7 @@ function retryable(
     ledgerRemaining: null,
     reservationId,
     requestId: null,
+    requestIds: [],
   };
 }
 
@@ -517,6 +535,7 @@ export async function sendOneDelivery(
         ledgerRemaining,
         reservationId,
         requestId: null,
+        requestIds: [],
       };
     }
     if (claim.sameReservation && claim.sendState === "failed") {
@@ -529,6 +548,7 @@ export async function sendOneDelivery(
         ledgerRemaining,
         reservationId,
         requestId: null,
+        requestIds: [],
       };
     }
     if (claim.sameReservation) {
@@ -571,20 +591,26 @@ export async function sendOneDelivery(
 
   const delivered = outcome.deliveredRecipients;
   const sentAtUtc = deps.now().toISOString();
+  // 実際に受理された API 呼び出しの鍵（broadcast は 1 本 / multicast はバッチごと）。
+  const requestIds = collectRequestIds(outcome);
+  const primaryRequestId = requestIds[0] ?? null;
+  // 宛先を列挙した送信（multicast）の recipients は列挙した人数そのもの（見積ではない）。
+  //   broadcast 専用の後追い補正（insight/message/event）の対象から外すために出所を残す。
+  const recipientsBasis: RecipientsBasis | undefined =
+    targets.kind === "multicast" ? "addressed_list" : undefined;
 
-  // (g) Sent は「成功応答を確認してのみ」。送信数 0、または全員配信で request id が
-  //   取れていない場合は Failed（成果物フィールドの有無で成否を判定しない・N-15）。
-  const confirmedOk =
-    outcome.ok &&
-    delivered > 0 &&
-    (targets.kind !== "broadcast" || typeof outcome.requestId === "string");
+  // (g) Sent は「成功応答を確認してのみ」。送信数 0、または **送り方を問わず** request id が
+  //   1 本も取れていない場合は Sent にしない（成果物フィールドの有無で成否を判定しない・N-15）。
+  //   以前は全員配信だけに鍵を求めていたため、「社内」等の multicast は鍵なしで sent を返し、
+  //   Mac 側の契約（sent かつ sentCount>0 かつ requestId あり）で「結果不明」になっていた。
+  const confirmedOk = outcome.ok && delivered > 0 && primaryRequestId !== null;
 
   if (!confirmedOk) {
     const code: SendOneCode =
       outcome.ok && delivered > 0 ? "send_unconfirmed" : "send_failed";
     const reason =
       code === "send_unconfirmed"
-        ? "LINE は成功を返したが送信 1 回を指す鍵（request id）が取れなかった（Sent と記録しない・自動再送もしない）"
+        ? "LINE は成功を返したが送信を指す鍵（request id）が 1 本も取れなかった（Sent と記録しない・自動再送もしない）"
         : `送信失敗（${attempts} 回試行）: ${outcome.error ?? "unknown"}`;
     await deps.reservation
       .finish({
@@ -592,7 +618,9 @@ export async function sendOneDelivery(
         month,
         sendState: "failed",
         sentCount: 0,
-        lineRequestId: outcome.requestId,
+        lineRequestId: primaryRequestId ?? undefined,
+        lineRequestIds: requestIds,
+        recipientsBasis,
       })
       .catch(() => {});
     await deps.repo
@@ -612,7 +640,8 @@ export async function sendOneDelivery(
       audienceCount,
       ledgerRemaining,
       reservationId,
-      requestId: outcome.requestId ?? null,
+      requestId: primaryRequestId,
+      requestIds,
     };
   }
 
@@ -622,7 +651,9 @@ export async function sendOneDelivery(
       month,
       sendState: "sent",
       sentCount: delivered,
-      lineRequestId: outcome.requestId,
+      lineRequestId: primaryRequestId ?? undefined,
+      lineRequestIds: requestIds,
+      recipientsBasis,
     })
     .catch(() => {});
 
@@ -647,8 +678,32 @@ export async function sendOneDelivery(
     audienceCount,
     ledgerRemaining,
     reservationId,
-    requestId: outcome.requestId ?? null,
+    requestId: primaryRequestId,
+    requestIds,
   };
+}
+
+/**
+ * 送信結果から「LINE が受理した呼び出しの鍵」を重複なく取り出す（純粋）。
+ * 空文字・空白だけの値は鍵と見なさない（取れていないのと同じ = 「不明」に倒す）。
+ * 並びは requestId（代表）を先頭に、続けて requestIds の順。requestId だけを返す実装
+ * （旧 sender / stub）も拾う。
+ */
+export function collectRequestIds(outcome: {
+  requestId?: string;
+  requestIds?: string[];
+}): string[] {
+  const out: string[] = [];
+  const add = (v: unknown) => {
+    if (typeof v !== "string") return;
+    const t = v.trim();
+    if (t.length > 0 && !out.includes(t)) out.push(t);
+  };
+  if (typeof outcome.requestId === "string" && outcome.requestId.trim().length > 0) {
+    add(outcome.requestId);
+  }
+  for (const v of outcome.requestIds ?? []) add(v);
+  return out;
 }
 
 async function attemptSend(

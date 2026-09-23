@@ -755,12 +755,26 @@ export function createSupabaseReservationPort(
           send_state: input.sendState,
           sent_count: input.sentCount,
           ...(input.lineRequestId ? { line_request_id: input.lineRequestId } : {}),
+          ...(input.recipientsBasis ? { recipients_basis: input.recipientsBasis } : {}),
+          // 複数バッチに割れた送信は、代表以外の鍵も失わないよう全件を note に残す
+          //   （専用列は migration が要るため note を使う。request id は PII ではない）。
+          ...((input.lineRequestIds?.length ?? 0) > 1
+            ? { note: formatRequestIdsNote(input.lineRequestIds ?? []) }
+            : {}),
         })
         .eq("notion_page_id", input.pageId)
         .eq("month", input.month);
       if (error) throw new Error(`send reservation finish failed: ${error.message}`);
     },
   };
+}
+
+/**
+ * 複数バッチに割れた送信の request id 全件を台帳 note 用の 1 行にする（純粋・PII なし）。
+ * note は人が読む訂正根拠の欄なので、何の列挙かを先頭に書く。
+ */
+export function formatRequestIdsNote(ids: readonly string[]): string {
+  return `送信の request id 全 ${ids.length} 件（バッチ順）: ${ids.join(",")}`;
 }
 
 function rejectedResponse(
@@ -777,6 +791,7 @@ function rejectedResponse(
     ledgerRemaining: null,
     reservationId,
     requestId: null,
+    requestIds: [],
   };
 }
 

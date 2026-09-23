@@ -25,6 +25,7 @@ import { describe, expect, it } from "vitest";
 import {
   sendOneDelivery,
   audienceCountWithinTolerance,
+  collectRequestIds,
   httpStatusFor,
   type SendOneDeps,
   type SendOneRequest,
@@ -39,8 +40,15 @@ import {
   createLineSender,
   deterministicRetryKey,
   LINE_ACCEPTED_REQUEST_ID_HEADER,
+  LINE_REQUEST_ID_HEADER,
+  requestIdFrom,
   type SendOutcome,
 } from "../../src/lib/line-messages";
+import {
+  createSupabaseReservationPort,
+  formatRequestIdsNote,
+} from "../../src/lib/delivery-runtime";
+import { RECONCILE_PENDING_FILTER } from "../../src/lib/broadcast-reconcile";
 import {
   DEFAULT_APPROVAL_JUDGMENTS,
   isApprovedJudgment,
@@ -53,6 +61,7 @@ import {
 } from "../../src/lib/delivery-approval-task";
 import type { DeliveryChannel } from "../../src/lib/delivery-channel";
 import type { DeliveryPage, DeliveryResult } from "../../src/lib/delivery-repository";
+import type { ResolvedTargets } from "../../src/lib/target-resolver";
 
 const OWNER = "owner@example.test";
 const PAGE_ID = "page-hermetic-0001";
@@ -101,6 +110,8 @@ interface Recorded {
   sends: Array<{ kind: "broadcast" | "multicast"; retryKey?: string }>;
   claims: number;
   finishes: Array<{ sendState: string; sentCount: number }>;
+  /** finish に渡った入力の全体（鍵・出所の検証用）。 */
+  finishInputs: Array<Parameters<SendOneDeps["reservation"]["finish"]>[0]>;
 }
 
 interface FakeOptions {
@@ -117,6 +128,8 @@ interface FakeOptions {
   apiUsage?: number;
   claim?: ReservationClaim;
   sendOutcomes?: SendOutcome[];
+  /** 対象解決の結果（既定は全員配信）。「社内」等の宛先列挙は multicast を渡す。 */
+  targets?: ResolvedTargets;
 }
 
 /** 既定で「送れる」状態の deps を組み、必要な箇所だけ壊して分岐を見る。 */
@@ -134,6 +147,7 @@ async function makeDeps(
     sends: [],
     claims: 0,
     finishes: [],
+    finishInputs: [],
   };
   const outcomes = opts.sendOutcomes ?? [
     { ok: true, deliveredRecipients: opts.audienceCount ?? 100, partial: false, requestId: "req-1" },
@@ -160,6 +174,7 @@ async function makeDeps(
       },
       finish: async (input) => {
         rec.finishes.push({ sendState: input.sendState, sentCount: input.sentCount });
+        rec.finishInputs.push(input);
       },
     },
     confirmedConsumption: async () => opts.confirmed ?? 0,
@@ -185,10 +200,11 @@ async function makeDeps(
       },
     },
     ownerEmail: opts.ownerEmail === undefined ? OWNER : (opts.ownerEmail ?? undefined),
-    resolveTargets: async () => ({
-      kind: "broadcast",
-      estimatedRecipients: opts.audienceCount ?? 100,
-    }),
+    resolveTargets: async () =>
+      opts.targets ?? {
+        kind: "broadcast",
+        estimatedRecipients: opts.audienceCount ?? 100,
+      },
     sender: {
       broadcast: async (_m, _n, _u, retryKey) => {
         rec.sends.push({ kind: "broadcast", retryKey });
@@ -761,6 +777,9 @@ describe("multicast の再試行キーはバッチごとに分かれる（後半
     expect(outcome.deliveredRecipients).toBe(600);
     expect(outcome.partial).toBe(false);
     expect(outcome.alreadyAccepted).toBe(true);
+    // 1 バッチ目は x-line-request-id 無しの 200、2 バッチ目は受理済みの鍵 → 取れた鍵は 1 本。
+    expect(outcome.requestIds).toEqual(["accepted-batch-2"]);
+    expect(outcome.requestId).toBe("accepted-batch-2");
 
     expect(stub.calls).toHaveLength(2);
     // 鍵が分かれていること（同一鍵だと 2 バッチ目が「同じ鍵の別宛先」で弾かれる）。
@@ -819,5 +838,272 @@ describe("承認判定は実オプション名の完全一致 allowlist（未知
     const res2 = await sendOneDelivery(allowed.deps, req);
     expect(res2.status).toBe("sent");
     expect(allowed.rec.sends).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 一斉配信以外（宛先を列挙する multicast・「社内」等）でも request id を返す
+//
+// 背景（2026-09-24 00:47 JST 検証環境）: 「社内」向けは multicast で送られ、sender が
+//   x-line-request-id を拾っていなかったため status=sent なのに requestId が空だった。
+//   Mac 側の契約（sent かつ sentCount>0 かつ requestId あり）で「送信結果不明」になった。
+// ---------------------------------------------------------------------------
+
+const INTERNAL_TARGETS: ResolvedTargets = {
+  kind: "multicast",
+  userIds: ["Uaaa", "Ubbb", "Uccc"],
+  batches: [["Uaaa", "Ubbb", "Uccc"]],
+  estimatedRecipients: 3,
+};
+
+/** 「社内」（3 人・宛先列挙）を承認時人数 3 で送る要求。 */
+const internalReq: SendOneRequest = {
+  ...req,
+  approvalRef: { ...req.approvalRef, approvedAudienceCount: 3 },
+};
+
+describe("一斉配信以外でも request id を返す（宛先列挙の送信・N-15）", () => {
+  it("multicast の成功で sender が返した鍵を requestId / requestIds / 台帳へ載せる", async () => {
+    const { deps, rec } = await makeDeps({
+      targets: INTERNAL_TARGETS,
+      audienceCount: 3,
+      sendOutcomes: [
+        {
+          ok: true,
+          deliveredRecipients: 3,
+          partial: false,
+          requestId: "mc-req-1",
+          requestIds: ["mc-req-1"],
+        },
+      ],
+    });
+    const res = await sendOneDelivery(deps, internalReq);
+    expect(res.status).toBe("sent");
+    expect(res.code).toBe("sent");
+    expect(res.sentCount).toBe(3);
+    expect(res.requestId).toBe("mc-req-1");
+    expect(res.requestIds).toEqual(["mc-req-1"]);
+    expect(rec.sends.map((s) => s.kind)).toEqual(["multicast"]);
+    expect(rec.results[0].status).toBe("Sent");
+    expect(rec.finishInputs).toHaveLength(1);
+    expect(rec.finishInputs[0]).toMatchObject({
+      sendState: "sent",
+      sentCount: 3,
+      lineRequestId: "mc-req-1",
+      lineRequestIds: ["mc-req-1"],
+      // 宛先列挙の行は broadcast 専用の後追い補正に回さない。
+      recipientsBasis: "addressed_list",
+    });
+  });
+
+  it("multicast で送れたが鍵が 1 本も無ければ sent にしない（不明側・自動再送なし）", async () => {
+    const { deps, rec } = await makeDeps({
+      targets: INTERNAL_TARGETS,
+      audienceCount: 3,
+      sendOutcomes: [{ ok: true, deliveredRecipients: 3, partial: false }],
+    });
+    const res = await sendOneDelivery(deps, internalReq);
+    expect(res.status).toBe("failed");
+    expect(res.code).toBe("send_unconfirmed");
+    expect(res.sentCount).toBe(0);
+    expect(res.requestId).toBeNull();
+    expect(res.requestIds).toEqual([]);
+    expect(httpStatusFor(res)).toBe(502);
+    expect(rec.results[0].status).toBe("Failed");
+    expect(rec.sends).toHaveLength(1);
+    expect(rec.finishInputs[0]).toMatchObject({ sendState: "failed", sentCount: 0 });
+    expect(rec.finishInputs[0].lineRequestId).toBeUndefined();
+  });
+
+  it("鍵が空文字・空白だけなら取れていないのと同じ（broadcast でも sent にしない）", async () => {
+    const { deps } = await makeDeps({
+      sendOutcomes: [
+        { ok: true, deliveredRecipients: 100, partial: false, requestId: "  ", requestIds: [""] },
+      ],
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.status).toBe("failed");
+    expect(res.code).toBe("send_unconfirmed");
+    expect(res.requestId).toBeNull();
+  });
+
+  it("broadcast の台帳には出所を書かない（後追い補正の対象のまま）", async () => {
+    const { deps, rec } = await makeDeps();
+    const res = await sendOneDelivery(deps, req);
+    expect(res.requestId).toBe("req-1");
+    expect(res.requestIds).toEqual(["req-1"]);
+    expect(rec.finishInputs[0].lineRequestId).toBe("req-1");
+    expect(rec.finishInputs[0].recipientsBasis).toBeUndefined();
+  });
+
+  it("collectRequestIds: 代表を先頭に、空白を除き重複なしで集める（純粋）", () => {
+    expect(collectRequestIds({})).toEqual([]);
+    expect(collectRequestIds({ requestId: "a" })).toEqual(["a"]);
+    expect(collectRequestIds({ requestId: "a", requestIds: ["a", "b", " ", "b"] })).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(collectRequestIds({ requestIds: ["", " x "] })).toEqual(["x"]);
+  });
+
+  it("requestIdFrom: x-line-request-id を trim して返し、無い・空白は null（純粋）", () => {
+    expect(
+      requestIdFrom(new Response(null, { headers: { [LINE_REQUEST_ID_HEADER]: " r-1 " } })),
+    ).toBe("r-1");
+    expect(requestIdFrom(new Response(null, { headers: { [LINE_REQUEST_ID_HEADER]: " " } }))).toBeNull();
+    expect(requestIdFrom(new Response(null))).toBeNull();
+  });
+});
+
+describe("実 sender（createLineSender）の multicast が鍵を拾う（fetch 差し替え・実送信ゼロ）", () => {
+  it("「社内」相当（1 バッチ）: 200 の x-line-request-id が応答の requestId になる", async () => {
+    const { deps, rec } = await makeDeps({ targets: INTERNAL_TARGETS, audienceCount: 3 });
+    deps.sender = createLineSender(TEST_CHANNEL);
+    const stub = stubFetch(
+      () => new Response("{}", { status: 200, headers: { [LINE_REQUEST_ID_HEADER]: "line-mc-1" } }),
+    );
+    let res;
+    try {
+      res = await sendOneDelivery(deps, internalReq);
+    } finally {
+      stub.restore();
+    }
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0].url.endsWith("/multicast")).toBe(true);
+    expect(stub.calls[0].to).toEqual(["Uaaa", "Ubbb", "Uccc"]);
+    expect(res.status).toBe("sent");
+    expect(res.sentCount).toBe(3);
+    expect(res.requestId).toBe("line-mc-1");
+    expect(res.requestIds).toEqual(["line-mc-1"]);
+    expect(rec.finishInputs[0]).toMatchObject({
+      sendState: "sent",
+      lineRequestId: "line-mc-1",
+      recipientsBasis: "addressed_list",
+    });
+  });
+
+  it("2 バッチ: 両方の鍵を呼び出し順で requestIds に残し、requestId は先頭", async () => {
+    const sender = createLineSender(TEST_CHANNEL);
+    const userIds = Array.from({ length: 600 }, (_v, i) => `U${String(i).padStart(4, "0")}`);
+    const stub = stubFetch(
+      (_call, index) =>
+        new Response("{}", {
+          status: 200,
+          headers: { [LINE_REQUEST_ID_HEADER]: `line-mc-batch-${index + 1}` },
+        }),
+    );
+    let outcome: SendOutcome;
+    try {
+      outcome = await sender.multicast(
+        chunkForMulticast(userIds),
+        [{ type: "text", text: "テスト本文" }],
+        undefined,
+        await deterministicRetryKey(RESERVATION),
+      );
+    } finally {
+      stub.restore();
+    }
+    expect(outcome.ok).toBe(true);
+    expect(outcome.deliveredRecipients).toBe(600);
+    expect(outcome.requestIds).toEqual(["line-mc-batch-1", "line-mc-batch-2"]);
+    expect(outcome.requestId).toBe("line-mc-batch-1");
+  });
+
+  it("200 でも x-line-request-id が無ければ send_unconfirmed（Sent と記録しない）", async () => {
+    const { deps, rec } = await makeDeps({ targets: INTERNAL_TARGETS, audienceCount: 3 });
+    deps.sender = createLineSender(TEST_CHANNEL);
+    const stub = stubFetch(() => new Response("{}", { status: 200 }));
+    let res;
+    try {
+      res = await sendOneDelivery(deps, internalReq);
+    } finally {
+      stub.restore();
+    }
+    expect(res.status).toBe("failed");
+    expect(res.code).toBe("send_unconfirmed");
+    expect(res.requestId).toBeNull();
+    expect(rec.results[0].status).toBe("Failed");
+    // 送ってしまった可能性があるので再試行しない（1 回だけ叩いて止める）。
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  it("broadcast: 200 の鍵が空白だけなら取れていない扱い（旧実装は空文字を鍵ありと見ていた）", async () => {
+    const sender = createLineSender(TEST_CHANNEL);
+    const stub = stubFetch(
+      () => new Response("{}", { status: 200, headers: { [LINE_REQUEST_ID_HEADER]: " " } }),
+    );
+    let outcome: SendOutcome;
+    try {
+      outcome = await sender.broadcast([{ type: "text", text: "x" }], 10);
+    } finally {
+      stub.restore();
+    }
+    expect(outcome.ok).toBe(true);
+    expect(outcome.requestId).toBeUndefined();
+    expect(outcome.requestIds).toEqual([]);
+  });
+});
+
+describe("台帳への書き戻し（宛先列挙の鍵を補正ジョブに流さない）", () => {
+  /** finish の update ペイロードだけを捕まえる最小の Supabase 偽物。 */
+  function fakeSupabase() {
+    const updates: Array<Record<string, unknown>> = [];
+    const chain = {
+      eq: () => chain,
+      then: (resolve: (v: { error: null }) => unknown) => resolve({ error: null }),
+    };
+    const client = {
+      from: () => ({
+        update: (row: Record<string, unknown>) => {
+          updates.push(row);
+          return chain;
+        },
+      }),
+    };
+    return { updates, client: client as unknown as Parameters<typeof createSupabaseReservationPort>[0] };
+  }
+
+  it("multicast: line_request_id と recipients_basis=addressed_list、2 件以上は note に全件", async () => {
+    const f = fakeSupabase();
+    const port = createSupabaseReservationPort(f.client);
+    await port.finish({
+      pageId: PAGE_ID,
+      month: "2026-09",
+      sendState: "sent",
+      sentCount: 600,
+      lineRequestId: "k1",
+      lineRequestIds: ["k1", "k2"],
+      recipientsBasis: "addressed_list",
+    });
+    expect(f.updates).toEqual([
+      {
+        send_state: "sent",
+        sent_count: 600,
+        line_request_id: "k1",
+        recipients_basis: "addressed_list",
+        note: formatRequestIdsNote(["k1", "k2"]),
+      },
+    ]);
+    expect(formatRequestIdsNote(["k1", "k2"])).toContain("k1,k2");
+  });
+
+  it("broadcast（鍵 1 本・出所なし）は従来どおり line_request_id だけ", async () => {
+    const f = fakeSupabase();
+    const port = createSupabaseReservationPort(f.client);
+    await port.finish({
+      pageId: PAGE_ID,
+      month: "2026-09",
+      sendState: "sent",
+      sentCount: 100,
+      lineRequestId: "b1",
+      lineRequestIds: ["b1"],
+    });
+    expect(f.updates).toEqual([{ send_state: "sent", sent_count: 100, line_request_id: "b1" }]);
+  });
+
+  it("後追い補正は出所が未記録か、実数でも宛先列挙でもない行だけを拾う", () => {
+    expect(RECONCILE_PENDING_FILTER).toBe(
+      "recipients_basis.is.null,recipients_basis.not.in.(actual_delivered,addressed_list)",
+    );
   });
 });

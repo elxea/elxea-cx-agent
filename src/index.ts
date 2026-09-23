@@ -824,9 +824,10 @@ app.post("/api/delivery/approve", async (c) => {
  *
  * 応答は同期 JSON（回したのに送られたか分からない状態を作らない）:
  *   { status, code, reason, sentCount, audienceCount, ledgerRemaining, reservationId,
- *     requestId, targetEnv }
- *   requestId = LINE が返した送信 1 回ぶんの鍵。**送れたときだけ入り、それ以外は null**
- *   （後追いで実配信数を引く鍵。multicast と冪等応答は鍵が定まらないため null）。
+ *     requestId, requestIds, targetEnv }
+ *   requestId = LINE が返した送信の鍵。**status=sent なら送り方（全員配信 / 宛先列挙）を問わず
+ *   必ず入る**（鍵が 1 本も取れない送信は sent にしない）。送れていない・冪等応答は null。
+ *   requestIds = 受理された API 呼び出しごとの鍵（宛先列挙は 500 人ごとに割れるため複数ありうる）。
  *   200 = sent（同一 reservationId の二重到達も再送せず 200）/ 409 = 既に送信中・送信済
  *   422 = 承認や指紋・人数の確認で拒否 / 503 = 一時失敗（保留・再試行可）/ 502 = 送信失敗
  */
@@ -851,6 +852,7 @@ app.post("/api/delivery/send-one", async (c) => {
     ledgerRemaining: null,
     reservationId: typeof body?.reservationId === "string" ? body.reservationId : "",
     requestId: null,
+    requestIds: [] as string[],
   }));
 
   // 送信先 OA を明示して返す（「どこへ送ったか」の確認点）。

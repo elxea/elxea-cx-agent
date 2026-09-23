@@ -62,13 +62,17 @@ export type LedgerSource = "broadcast" | "interactive" | "other";
  *   env_fallback      : 実測に失敗し env 固定値へ退避した見積
  *   actual_delivered  : 送信後に insight/message/event の実配信数で補正した実数（最も確か）
  *   manual_correction : 人が根拠を持って訂正した値
+ *   addressed_list    : 宛先を列挙して送った（multicast・「社内」等）。recipients は列挙した人数そのもの。
+ *                       insight/message/event は broadcast/narrowcast 専用のため後追い補正の対象外
+ *                       （broadcast-reconcile は この値と actual_delivered の行を拾わない）
  * DB 側に CHECK は置かない（本 migration 以前の行は NULL）。語彙の正本はこの型。
  */
 export type RecipientsBasis =
   | "measured"
   | "env_fallback"
   | "actual_delivered"
-  | "manual_correction";
+  | "manual_correction"
+  | "addressed_list";
 
 /** 台帳への 1 行（= 1 claim）。 */
 export interface LedgerEntry {
