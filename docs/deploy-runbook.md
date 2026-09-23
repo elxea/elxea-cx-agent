@@ -391,8 +391,10 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 > |---|---|---|
 > | secret `DELIVERY_OWNER_EMAIL` | 承認者の照合メール 1 件のみ（既定値なし・CIRCL 側のアドレス） | 全要求が `owner_email_unset` で拒否 |
 > | migration **056** | `line_message_ledger` に `reservation_id` / `send_state` / `sent_count` | claim が列不在で失敗 → 送信しない |
-> | Notion integration の **ユーザー情報の読み取り capability** | `GET /v1/users/<id>` の `person.email` が返ること。**段1-B の疎通確認項目**（本番トークンを使う実疎通は段1-A では未実施） | メールが空 → `email_empty` で永久に停止（安全側だが原因が見えにくい） |
-> | Notion integration が **All Tasks に共有**されていること | 判定行（`判定` select / `last_edited_by`）を読む | 判定行が読めず 503（保留・再試行） |
+> | secret `NOTION_APPROVAL_TOKEN`（2026-09-23 案B） | 承認確認**専用**の Notion 接続。権限は Read content + User information (with email) のみ。**All Tasks DB だけ**に共有する。配信DB用の `NOTION_TOKEN` とは別物で、未設定時に `NOTION_TOKEN` へ切り替えない | Notion を呼ばずに `approval_token_unset`（422・再試行しない） |
+> | 承認用接続の **ユーザー情報の読み取り capability** | `GET /v1/users/<id>` の `person.email` が返ること。**段1-B の疎通確認項目** | メールが空 → `email_empty` で永久に停止（安全側だが原因が見えにくい） |
+> | 承認用接続が **All Tasks に共有**されていること | 判定行（`判定` / `last_edited_by` / 親 DB / Details の `approval_key` / URL 列）を読む | 判定行が 404 → `task_not_shared`（422・再試行しない）。token 無効 401/403 → `approval_token_invalid`（422） |
+> | 判定行の親と紐付け | 親が All Tasks（database `50adc342…` / data source `1c95f66a…`）で、Details の `approval_key=elxea-line-delivery:<env>:<配信行 id>`（と URL 列があればその id）が要求の `pageId` と一致 | `task_parent_mismatch` / `task_link_mismatch`（422） |
 >
 > 応答（同期 JSON）: `{ status, code, reason, sentCount, audienceCount, ledgerRemaining, reservationId, targetEnv }`
 > / `200` = 送った（同一 `reservationId` の二重到達も再送せず 200）/ `409` = 既に送信中・送信済

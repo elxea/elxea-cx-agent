@@ -379,7 +379,10 @@ export async function approveDelivery(
       approvedEditedTime: ref.approvedEditedTime,
     },
     deps.ownerEmail,
-    deps.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS,
+    {
+      deliveryPageId: req.pageId,
+      approvalJudgments: deps.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS,
+    },
   );
   if (!verdict.ok) {
     if (verdict.retryable) {

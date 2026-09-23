@@ -1150,6 +1150,291 @@ describe("describeBlockingImages（平易な日本語・画像番号1始まり�
 
 
 // ---------------------------------------------------------------------------
+// 案B: 承認確認ポートは専用の読み取り専用接続 (NOTION_APPROVAL_TOKEN) だけを使う
+// approve / send-one の両方がこのポート 1 か所を通る（2026-09-23）
+// ---------------------------------------------------------------------------
+import { createApprovalTaskPort } from "../../src/lib/delivery-runtime";
+import {
+  ALL_TASKS_DATABASE_ID,
+  ApprovalConfigError as PortConfigError,
+  RetryableApprovalError as PortRetryableError,
+  verifyApprovalTask as verifyTaskForPort,
+} from "../../src/lib/delivery-approval-task";
+import { NotionHttpError as PortNotionHttpError } from "../../src/lib/delivery-repository";
+import type { Env as PortEnv } from "../../src/index";
+
+const PORT_DELIVERY_ID = "3e470c9d-064c-8112-aaaa-0123456789ab";
+const PORT_TASK_ID = "3e470c9d-064c-812a-8f3f-cc95958e9286";
+
+interface FetchCall {
+  url: string;
+  auth: string | null;
+}
+
+/** global fetch を差し替え、呼び出しを記録する（ネットワーク非接触）。 */
+async function withFetch(
+  handler: (url: string) => Response | Promise<Response>,
+  fn: (calls: FetchCall[]) => Promise<void>,
+): Promise<void> {
+  const original = globalThis.fetch;
+  const calls: FetchCall[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    calls.push({ url, auth: headers.get("Authorization") });
+    return handler(url);
+  }) as typeof fetch;
+  try {
+    await fn(calls);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+function portEnv(approvalToken: string | undefined): PortEnv {
+  return {
+    NOTION_TOKEN: "delivery-db-token",
+    NOTION_APPROVAL_TOKEN: approvalToken,
+  } as unknown as PortEnv;
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function taskPageBody(overrides: Record<string, unknown> = {}) {
+  return {
+    object: "page",
+    id: PORT_TASK_ID,
+    last_edited_time: "2026-09-23T10:00:00.000Z",
+    last_edited_by: { object: "user", id: "u-owner" },
+    parent: { type: "database_id", database_id: ALL_TASKS_DATABASE_ID },
+    properties: {
+      判定: { type: "select", select: { name: "承認" } },
+      Details: {
+        type: "rich_text",
+        rich_text: [
+          { plain_text: "理由をここに (却下・修正のとき。先頭 1 行だけを読みます)\n要約\n" },
+          {
+            plain_text: `approval_key=elxea-line-delivery:staging:${PORT_DELIVERY_ID} 対象: https://www.notion.so/x-${PORT_DELIVERY_ID.replace(/-/g, "")}`,
+          },
+        ],
+      },
+      URL: {
+        type: "rich_text",
+        rich_text: [{ plain_text: `https://www.notion.so/x-${PORT_DELIVERY_ID.replace(/-/g, "")}` }],
+      },
+    },
+    ...overrides,
+  };
+}
+
+async function expectThrows(
+  p: Promise<unknown>,
+  check: (err: unknown) => boolean,
+  label: string,
+): Promise<void> {
+  let thrown: unknown = null;
+  try {
+    await p;
+  } catch (err) {
+    thrown = err;
+  }
+  assertTrue(thrown !== null, `${label}: throw されるべき`);
+  assertTrue(check(thrown), `${label}: 期待した種類のエラーでない (${String(thrown)})`);
+}
+
+describe("承認確認ポート（案B: 専用接続・fail-closed）", () => {
+  it("NOTION_APPROVAL_TOKEN 未設定なら Notion を呼ばず approval_token_unset（NOTION_TOKEN に切り替えない）", async () => {
+    await withFetch(
+      () => json(taskPageBody()),
+      async (calls) => {
+        for (const tok of [undefined, "", "   "]) {
+          const port = createApprovalTaskPort(portEnv(tok));
+          await expectThrows(
+            port.fetchTask(PORT_TASK_ID),
+            (e) => e instanceof PortConfigError && e.code === "approval_token_unset",
+            `fetchTask tok=${JSON.stringify(tok)}`,
+          );
+          await expectThrows(
+            port.resolveUserEmail("u-owner"),
+            (e) => e instanceof PortConfigError && e.code === "approval_token_unset",
+            `resolveUserEmail tok=${JSON.stringify(tok)}`,
+          );
+        }
+        assertEqual(calls.length, 0, "fetch は 1 回も呼ばれない");
+      },
+    );
+  });
+
+  it("判定行・編集者メールの取得は承認用 token だけで行う（Authorization を確認）", async () => {
+    await withFetch(
+      (url) =>
+        url.includes("/users/")
+          ? json({ object: "user", person: { email: "owner@example.test" } })
+          : json(taskPageBody()),
+      async (calls) => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        const verdict = await verifyTaskForPort(
+          port,
+          {
+            taskPageId: PORT_TASK_ID,
+            approvedEditorEmail: "owner@example.test",
+            approvedEditedTime: "2026-09-23T10:00:00.000Z",
+          },
+          "owner@example.test",
+          { deliveryPageId: PORT_DELIVERY_ID },
+        );
+        assertTrue(verdict.ok, `verdict ok (${JSON.stringify(verdict)})`);
+        assertEqual(calls.length, 2, "判定行 + ユーザー の 2 回");
+        for (const c of calls) {
+          assertEqual(c.auth, "Bearer approval-ro-token", `auth for ${c.url}`);
+        }
+        assertTrue(calls[0].url.endsWith(`/v1/pages/${PORT_TASK_ID}`), "判定行 GET");
+        assertTrue(calls[1].url.endsWith("/v1/users/u-owner"), "ユーザー GET");
+      },
+    );
+  });
+
+  it("判定行の 404 は task_not_shared（再試行しない設定エラー）", async () => {
+    await withFetch(
+      () => json({ object: "error", status: 404, code: "object_not_found" }, 404),
+      async () => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        await expectThrows(
+          port.fetchTask(PORT_TASK_ID),
+          (e) => e instanceof PortConfigError && e.code === "task_not_shared",
+          "404",
+        );
+        const verdict = await verifyTaskForPort(
+          port,
+          { taskPageId: PORT_TASK_ID, approvedEditorEmail: "o@x", approvedEditedTime: "" },
+          "o@x",
+          { deliveryPageId: PORT_DELIVERY_ID },
+        );
+        assertTrue(!verdict.ok && verdict.retryable === false, "retryable=false");
+        assertEqual(!verdict.ok ? verdict.code : "", "task_not_shared", "code");
+      },
+    );
+  });
+
+  it("401 / 403 は approval_token_invalid（再試行しない）", async () => {
+    for (const status of [401, 403]) {
+      await withFetch(
+        () => json({ object: "error", status }, status),
+        async () => {
+          const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+          await expectThrows(
+            port.fetchTask(PORT_TASK_ID),
+            (e) => e instanceof PortConfigError && e.code === "approval_token_invalid",
+            `task ${status}`,
+          );
+          await expectThrows(
+            port.resolveUserEmail("u-owner"),
+            (e) => e instanceof PortConfigError && e.code === "approval_token_invalid",
+            `user ${status}`,
+          );
+        },
+      );
+    }
+  });
+
+  it("429 / 5xx / ネットワーク失敗は従来どおり再試行可", async () => {
+    for (const status of [429, 500, 503]) {
+      await withFetch(
+        () => json({ object: "error", status }, status),
+        async () => {
+          const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+          await expectThrows(
+            port.fetchTask(PORT_TASK_ID),
+            (e) => e instanceof PortRetryableError,
+            `task ${status}`,
+          );
+        },
+      );
+    }
+    await withFetch(
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      async () => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        await expectThrows(
+          port.fetchTask(PORT_TASK_ID),
+          (e) => e instanceof PortRetryableError,
+          "network",
+        );
+      },
+    );
+  });
+
+  it("ユーザーの 404 は共有漏れと扱わない（従来どおりそのまま投げる）", async () => {
+    await withFetch(
+      () => json({ object: "error", status: 404 }, 404),
+      async () => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        await expectThrows(
+          port.resolveUserEmail("u-x"),
+          (e) => e instanceof PortNotionHttpError && e.status === 404,
+          "user 404",
+        );
+      },
+    );
+  });
+
+  it("実形式の判定行でも親が All Tasks 以外なら task_parent_mismatch", async () => {
+    await withFetch(
+      (url) =>
+        url.includes("/users/")
+          ? json({ object: "user", person: { email: "owner@example.test" } })
+          : json(
+              taskPageBody({
+                parent: { type: "database_id", database_id: "99999999-9999-9999-9999-999999999999" },
+              }),
+            ),
+      async (calls) => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        const verdict = await verifyTaskForPort(
+          port,
+          {
+            taskPageId: PORT_TASK_ID,
+            approvedEditorEmail: "owner@example.test",
+            approvedEditedTime: "",
+          },
+          "owner@example.test",
+          { deliveryPageId: PORT_DELIVERY_ID },
+        );
+        assertEqual(!verdict.ok ? verdict.code : "ok", "task_parent_mismatch", "code");
+        assertEqual(calls.length, 1, "編集者メールまで読みに行かない");
+      },
+    );
+  });
+
+  it("実形式の判定行が別の配信行を指していたら task_link_mismatch", async () => {
+    await withFetch(
+      () => json(taskPageBody()),
+      async () => {
+        const port = createApprovalTaskPort(portEnv("approval-ro-token"));
+        const verdict = await verifyTaskForPort(
+          port,
+          {
+            taskPageId: PORT_TASK_ID,
+            approvedEditorEmail: "owner@example.test",
+            approvedEditedTime: "",
+          },
+          "owner@example.test",
+          { deliveryPageId: "3e470c9d-064c-8112-bbbb-0123456789ab" },
+        );
+        assertEqual(!verdict.ok ? verdict.code : "ok", "task_link_mismatch", "code");
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ランナー
 // ---------------------------------------------------------------------------
 (async () => {

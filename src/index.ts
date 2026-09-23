@@ -52,6 +52,7 @@ import { runDormantReengagement } from "./lib/dormant-reengagement";
 import { runMarcheActivation } from "./lib/marche-activation";
 import { getAlertStatus } from "./lib/alerts";
 import { erasePerson } from "./lib/roji-erasure";
+import { isBearerAuthorized } from "./lib/sync-auth";
 import {
   assertFirestoreConfigured,
   isFirestoreConfigured,
@@ -215,6 +216,12 @@ export type Env = {
   SUPABASE_SERVICE_ROLE_KEY: string;
   // Notion
   NOTION_TOKEN: string;
+  /**
+   * 配信の承認確認（All Tasks 判定行と編集者メールの読み取り）**専用**の Notion 接続 token。
+   * 権限は Read content + User information (with email) のみ・All Tasks DB だけに共有する（案B・
+   * circl-qa 2026-09-23）。未設定なら承認確認は設定エラーで止まる（NOTION_TOKEN へは切り替えない）。
+   */
+  NOTION_APPROVAL_TOKEN?: string;
   NOTION_PRODUCT_LIST_DB_ID: string;
   NOTION_SET_MENU_DB_ID: string;
   NOTION_TEA_MENU_DB_ID: string;
@@ -531,8 +538,7 @@ app.post("/api/follow-ref", async (c) => {
 app.get("/api/alerts/status", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -639,8 +645,7 @@ app.post("/api/erase", async (c) => {
 app.post("/api/sync", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -667,8 +672,7 @@ app.post("/api/sync", async (c) => {
 app.post("/api/sync/shopify-metafields", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -712,8 +716,7 @@ app.post("/api/sync/shopify-metafields", async (c) => {
 app.post("/api/delivery/pin", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -769,8 +772,7 @@ app.post("/api/delivery/pin", async (c) => {
 app.post("/api/delivery/approve", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -831,8 +833,7 @@ app.post("/api/delivery/approve", async (c) => {
 app.post("/api/delivery/send-one", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -887,8 +888,7 @@ app.post("/api/delivery/send-one", async (c) => {
 app.get("/api/delivery/ledger", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -948,8 +948,7 @@ app.get("/api/delivery/ledger", async (c) => {
 app.post("/api/broadcast-recipients/reconcile", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -986,8 +985,7 @@ app.post("/api/broadcast-recipients/reconcile", async (c) => {
 app.post("/api/broadcast-stats/fetch", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -1025,8 +1023,7 @@ app.post("/api/broadcast-stats/fetch", async (c) => {
 app.post("/api/dormant/run", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -1073,8 +1070,7 @@ app.post("/api/dormant/run", async (c) => {
 app.post("/api/marche-activation/run", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (
-    !c.env.SYNC_API_SECRET ||
-    authHeader !== `Bearer ${c.env.SYNC_API_SECRET}`
+    !isBearerAuthorized(authHeader, c.env.SYNC_API_SECRET)
   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }

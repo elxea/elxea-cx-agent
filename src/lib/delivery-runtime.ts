@@ -46,6 +46,7 @@ import {
 } from "./message-ledger";
 import {
   createNotionRequest,
+  createNotionRequestWithToken,
   setStatus,
   writeDeliveryResult,
   resetApproval,
@@ -112,6 +113,7 @@ import {
   type ReservationClaim,
 } from "./delivery-send-one";
 import {
+  ApprovalConfigError,
   RetryableApprovalError,
   parseApprovalJudgments,
   type ApprovalTaskPort,
@@ -622,16 +624,49 @@ async function resolveTargetsForEnv(
   return resolveTargetsWithCdp(env, supabase, audience, deps);
 }
 
-/** Notion の一時失敗を「保留」に翻訳する承認確認ポート（読み取りのみ）。 */
+/**
+ * 承認確認ポート（All Tasks 判定行の読み取りのみ）。approve と send-one の両方がここを通る。
+ *
+ * 接続は **専用の読み取り専用 token（env NOTION_APPROVAL_TOKEN）だけ**を使う（案B・circl-qa
+ * 2026-09-23）。未設定なら Notion を呼ばずに設定エラーで止める。配信DB用の NOTION_TOKEN へ
+ * 切り替える処理を足さないこと（書き込み権限を持つ接続を All Tasks に向けないため）。
+ *
+ * エラーの翻訳:
+ *   - 429 / 5xx / ネットワーク → RetryableApprovalError（保留・再試行可）
+ *   - 判定行の 404 → ApprovalConfigError(task_not_shared)（判定行が接続に共有されていない）
+ *   - 401 / 403 → ApprovalConfigError(approval_token_invalid)
+ */
 export function createApprovalTaskPort(env: Env): ApprovalTaskPort {
-  const request = createNotionRequest(env);
-  const translate = (err: unknown): never => {
+  const token = (env.NOTION_APPROVAL_TOKEN ?? "").trim();
+  if (token.length === 0) {
+    const unset = async (): Promise<never> => {
+      throw new ApprovalConfigError(
+        "approval_token_unset",
+        "NOTION_APPROVAL_TOKEN が未設定（承認確認用の読み取り専用接続が無い）",
+      );
+    };
+    return { fetchTask: unset, resolveUserEmail: unset };
+  }
+  const request = createNotionRequestWithToken(token);
+  const translate = (err: unknown, what: "task" | "user"): never => {
     if (err instanceof NotionHttpError && isRetryableNotionStatus(err.status)) {
       throw new RetryableApprovalError(`Notion ${err.status}`);
     }
     if (err instanceof TypeError) {
       // fetch 自体が失敗した（ネットワーク）。無効ではなく保留。
       throw new RetryableApprovalError(`network: ${err.message}`);
+    }
+    if (err instanceof NotionHttpError && (err.status === 401 || err.status === 403)) {
+      throw new ApprovalConfigError(
+        "approval_token_invalid",
+        `Notion ${err.status}（承認確認用の接続の token または権限が無効）`,
+      );
+    }
+    if (what === "task" && err instanceof NotionHttpError && err.status === 404) {
+      throw new ApprovalConfigError(
+        "task_not_shared",
+        "Notion 404（判定行が承認確認用の接続に共有されていない、または存在しない）",
+      );
     }
     throw err;
   };
@@ -640,14 +675,14 @@ export function createApprovalTaskPort(env: Env): ApprovalTaskPort {
       try {
         return await fetchApprovalTask(request, taskPageId);
       } catch (err) {
-        return translate(err);
+        return translate(err, "task");
       }
     },
     resolveUserEmail: async (userId) => {
       try {
         return await fetchNotionUserEmail(request, userId);
       } catch (err) {
-        return translate(err);
+        return translate(err, "user");
       }
     },
   };

@@ -15,7 +15,26 @@
  *   - メール解決が一時的に失敗した（429 / 5xx / ネットワーク）→ **保留（retryable）**。
  *     「解決できて不一致」のときだけ無効にする（失敗シナリオ N-03 / S-02）。
  *   - owner メールが未設定 → **無効**（既定値を持たない。設定 1 か所に 1 件だけ・N-05）
+ *   - 承認確認用の接続 (NOTION_APPROVAL_TOKEN) が未設定 / 無効 / 判定行が接続に共有されて
+ *     いない（Notion 404）→ **無効（設定エラー・再試行しない）**。配信DB用の NOTION_TOKEN へ
+ *     切り替えない（案B・circl-qa 2026-09-23）
+ *   - 読んだ判定行の親が All Tasks でない → **無効**
+ *   - 判定行が「いま承認しようとしている配信行」の承認でない（approval_key / URL 不一致）→ **無効**
  */
+
+/**
+ * 判定行が属すべき All Tasks（正本はここ 1 か所）。
+ * 2022-06-28 の API 応答は parent.database_id、新しい版は parent.data_source_id を返すため両方持つ。
+ */
+export const ALL_TASKS_DATABASE_ID = "50adc342-6a7f-4aff-bbfb-677722369486";
+export const ALL_TASKS_DATA_SOURCE_ID = "1c95f66a-67bd-4cd8-aae6-70ed9c3c821d";
+
+/**
+ * 判定行の Details に載る機械の鍵の接頭辞。
+ * パイプライン側 (~/.config/admin-pipeline scripts/line_delivery_approval.py) が
+ * `approval_key=elxea-line-delivery:<env>:<配信行 page id>` の形で書く。
+ */
+export const DELIVERY_APPROVAL_KEY_PREFIX = "elxea-line-delivery";
 
 /** Mac 側（予約登録時）が固定した承認スナップショット。 */
 export interface ApprovalRef {
@@ -42,6 +61,14 @@ export interface ApprovalTaskSnapshot {
   lastEditedById: string | null;
   /** `last_edited_time`（ISO8601）。 */
   lastEditedTime: string | null;
+  /** 親 database id（API 2022-06-28 の parent.database_id）。無ければ null。 */
+  parentDatabaseId: string | null;
+  /** 親 data source id（新しい API 版の parent.data_source_id）。無ければ null。 */
+  parentDataSourceId: string | null;
+  /** Details 列の平文（`approval_key=...` の行を含む）。 */
+  details: string;
+  /** URL 列の平文（配信行の URL。空なら ""）。 */
+  targetUrl: string;
 }
 
 /** 承認確認の結果。 */
@@ -57,6 +84,9 @@ export type ApprovalTaskVerdict =
   | { ok: false; retryable: true; code: ApprovalRetryCode; reason: string };
 
 export type ApprovalRejectCode =
+  | ApprovalConfigCode
+  | "task_parent_mismatch"
+  | "task_link_mismatch"
   | "owner_email_unset"
   | "judgment_not_approved"
   | "editor_missing"
@@ -65,9 +95,18 @@ export type ApprovalRejectCode =
 
 export type ApprovalRetryCode = "email_lookup_retryable" | "task_fetch_retryable";
 
+/** 設定エラー（再試行しても直らない）の区分。 */
+export type ApprovalConfigCode =
+  | "approval_token_unset"
+  | "approval_token_invalid"
+  | "task_not_shared";
+
 /** 判定行の読み取り・メール解決のポート（runtime は Notion REST を配線）。 */
 export interface ApprovalTaskPort {
-  /** 判定行を読む。一時失敗は `RetryableApprovalError` を throw する。 */
+  /**
+   * 判定行を読む。一時失敗は `RetryableApprovalError`、設定エラー（token 未設定・
+   * 無効・判定行が接続に共有されていない）は `ApprovalConfigError` を throw する。
+   */
   fetchTask(taskPageId: string): Promise<ApprovalTaskSnapshot>;
   /**
    * user id → メール。Notion `GET /v1/users/<id>` の `person.email`。
@@ -83,6 +122,71 @@ export class RetryableApprovalError extends Error {
     super(message);
     this.name = "RetryableApprovalError";
   }
+}
+
+/** 設定エラー（token 未設定・無効・共有漏れ）。再試行では直らないので保留にしない。 */
+export class ApprovalConfigError extends Error {
+  constructor(
+    readonly code: ApprovalConfigCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApprovalConfigError";
+  }
+}
+
+/** Notion id の比較用正規化（ハイフン除去 + 小文字）。 */
+export function normalizeNotionId(raw: string | null | undefined): string {
+  return typeof raw === "string" ? raw.replace(/-/g, "").trim().toLowerCase() : "";
+}
+
+/** 判定行の親が All Tasks か（database_id / data_source_id のどちらかが一致）。 */
+export function isAllTasksParent(task: ApprovalTaskSnapshot): boolean {
+  const db = normalizeNotionId(task.parentDatabaseId);
+  const ds = normalizeNotionId(task.parentDataSourceId);
+  return (
+    (db.length > 0 && db === normalizeNotionId(ALL_TASKS_DATABASE_ID)) ||
+    (ds.length > 0 && ds === normalizeNotionId(ALL_TASKS_DATA_SOURCE_ID))
+  );
+}
+
+/**
+ * 判定行が配信行 `deliveryPageId` の承認かを確かめる（純粋・fail-closed）。
+ *
+ * 正とするのは Details の `approval_key=elxea-line-delivery:<env>:<page id>`
+ * （パイプラインが作る機械の鍵。二重起票防止の照合にも使う唯一の鍵）。
+ *   - approval_key が 1 つも無い → 不一致
+ *   - 複数ある場合は **すべて** が同じ配信行を指すこと（手で書き足された鍵で通さない）
+ * URL 列は補助: Notion の page id（32 桁 hex）が読み取れる場合、その最後の id も一致を要求する
+ * （空なら approval_key だけで判定。パイプラインは target_url が空だと URL 列を省略する）。
+ * `<env>` 部分は照合しない（Worker 側に同じ語彙の環境名を持たないため）。
+ */
+export function checkApprovalTaskLink(
+  task: ApprovalTaskSnapshot,
+  deliveryPageId: string,
+): { ok: true } | { ok: false; reason: string } {
+  const expected = normalizeNotionId(deliveryPageId);
+  if (expected.length === 0) {
+    return { ok: false, reason: "照合先の配信行 id が空（fail-closed）" };
+  }
+  const keys = [...(task.details ?? "").matchAll(/approval_key=(\S+)/g)].map((m) => m[1]);
+  if (keys.length === 0) {
+    return { ok: false, reason: "判定行に approval_key が無い（どの配信行の承認か確かめられない）" };
+  }
+  for (const key of keys) {
+    const parts = key.split(":");
+    if (parts.length !== 3 || parts[0] !== DELIVERY_APPROVAL_KEY_PREFIX) {
+      return { ok: false, reason: "判定行の approval_key が LINE 配信の形式ではない" };
+    }
+    if (normalizeNotionId(parts[2]) !== expected) {
+      return { ok: false, reason: "判定行の approval_key が別の配信行を指している" };
+    }
+  }
+  const urlIds = (task.targetUrl ?? "").toLowerCase().match(/[0-9a-f]{32}/g);
+  if (urlIds && urlIds.length > 0 && urlIds[urlIds.length - 1] !== expected) {
+    return { ok: false, reason: "判定行の URL 列が別の配信行を指している" };
+  }
+  return { ok: true };
 }
 
 /**
@@ -150,13 +254,16 @@ export function normalizeEmail(raw: string | null | undefined): string {
  * 判定行を読み直して承認を確認する。
  *
  * @param ownerEmail 照合に使う唯一のメール（env DELIVERY_OWNER_EMAIL・既定なし）。
+ * @param opts.deliveryPageId いま承認・送信しようとしている配信行（呼び出し側の req.pageId）。
+ *   判定行がこの行の承認であることを確かめる（別件: 第二の防御の強化）。
  */
 export async function verifyApprovalTask(
   port: ApprovalTaskPort,
   ref: ApprovalRef,
   ownerEmail: string | undefined,
-  approvalJudgments: readonly string[] = DEFAULT_APPROVAL_JUDGMENTS,
+  opts: { deliveryPageId: string; approvalJudgments?: readonly string[] },
 ): Promise<ApprovalTaskVerdict> {
+  const approvalJudgments = opts.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS;
   const owner = normalizeEmail(ownerEmail);
   if (owner.length === 0) {
     return {
@@ -180,7 +287,29 @@ export async function verifyApprovalTask(
         reason: `判定行の取得が一時的に失敗（保留・再試行可）: ${err.message}`,
       };
     }
+    if (err instanceof ApprovalConfigError) {
+      return configRejected(err);
+    }
     throw err;
+  }
+
+  // 判定の値を読む前に「どこの行か」を確かめる（他 DB・他の配信行の値で判断しない）。
+  if (!isAllTasksParent(task)) {
+    return {
+      ok: false,
+      retryable: false,
+      code: "task_parent_mismatch",
+      reason: "判定行が All Tasks の行ではない（fail-closed）",
+    };
+  }
+  const link = checkApprovalTaskLink(task, opts.deliveryPageId);
+  if (!link.ok) {
+    return {
+      ok: false,
+      retryable: false,
+      code: "task_link_mismatch",
+      reason: `判定行がこの配信行の承認ではない: ${link.reason}（fail-closed）`,
+    };
   }
 
   if (!isApprovedJudgment(task.judgment, approvalJudgments)) {
@@ -212,6 +341,9 @@ export async function verifyApprovalTask(
         code: "email_lookup_retryable",
         reason: `最終編集者のメール解決が一時的に失敗（保留・再試行可）: ${err.message}`,
       };
+    }
+    if (err instanceof ApprovalConfigError) {
+      return configRejected(err);
     }
     throw err;
   }
@@ -253,4 +385,14 @@ export async function verifyApprovalTask(
   }
 
   return { ok: true, editedTimeChanged, editorEmail: resolved };
+}
+
+/** 設定エラーを「無効・再試行しない」の判定に写す。 */
+function configRejected(err: ApprovalConfigError): ApprovalTaskVerdict {
+  return {
+    ok: false,
+    retryable: false,
+    code: err.code,
+    reason: `承認確認の設定エラー（再試行しない）: ${err.message}`,
+  };
 }

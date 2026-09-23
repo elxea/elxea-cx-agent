@@ -75,6 +75,21 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 /**
+ * `Authorization: Bearer <secret>` の照合（定数時間比較）。
+ *
+ * 旧実装 `authHeader !== \`Bearer ${secret}\`` と **同じ意味**（前後空白の正規化はしない・
+ * 完全一致のみ）で、比較時間だけを入力に依存させない。secret 未設定・空は常に false。
+ */
+export function isBearerAuthorized(
+  authHeader: string | null | undefined,
+  secret: string | null | undefined,
+): boolean {
+  if (typeof secret !== "string" || secret.length === 0) return false;
+  if (typeof authHeader !== "string") return false;
+  return constantTimeEquals(authHeader, `Bearer ${secret}`);
+}
+
+/**
  * Hono ハンドラ冒頭で呼ぶ認証ガード。
  *
  * X-API-Key ヘッダーが SYNC_API_SECRET と一致しなければ 401 Response を返す。

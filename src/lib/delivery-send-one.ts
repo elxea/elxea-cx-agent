@@ -94,6 +94,11 @@ export type SendOneCode =
   | "send_failed"
   | "send_unconfirmed"
   | "owner_email_unset"
+  | "approval_token_unset"
+  | "approval_token_invalid"
+  | "task_not_shared"
+  | "task_parent_mismatch"
+  | "task_link_mismatch"
   | "judgment_not_approved"
   | "editor_missing"
   | "email_empty"
@@ -361,7 +366,10 @@ export async function sendOneDelivery(
     deps.approvalTask,
     req.approvalRef,
     deps.ownerEmail,
-    deps.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS,
+    {
+      deliveryPageId: req.pageId,
+      approvalJudgments: deps.approvalJudgments ?? DEFAULT_APPROVAL_JUDGMENTS,
+    },
   );
   if (!verdict.ok) {
     if (verdict.retryable) {

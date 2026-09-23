@@ -46,7 +46,11 @@ import {
   isApprovedJudgment,
   parseApprovalJudgments,
 } from "../../src/lib/delivery-approval-task";
-import { RetryableApprovalError } from "../../src/lib/delivery-approval-task";
+import {
+  ALL_TASKS_DATABASE_ID,
+  ApprovalConfigError,
+  RetryableApprovalError,
+} from "../../src/lib/delivery-approval-task";
 import type { DeliveryChannel } from "../../src/lib/delivery-channel";
 import type { DeliveryPage, DeliveryResult } from "../../src/lib/delivery-repository";
 
@@ -106,6 +110,7 @@ interface FakeOptions {
   editorEmail?: string | null;
   emailThrows?: Error;
   taskThrows?: Error;
+  taskDetails?: string;
   ownerEmail?: string | null;
   audienceCount?: number;
   confirmed?: number;
@@ -166,6 +171,12 @@ async function makeDeps(
           judgment: opts.judgment === undefined ? "承認" : opts.judgment,
           lastEditedById: opts.editorId === undefined ? "u-owner" : opts.editorId,
           lastEditedTime: "2026-09-22T00:00:00.000Z",
+          parentDatabaseId: ALL_TASKS_DATABASE_ID,
+          parentDataSourceId: null,
+          details:
+            opts.taskDetails ??
+            `理由をここに\n要約\napproval_key=elxea-line-delivery:staging:${PAGE_ID} 対象: `,
+          targetUrl: "",
         };
       },
       resolveUserEmail: async () => {
@@ -526,6 +537,37 @@ describe("1 件指定送信: 形式の検証（要求そのものが組み立て
     });
     expect(res.code).toBe("bad_request");
     expect(httpStatusFor(res)).toBe(400);
+    expect(rec.sends).toHaveLength(0);
+  });
+
+  it("承認確認用 token が未設定なら再試行しない設定エラーで止め、送らない", async () => {
+    const { deps, rec } = await makeDeps({
+      taskThrows: new ApprovalConfigError("approval_token_unset", "NOTION_APPROVAL_TOKEN が未設定"),
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.status).toBe("rejected");
+    expect(res.code).toBe("approval_token_unset");
+    expect(httpStatusFor(res)).toBe(422);
+    expect(rec.sends).toHaveLength(0);
+  });
+
+  it("判定行が接続に共有されていない (404) なら再試行しない設定エラー", async () => {
+    const { deps, rec } = await makeDeps({
+      taskThrows: new ApprovalConfigError("task_not_shared", "Notion 404"),
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.status).toBe("rejected");
+    expect(res.code).toBe("task_not_shared");
+    expect(rec.sends).toHaveLength(0);
+  });
+
+  it("判定行が別の配信行の承認なら送らない (承認の使い回しを止める)", async () => {
+    const { deps, rec } = await makeDeps({
+      taskDetails: "approval_key=elxea-line-delivery:staging:page-hermetic-9999 対象: ",
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.status).toBe("rejected");
+    expect(res.code).toBe("task_link_mismatch");
     expect(rec.sends).toHaveLength(0);
   });
 

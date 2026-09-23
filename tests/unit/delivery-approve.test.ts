@@ -49,7 +49,15 @@ import {
   type DeliveryApproveDeps,
   type DeliveryApproveResult,
 } from "../../src/lib/delivery-approve";
-import { RetryableApprovalError } from "../../src/lib/delivery-approval-task";
+import {
+  ALL_TASKS_DATABASE_ID,
+  ALL_TASKS_DATA_SOURCE_ID,
+  ApprovalConfigError,
+  RetryableApprovalError,
+  checkApprovalTaskLink,
+  type ApprovalTaskSnapshot,
+} from "../../src/lib/delivery-approval-task";
+import { isBearerAuthorized } from "../../src/lib/sync-auth";
 import { computeContentHash } from "../../src/lib/content-hash";
 import type { DeliveryPage } from "../../src/lib/delivery-repository";
 
@@ -103,6 +111,8 @@ function buildDeps(
     editorEmail?: string | null;
     emailThrows?: boolean;
     taskThrows?: boolean;
+    taskError?: Error;
+    task?: Partial<ApprovalTaskSnapshot>;
     ownerEmail?: string;
     audienceCount?: number;
     audienceError?: string;
@@ -127,10 +137,16 @@ function buildDeps(
     approvalTask: {
       fetchTask: async () => {
         if (opts.taskThrows) throw new RetryableApprovalError("Notion 503");
+        if (opts.taskError) throw opts.taskError;
         return {
           judgment: opts.judgment ?? "承認",
           lastEditedById: opts.editorId ?? "user-owner",
           lastEditedTime: "2026-09-22T10:30:00.000Z",
+          parentDatabaseId: ALL_TASKS_DATABASE_ID,
+          parentDataSourceId: null,
+          details: `理由をここに\n要約\napproval_key=elxea-line-delivery:staging:${PAGE_ID} 対象: `,
+          targetUrl: "",
+          ...opts.task,
         };
       },
       resolveUserEmail: async () => {
@@ -399,6 +415,148 @@ describe("prepare(pin) → 承認 → reserve(approve) の順序", () => {
     assertTrue(approve.ok, `approve ok (code=${codeOf(approve)})`);
     assertEqual(row.status, "Approved", "approve で Approved");
     assertEqual(rec.approved.length, 1, "Status 書き込みは 1 回");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 案B: 承認確認は専用接続・親DB照合・配信行との紐付け照合（2026-09-23）
+// ---------------------------------------------------------------------------
+async function approveWith(opts: Parameters<typeof buildDeps>[1]) {
+  const row = page();
+  const { deps, rec } = buildDeps(row, opts);
+  const pin = await pinDeliveryContent(deps, { pageId: PAGE_ID });
+  assertTrue(pin.ok, "pin ok");
+  const res = await approveDelivery(deps, { pageId: PAGE_ID, approvalRef: refOf() });
+  return { res, rec, row };
+}
+
+describe("approve: 承認確認の設定エラーは再試行しない（503 にしない）", () => {
+  it("NOTION_APPROVAL_TOKEN 未設定 → 422 approval_token_unset・Status を書かない", async () => {
+    const { res, rec, row } = await approveWith({
+      taskError: new ApprovalConfigError("approval_token_unset", "未設定"),
+    });
+    assertEqual(codeOf(res), "approval_token_unset", "code");
+    assertEqual(httpStatusForApprove(res), 422, "http");
+    assertTrue(!res.ok && res.retryable === false, "retryable=false");
+    assertEqual(rec.approved.length, 0, "Status を書かない");
+    assertEqual(row.status, "Draft", "Draft のまま");
+  });
+  it("判定行の 404（接続への共有漏れ）→ 422 task_not_shared（row_fetch_failed/503 に化けない）", async () => {
+    const { res, rec } = await approveWith({
+      taskError: new ApprovalConfigError("task_not_shared", "Notion 404"),
+    });
+    assertEqual(codeOf(res), "task_not_shared", "code");
+    assertEqual(httpStatusForApprove(res), 422, "http");
+    assertEqual(rec.approved.length, 0, "Status を書かない");
+  });
+  it("token 無効（401/403 相当）→ 422 approval_token_invalid", async () => {
+    const { res } = await approveWith({
+      taskError: new ApprovalConfigError("approval_token_invalid", "Notion 401"),
+    });
+    assertEqual(codeOf(res), "approval_token_invalid", "code");
+    assertEqual(httpStatusForApprove(res), 422, "http");
+  });
+  it("一時障害（503）は従来どおり 503・再試行可", async () => {
+    const { res } = await approveWith({ taskThrows: true });
+    assertEqual(codeOf(res), "task_fetch_retryable", "code");
+    assertEqual(httpStatusForApprove(res), 503, "http");
+  });
+});
+
+describe("approve: 判定行の親が All Tasks でなければ承認しない", () => {
+  it("親 database が別 DB → 422 task_parent_mismatch・判定の値を応答に出さない", async () => {
+    const { res, rec } = await approveWith({
+      judgment: "承認",
+      task: { parentDatabaseId: "11111111-2222-3333-4444-555555555555" },
+    });
+    assertEqual(codeOf(res), "task_parent_mismatch", "code");
+    assertTrue(!res.ok && !res.reason.includes("現在値"), "判定の値を漏らさない");
+    assertEqual(rec.approved.length, 0, "Status を書かない");
+  });
+  it("親が無い（ページ直下等）→ 拒否", async () => {
+    const { res } = await approveWith({ task: { parentDatabaseId: null } });
+    assertEqual(codeOf(res), "task_parent_mismatch", "code");
+  });
+  it("新しい API 版の parent.data_source_id（ハイフン無し）でも All Tasks なら通る", async () => {
+    const { res } = await approveWith({
+      task: {
+        parentDatabaseId: null,
+        parentDataSourceId: ALL_TASKS_DATA_SOURCE_ID.replace(/-/g, ""),
+      },
+    });
+    assertTrue(res.ok, `approve ok (code=${codeOf(res)})`);
+  });
+});
+
+describe("approve: 判定行が別の配信行の承認なら承認しない（使い回し防止）", () => {
+  it("approval_key が別の配信行 → 422 task_link_mismatch", async () => {
+    const { res, rec } = await approveWith({
+      task: { details: "approval_key=elxea-line-delivery:staging:pg-2 対象: " },
+    });
+    assertEqual(codeOf(res), "task_link_mismatch", "code");
+    assertEqual(rec.approved.length, 0, "Status を書かない");
+  });
+  it("approval_key が無い → 拒否", async () => {
+    const { res } = await approveWith({ task: { details: "理由をここに\n要約だけ" } });
+    assertEqual(codeOf(res), "task_link_mismatch", "code");
+  });
+  it("LINE 配信以外の approval_key → 拒否", async () => {
+    const { res } = await approveWith({
+      task: { details: `approval_key=outbound-warm:staging:${PAGE_ID} 対象: ` },
+    });
+    assertEqual(codeOf(res), "task_link_mismatch", "code");
+  });
+  it("正しい鍵に加えて別行を指す鍵が書き足されていたら拒否", async () => {
+    const { res } = await approveWith({
+      task: {
+        details:
+          `approval_key=elxea-line-delivery:staging:pg-2\n` +
+          `approval_key=elxea-line-delivery:staging:${PAGE_ID} 対象: `,
+      },
+    });
+    assertEqual(codeOf(res), "task_link_mismatch", "code");
+  });
+});
+
+describe("checkApprovalTaskLink: 実形式（uuid・URL 列）", () => {
+  const PID = "3e470c9d-064c-8112-aaaa-0123456789ab";
+  const base: ApprovalTaskSnapshot = {
+    judgment: "承認",
+    lastEditedById: "u",
+    lastEditedTime: null,
+    parentDatabaseId: ALL_TASKS_DATABASE_ID,
+    parentDataSourceId: null,
+    details: `理由をここに\n要約\napproval_key=elxea-line-delivery:production:${PID} 対象: https://www.notion.so/${PID.replace(/-/g, "")}`,
+    targetUrl: `https://www.notion.so/LINE-${PID.replace(/-/g, "")}`,
+  };
+  it("鍵と URL 列が配信行を指せば ok（ハイフン有無を問わない）", () => {
+    assertTrue(checkApprovalTaskLink(base, PID).ok, "with dashes");
+    assertTrue(checkApprovalTaskLink(base, PID.replace(/-/g, "").toUpperCase()).ok, "no dashes");
+  });
+  it("URL 列だけ別の行を指していたら拒否", () => {
+    const t = { ...base, targetUrl: "https://www.notion.so/ffffffffffffffffffffffffffffffff" };
+    assertTrue(!checkApprovalTaskLink(t, PID).ok, "url mismatch");
+  });
+  it("URL 列が空なら approval_key だけで判定", () => {
+    assertTrue(checkApprovalTaskLink({ ...base, targetUrl: "" }, PID).ok, "empty url");
+  });
+  it("照合先の配信行 id が空なら拒否", () => {
+    assertTrue(!checkApprovalTaskLink(base, "").ok, "empty expected");
+  });
+});
+
+describe("SYNC_API_SECRET の Bearer 照合（定数時間比較・意味は旧実装と同じ）", () => {
+  it("完全一致だけ通す", () => {
+    assertTrue(isBearerAuthorized("Bearer s3cret", "s3cret"), "match");
+    assertTrue(!isBearerAuthorized("Bearer s3cre", "s3cret"), "prefix");
+    assertTrue(!isBearerAuthorized("Bearer s3cret ", "s3cret"), "trailing space");
+    assertTrue(!isBearerAuthorized("bearer s3cret", "s3cret"), "case");
+    assertTrue(!isBearerAuthorized(undefined, "s3cret"), "no header");
+  });
+  it("secret 未設定・空は常に拒否", () => {
+    assertTrue(!isBearerAuthorized("Bearer ", ""), "empty secret");
+    assertTrue(!isBearerAuthorized("Bearer undefined", undefined), "undefined secret");
   });
 });
 

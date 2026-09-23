@@ -183,13 +183,25 @@ export function isRetryableNotionStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status <= 599);
 }
 
-/** 実 Notion REST 実装（2022-06-28・knowledge.ts と同一方針）。 */
+/** 実 Notion REST 実装（2022-06-28・knowledge.ts と同一方針）。配信DB用の NOTION_TOKEN を使う。 */
 export function createNotionRequest(env: Env): NotionRequest {
+  return createNotionRequestWithToken(env.NOTION_TOKEN);
+}
+
+/**
+ * token を明示して Notion REST を呼ぶ。
+ *
+ * 承認確認（All Tasks 判定行の読み取り）は **専用の読み取り専用接続**
+ * （env NOTION_APPROVAL_TOKEN）だけを使う（案B・circl-qa 2026-09-23）。
+ * ここは token の選択をしない。未設定時に別 token へ切り替える処理を足さないこと
+ * （呼び出し側 createApprovalTaskPort が未設定を設定エラーで止める）。
+ */
+export function createNotionRequestWithToken(token: string): NotionRequest {
   return async (path, method, body) => {
     const res = await fetch(`https://api.notion.com/v1${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${env.NOTION_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
       },
@@ -409,10 +421,25 @@ export async function markApproved(
 // All Tasks 判定行（承認確認・読み取りのみ）
 // ---------------------------------------------------------------------------
 
-/** All Tasks 側で承認の意思表示を置くプロパティ名（Notion 実スキーマ・日本語）。 */
+/**
+ * All Tasks 判定行で読むプロパティ名（Notion 実スキーマ）。
+ * details / url はパイプライン側 (~/.config/admin-pipeline lib/review_task.py
+ * create_review / approval_details) が書く列。URL 列は text 型（url 型ではない）。
+ */
 export const APPROVAL_TASK_PROPS = {
   judgment: "判定",
+  details: "Details",
+  url: "URL",
 } as const;
+
+/** rich_text / title / url いずれの形でも、プロパティの平文をつなげて返す。 */
+function plainTextOf(p: RawProp | undefined): string {
+  if (!p) return "";
+  if (typeof p.url === "string") return p.url;
+  const arr = (p.rich_text ?? p.title) as Array<{ plain_text?: string }> | undefined;
+  if (!Array.isArray(arr)) return "";
+  return arr.map((t) => (typeof t?.plain_text === "string" ? t.plain_text : "")).join("");
+}
 
 /**
  * All Tasks の判定行を読む（判定 / 最終編集者 / 最終編集時刻だけ）。
@@ -425,17 +452,29 @@ export async function fetchApprovalTask(
   judgment: string | null;
   lastEditedById: string | null;
   lastEditedTime: string | null;
+  parentDatabaseId: string | null;
+  parentDataSourceId: string | null;
+  details: string;
+  targetUrl: string;
 }> {
   const data = (await request(`/pages/${taskPageId}`, "GET")) as {
     last_edited_time?: string;
     last_edited_by?: { id?: string };
+    parent?: { type?: string; database_id?: string; data_source_id?: string };
     properties?: Record<string, RawProp>;
   };
   const props = data.properties ?? {};
+  const parent = data.parent ?? {};
   return {
     judgment: selectName(props[APPROVAL_TASK_PROPS.judgment]),
     lastEditedById: data.last_edited_by?.id ?? null,
     lastEditedTime: data.last_edited_time ?? null,
+    // 2022-06-28 の応答は database_id。新しい API 版では data_source_id も返る。
+    parentDatabaseId: typeof parent.database_id === "string" ? parent.database_id : null,
+    parentDataSourceId:
+      typeof parent.data_source_id === "string" ? parent.data_source_id : null,
+    details: plainTextOf(props[APPROVAL_TASK_PROPS.details]),
+    targetUrl: plainTextOf(props[APPROVAL_TASK_PROPS.url]),
   };
 }
 
