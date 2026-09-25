@@ -16,9 +16,10 @@ staging（`elxea-agent-staging`）を「テスト OA（@426vlcyb）」に載せ�
 > - `wrangler.toml [env.staging.vars]` に `DELIVERY_TARGET_ENV = "test"` を固定済み。
 >   staging は常にテスト OA を対象にする（`src/lib/delivery-channel.ts` が
 >   `LINE_CHANNEL_ACCESS_TOKEN_TEST` を選択）。
-> - ⚠ **実送信スイッチは存在しない**（2026-08-22撤去）。stagingでも `POST /api/delivery/send-one` を
->   叩けば「Status=Approvedの行」はテストOA（@426vlcyb）へ**実際に送信される**（予定日時は無関係）。
->   逆に、cronの自動配信は無いので**放っておいても送られない**。詳細は「LINE配信の運用」節を参照。
+> - ⚠ **配信本体（Worker）に実送信スイッチは無い**（2026-08-22撤去）。stagingでも `POST /api/delivery/send-one` に
+>   承認済みの 1 行（`pageId`）を指定して叩けば、その行はテストOA（@426vlcyb）へ**実際に送信される**（予定日時は無関係）。
+>   逆に、cronの自動配信は無いので**放っておいても送られない**。送信の開閉は、Mac 側の送信パイプラインが読む
+>   Notion「LINE配信スイッチ」で行う（`docs/line-delivery-guide.md`「送信を止める・再開する（配信スイッチと緊急停止）」）。詳細は「LINE配信の運用」節を参照。
 
 ### 1. secret を staging に投入（値はコミットしない）
 
@@ -77,8 +78,8 @@ pnpm setup-rich-menu
 ### 5. スタッフがテスト OA を友だち追加して確認
 
 テスト OA（@426vlcyb）を友だち追加し、リッチメニュー表示・各ボタンの挙動・
-CXエージェントとの会話を実機確認する。この段階では配信DBにApprovedの行が無いため
-配信（broadcast）は起きない（行を承認した時点で送信される。2026-08-22〜）。
+CXエージェントとの会話を実機確認する。この段階では配信（broadcast）は起きない
+（配信は `POST /api/delivery/send-one` に 1 行を指定して叩いたときだけ。承認しただけでは送られない。2026-09-22〜）。
 
 > 更新（2026-07-27）: stagingでの**実送信検証は実施済み**（写真2枚つき4/4成功・証跡行
 > <https://app.notion.com/p/3a970c9d064c8184a005cf763f2331af>）。stagingで実配信を再現する手順・
@@ -404,13 +405,13 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 > <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>）をSoTとし、本節は「エンジニア作業の実行手順」を持つ。
 > 片方だけを直さない（配信まわりのコード変更時は両方を更新する）。
 
-### 現状（2026-08-22更新 / それ以外の行は2026-07-27時点）
+### 現状（2026-08-22・2026-09-22・2026-09-25更新 / それ以外の行は2026-07-27時点）
 
 | 項目 | 状態 | 根拠 |
 |---|---|---|
 | **配信の起動方法** | **1 件指定のオンデマンドのみ（2026-09-22 / 段1-A）**。cronの自動配信は**廃止**、全件走査の口も**撤去**。`POST /api/delivery/send-one` に `pageId` を渡したときだけ、**その 1 行だけ**が送られる | Setaka指示（「承認済みが勝手に飛ぶより、回したときに送るほうが安全」）。`wrangler.toml` のcronsに配信パターンなし + `src/index.ts` のdelivery分岐はno-op（`tests/unit/cron-routing.test.ts` が両方を機械検知） |
 | **配信予定日時** | **送信条件ではない**。運用者の記録用メモとして残るだけ（空でも構わない） | 送信判定（`sendOneDelivery()`・`delivery-send-one.ts`）はこの値を一切参照しない（`delivery-time.ts` ごと削除済み） |
-| 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。オンデマンド実行で拾われた行は**常に実送信される** | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
+| 実送信スイッチ `DELIVERY_SEND_ENABLED` | **撤去済み（2026-08-22）**。staging・本番のどちらにも存在しない。`send-one` で指定され関門を通った行は**常に実送信される**。送信の開閉は配信本体の外、Mac 側の送信パイプラインが読む Notion「LINE配信スイッチ」で行う（`docs/line-delivery-guide.md`「送信を止める・再開する（配信スイッチと緊急停止）」） | Setaka指示（承認済み配信がスイッチOFFで3時間以上遅延した事故を受けて関門を削減）。コード上の参照ゼロ（`tests/unit/golive-broadcast-wiring.test.ts` が再導入を機械検知） |
 | **承認の権威** | **All Tasks の判定行 1 か所（2026-09-22 / 承認 1 点化）**。配信DB行の people 列「承認者」「担当者」は**読まない** | `delivery-approve.ts`（`approveDelivery`）+ `delivery-approval-task.ts`（`verifyApprovalTask`）。旧 `delivery-approval.ts`（`isApprovalAuthorized` / `selfApprovalRelaxed`）と `DELIVERY_ALLOW_SELF_APPROVAL_*` は**削除済み**（Boss 判断 Tier 1・段1 結合検証 I-C）。旧決定記録 <https://app.notion.com/p/3a870c9d064c81f986ddc7a8b805d6af> は本件で置き換え |
 | Status=Approved を書くのは誰か | **機械のみ**（判定行の承認と指紋一致を確認した `POST /api/delivery/approve` だけ） | `markApproved()`（`delivery-repository.ts`）。pin 経路（`pinContentSnapshot()`）は Status を書かない |
 | 配信 DB の env 分離 | **本番反映済み**（fail-closed） | `resolveDeliveryDbId()`（`delivery-repository.ts`） |
@@ -645,8 +646,8 @@ pnpm exec wrangler tail --format pretty
    **実測の失敗を理由に配信は止めない**（帳簿の数字のために配信を止めるのは本末転倒）。
 3. **どちらも無い → 送らない**（fail-closed。従来どおり `resolveTargets` が `kind:"error"` を返す）。
 
-送信後は `POST /api/delivery/send-one` が次回実行の冒頭で、または
-`POST /api/broadcast-recipients/reconcile` を叩いたときに、LINE が数えた**実配信数**で台帳を直す。
+送信後は `POST /api/broadcast-recipients/reconcile` を叩いたときだけ、LINE が数えた**実配信数**で台帳を直す
+（送信 API の側では自動で直さない。Mac 側パイプラインの準備段が送る前に叩く。上の「送る前に残枠を照会する」）。
 
 > **なぜこうしたか（2026-09-11・オーナー判断）**: env 固定値(48)を 2 ヶ月放置した結果、
 > 台帳が実態より過少になっていた（08-05 台帳48/実測56・08-22 台帳48/実測63・09-11 台帳48/実測68）。
@@ -656,48 +657,49 @@ pnpm exec wrangler tail --format pretty
 
 ### 配信を止める
 
-**大前提: `POST /api/delivery/send-one` を叩かなければ何も送られない。** 完全オンデマンド化により、
-「放っておいたら飛ぶ」経路は存在しない。以下は「回すつもりだが、この行だけは出したくない」ときの操作。
+**大前提: `POST /api/delivery/send-one` に 1 行を指定して叩かなければ何も送られない。** 配信本体に
+「放っておいたら飛ぶ」経路は存在しない。ふだんの送信は、Mac 側の送信パイプライン（見張り役が予約の時刻に起動）が
+承認済みの 1 行ずつ send-one を叩く。以下はその流れを止めるときの操作（スタッフ・Setaka 向けの手順の正本は
+`docs/line-delivery-guide.md`「送信を止める・再開する（配信スイッチと緊急停止）」）。
 
 | 目的 | 操作 |
 |---|---|
-| **1件を止める** | Notion配信DBの該当行の **StatusをApproved → Draftに戻す**（runを叩く前なら確実に止まる） |
-| **全部止める** | 何もしない（runを叩かない）。念のためならApprovedの行をすべてDraftに戻す |
+| **1件を止める** | All Tasks の判定行の「判定」を承認以外に戻す（send-one が `judgment_not_approved` で止まる）。念のため配信DB行の **Status を Approved → Draft** に戻してもよい（Approved は機械しか書かないので、戻した行は依頼・承認から取り直し） |
+| **その環境の送信を全部止める** | Notion「LINE配信スイッチ」のその環境の行（`prod` / `staging`）を「閉」にする（Mac 側の送信パイプラインが send-one を叩かなくなる） |
 
-- **run実行中の行は間に合わない**。実行は数秒で終わるため、走り出したら止められない。
-- **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認 → runで行う。
-- 複数件を止めたいときは、対象の行を1件ずつDraftに戻す
-  （Approvedの行だけが送信対象なので、Approvedをゼロにすればrunを叩いても何も出ない）。
+- **send-one 実行中の行は間に合わない**。実行は数秒で終わるため、走り出したら止められない。
+- **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 依頼 → 承認で行う。
 
 ### 本番デプロイ前の確認（配信コードを変更したとき）
 
 **デプロイそのものでは配信は起きない**（cronの自動配信が無いため）。デプロイ直後に勝手に飛ぶ心配はない。
-ただし「次にrunを叩いたときに何が飛ぶか」は変わりうるので、**本番配信DBのApproved行を必ず確認する**
-（`f95bb981-3c1a-4b6e-abd2-8b39551f6492` をStatus=Approvedで絞り込む）。
+ただし Mac 側の見張り役は、承認済みの予約の時刻が来れば send-one を叩く。デプロイ後に何が飛びうるかを知るため、
+**本番配信DBのApproved行を必ず確認する**（`f95bb981-3c1a-4b6e-abd2-8b39551f6492` をStatus=Approvedで絞り込む。
+Approved で未送信の行 = 承認済みで予約の時刻を待っている行。予約の一覧は `~/.claude/progress/line-delivery/reservations/`）。
 
-- **⚠ 完全オンデマンド化に伴う注意（2026-08-22）**: 予定日時が**未来**のApproved行も、
-  次のrunで**送信対象になる**（旧仕様では時刻前だったので送られなかった）。
-  「予約のつもりで先にApprovedにしておいた行」が残っていないか、初回のrun前に必ず点検する。
-- 送るつもりのない行は **Draftに戻してから** runを叩く。
+- 送るつもりのない行は、判定行の「判定」を承認以外に戻す（上の「配信を止める」）。
 - 参照ビューは **「Default view」**（「かんたん配信（運用者用）」は `送信済み` を表示しない）。
 
 ### テスト配信の手順（検証環境・お客さまに届かない）
 
 > **`--env staging` を必ず付ける。付け忘れたコマンドは本番 Worker（実顧客 OA）への操作になる。**
 
-> **⚠ stagingも「runを叩いたら実送信」になった（2026-08-22）。** 届く先がテストOA（@426vlcyb）なだけで、
-> 送信そのものは本番と同じに起きる。「stagingはスイッチ未設定だから送られない」は**もう成り立たない**。
-> 逆に、**待っていても送られない**（cronの自動配信は無い）。必ず自分でrunを叩く。
+> **⚠ stagingも send-one が叩かれれば実送信になる（2026-08-22〜）。** 届く先がテストOA（@426vlcyb）なだけで、
+> 送信そのものは本番と同じに起きる。逆に、**待っていても送られない**（cronの自動配信は無い）。
+> ふだんの検証は本番と同じ入口（Slack の依頼 → 判定行の承認 → Mac 側の送信パイプライン、env=staging）で通す。
 
 1. **テスト用DBに行を作る**: 「[TEST] 配信コンテンツ (staging/@426vlcyb)」
-   （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作成しApprovedにする。
-   本番「配信コンテンツ」には**作らない**。配信予定日時は空でも過去でも未来でも構わない（送信条件ではない）。
-2. **runを叩く**（上の「オンデマンド実行のしかた」のstaging側コマンド）。レスポンスの
-   `targetEnv` が `test` であることを必ず確認する。`summary.sent` / `recipients` が実績。
+   （<https://app.notion.com/p/3a970c9d064c816aaf11cf790334957a>）に本番と同じ手順で作る。
+   **Status は Draft のまま**（Approved は人が入れない。approve の口が機械で書く）。本番「配信コンテンツ」には**作らない**。
+2. **依頼して承認する**: env=staging に対応する Slack の依頼チャンネルに依頼する（どのチャンネルをどの環境で受けるかは
+   `~/.config/admin-pipeline/config/elxea-supply-intake.json` の `entries` が正本）→ All Tasks に判定行ができる →
+   Setaka が「判定」を承認にする。Notion「LINE配信スイッチ」の `staging` 行が「開」でなければ送られない。
 3. **実機確認**（テストOA @426vlcyb）。写真の順序・改行・文字化けを目視する。
    Notion側の書き戻し（Status=Sent / 送信結果 / 消費実績 / sent_at）も確認する。
-4. **検証が終わったら、テスト用DBにApprovedの行を残さない**（残すと次にrunを叩いた人が送ってしまう）。
-   使い終わった行はDraftに戻すか、送信済み（Sent）まで完走させる。
+4. 手で send-one を叩いて確かめるときは、上の「1 件指定送信のしかた」の staging 側コマンドを使い、
+   レスポンスの `targetEnv` が `test` であることを必ず確認する。
+5. **検証をやめるときは、承認済みの予約を残さない**（残すと予約の時刻に見張り役が送る）。判定行の「判定」を承認以外に戻すか、
+   送信済み（Sent）まで完走させる。
 
 ### staging に必要な設定（テスト配信の前提）
 
@@ -732,8 +734,9 @@ pnpm exec wrangler secret list --env staging
 | 目的 | 操作 | 効果 |
 |---|---|---|
 | すべて止める（本番・staging共通） | **`POST /api/delivery/send-one` を叩かない（1 件指定しかないので、指定しなければ何も送られない）** | 完全オンデマンド化（2026-08-22）により、これだけで新規送信はゼロ。cronの自動配信は存在しない |
-| 特定1件を止める | NotionでStatusを **Approved → Draft** | run を叩く前なら確実に送信対象から外れる。run 実行中は間に合わない可能性あり |
-| 念のため全行を無効化 | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | Approvedの行だけが送信対象。Approvedがゼロなら run を叩いても何も出ない |
+| その環境の送信を止める | Notion「LINE配信スイッチ」のその環境の行（`prod` / `staging`）を「閉」にする | Mac 側の送信パイプラインが send-one を叩かなくなる（手順の正本は `docs/line-delivery-guide.md`「送信を止める・再開する（配信スイッチと緊急停止）」） |
+| 特定1件を止める | NotionでStatusを **Approved → Draft** | send-one が叩かれる前なら確実に止まる（Status の門）。send-one 実行中は間に合わない可能性あり。戻した行は依頼・承認から取り直し（Approved は機械しか書かない） |
+| 念のため全行を無効化 | 対象の行のStatusを **Approved → Draft**（複数件なら1件ずつ） | send-one は Approved の行しか送らない。Approved がゼロなら send-one が叩かれても何も出ない |
 | 承認を取り消す | All Tasks 判定行の「判定」を承認以外に戻す（さらに念のため配信DB行を Approved → Draft） | 判定行が承認でなければ send-one は `judgment_not_approved` で止まる（第二の防御）。配信DB行の Status も第一の門として効く |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
@@ -746,7 +749,8 @@ pnpm exec wrangler secret list --env staging
 - **per-配信の人間ゲートは 1 点**である。配信ごとの人的チェックは **All Tasks 判定行の
   「判定」を承認にする、その一操作**のみ（2026-09-22 の承認 1 点化。従来の「著者 != 承認者」の
   二人目の確認は、1 点化で誰も埋めない項目になったため撤去した）。
-  2026-08-22 に実送信スイッチ（送信直前の Tier 2 ゲート）も撤去しているため、人的ゲートは承認のみ。
+  2026-08-22 に実送信スイッチ（送信直前の Tier 2 ゲート）も撤去しているため、配信ごとの人的ゲートは承認のみ
+  （Notion「LINE配信スイッチ」は環境ごとの開閉で、配信ごとの確認ではない）。
   残る自動ゲートは形式検査（判定行の最終編集者 = `DELIVERY_OWNER_EMAIL` / 指紋一致 /
   対象人数 +10% / 画像形式・サイズ / 無料枠台帳 / claim による二重送信防止）であり、
   **内容の妥当性・宛先の妥当性は検査されない**。
