@@ -61,7 +61,7 @@ Mac側の見張り役 (5分ごと) → 送信パイプライン → POST /api/de
 
 **正本 2 点（この節には詳細も現在値も書かない・二重管理を避ける。エージェント側の入口は `line-delivery-ops` skill = `~/github/elxea/agents/_shared/skills/line-delivery-ops/SKILL.md`）**:
 - 運用者向け手順: `docs/line-delivery-guide.md`（運用者が読む正本は Notion 版 <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>。**配信コードを変えたら両方を同時に直す**）
-- エンジニア向けコマンドの正本: `docs/deploy-runbook.md`「**LINE 配信の運用ゲート**」節 — 送信スイッチ・自己承認フラグ・配信 DB の env 分離について、**現在の値と判定方法はこの節が唯一の正本**（他所に書き写さない）
+- エンジニア向けコマンドの正本: `docs/deploy-runbook.md`「**LINE 配信の運用ゲート**」節 — 送信スイッチ・配信 DB の env 分離について、**現在の値と判定方法はこの節が唯一の正本**（他所に書き写さない）。自己承認の仕組みは撤去済みで、承認は All Tasks の判定行で Setaka のみが行う
 
 **env 取り違え = 実顧客への誤配信。** 本番と検証は Worker / LINE OA / 配信 DB がすべて別。検証時のコマンドは **`--env staging` 必須**（付け忘れは本番操作）。**本番 Worker に `NOTION_DELIVERY_DB_ID` を設定してはならない**（テスト用 DB の行が実顧客へ飛ぶ経路が生まれる。env 分離は `resolveDeliveryDbId()` で fail-closed）。安全弁は勝手に弱めない。送信スイッチの ON/OFF・本番配信は **Tier 2（Setaka 承認）**。
 
