@@ -47,7 +47,7 @@ LINE Webhook → Hono → Claude API (tool_use) → LINE Push
                    search_knowledge → pgvector (Notion 由来)
                    escalate_to_human → Slack
 
-Cron (*/15) → delivery-orchestrator → Notion「配信コンテンツ」DB → LINE broadcast/multicast
+Mac側の見張り役 (5分ごと) → 送信パイプライン → POST /api/delivery/send-one (1件指定) → LINE broadcast/multicast
 ```
 
 **CDP（データ基盤）と CX（顧客体験）の境界の正本は、自動生成の [`docs/layer-map.md`](docs/layer-map.md)**（`npx tsx scripts/layer-map.ts --out docs/layer-map.md` で再生成。手で編集しない）。
@@ -55,8 +55,9 @@ Cron (*/15) → delivery-orchestrator → Notion「配信コンテンツ」DB �
 ## LINE 配信サブシステム（触る前に必ずドキュメントを読む）
 
 対話とは別に、Notion の「配信コンテンツ」DB を運用者インターフェースとする**一斉配信**の仕組みを持つ。
-実装は `src/lib/delivery-*.ts`（orchestrator / repository / approval / audience / channel / runtime / time）、
-Cron トリガー `*/15 * * * *` が承認済み行を拾って送信する。
+配信のcronはWorkerに無い。Mac側の見張り役（5分ごと）と送信パイプラインが、時刻の来た予約を `POST /api/delivery/send-one` で1件ずつ送る。
+送れるのはSetakaが承認した行（All Tasksの判定行）だけで、送信スイッチ（Notion）が閉じていれば送らない。実装は `src/lib/delivery-*.ts`。
+流れ・止め方・困ったときは `docs/line-delivery-guide.md` を読む。
 
 **正本 2 点（この節には詳細も現在値も書かない・二重管理を避ける。エージェント側の入口は `line-delivery-ops` skill = `~/github/elxea/agents/_shared/skills/line-delivery-ops/SKILL.md`）**:
 - 運用者向け手順: `docs/line-delivery-guide.md`（運用者が読む正本は Notion 版 <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>。**配信コードを変えたら両方を同時に直す**）

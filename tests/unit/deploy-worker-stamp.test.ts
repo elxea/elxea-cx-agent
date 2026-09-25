@@ -286,7 +286,8 @@ it("デプロイ経路が全部この 1 実装を通る（実 exec 行で確か�
   }
 
   /* deploy-prod.sh は「コメントに書いてある」ではなく「その行が呼んでいる」を見る。 */
-  for (const rel of ["scripts/deploy-prod.sh", "scripts/activate-selfapproval.sh"]) {
+  /* activate-selfapproval.sh は 2026-09-25 に scripts/_retired/ へ退役。追跡中のファイルとして deploy 行は残るので検査は続ける。 */
+  for (const rel of ["scripts/deploy-prod.sh", "scripts/_retired/activate-selfapproval.sh"]) {
     const lines = nonCommentLines(readFileSync(join(REPO_ROOT, rel), "utf8"));
     assertTrue(
       lines.some((l) => /\b(bash|sh|exec)\b.*deploy-worker\.sh/.test(l)),
