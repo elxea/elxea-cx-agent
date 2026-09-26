@@ -39,7 +39,8 @@ import {
   type TeaItem,
 } from "./tea-menu";
 import { karteAffinity, type NextCupKarte } from "./next-cup";
-import { formatTeaLabel, formatTeaQuickReplyLabel, SITE_URL_JA } from "./brand-copy";
+import { formatTeaLabel, formatTeaQuickReplyLabel } from "./brand-copy";
+import { PURCHASE_URL } from "./storefront";
 import { teaRecommendCarousel } from "./flex-templates";
 import { resolveCallerShopifyCustomerId } from "./shopify";
 import {
@@ -395,7 +396,7 @@ export function diagnosisRecommendCarousel(
       name: formatTeaLabel(t),
       description: t.descShort,
       imageUrl: pickTeaImage(imageMap, t),
-      productUrl: SITE_URL_JA,
+      productUrl: PURCHASE_URL,
     })),
   );
 }

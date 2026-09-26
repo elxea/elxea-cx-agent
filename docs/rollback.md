@@ -4,18 +4,11 @@
 
 ## 1. elxea-cx-agent (Cloudflare Workers)
 
-### 前のバージョンに戻す
+### 前のバージョンに戻す（本番）
 
-```bash
-# 現在のデプロイ一覧を確認
-wrangler deployments list
-
-# 前のデプロイにロールバック（直前のバージョン）
-wrangler rollback
-
-# 特定のデプロイ ID にロールバック
-wrangler rollback --version-id <deployment-id>
-```
+本番の戻し方の正本は [deploy-runbook.md](deploy-runbook.md) の「本番に出す手順（正本・仮メニュー3枠・Amazon）」の「戻し方（第一手はメニュー。コードは原則戻さない）」（ここに手順は置かない）。
+- 第一手はリッチメニューを旧6枠に戻すこと。コードを戻すときの標準は、git revertのPR → CI → マージ → origin/masterの新しいworktreeで `pnpm run deploy`。
+- `wrangler rollback` は緊急時だけ。次に通常のdeployをするまで `wrangler secret put` がエラー10215で拒否され、LINEトークンの自動更新も失敗する。wranglerがエラーで勧める方法には従わない。
 
 ### ステージングにロールバック
 

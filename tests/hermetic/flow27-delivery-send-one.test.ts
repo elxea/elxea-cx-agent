@@ -32,6 +32,7 @@ import {
   type ReservationClaim,
 } from "../../src/lib/delivery-send-one";
 import { computeContentHash } from "../../src/lib/content-hash";
+import { EC_SITE_OPEN } from "../../src/lib/storefront";
 import { audienceFingerprintKey, parseAudience } from "../../src/lib/delivery-audience";
 import {
   acceptedRequestIdFrom,
@@ -331,6 +332,60 @@ describe("1 件指定送信: 承認の確認（判定行・第二の防御）", 
     expect(isApprovedJudgment("却下")).toBe(false);
     expect(isApprovedJudgment("修正して")).toBe(false);
     expect(isApprovedJudgment(null)).toBe(false);
+  });
+});
+
+describe("1 件指定送信: 閉じたリンクの送信前検査（設計 rev2 第5章・第9章 テスト9）", () => {
+  const CLOSED_BODY = "新しいお茶のご案内です。詳しくは https://elxea.com/ja/journal/new をご覧ください。";
+  const OPEN_BODY =
+    "新しいお茶のご案内です。お求めは https://www.amazon.co.jp/stores/page/0C75602F-4851-4957-8D54-9A17590AF63C から。お問い合わせ info@elxea.com";
+
+  // siteOpen 未指定 = storefront.ts の EC_SITE_OPEN を読む経路。閉店中だけのケースは開店フラグが true のとき飛ばす。
+  it.skipIf(EC_SITE_OPEN)("閉店中、閉じたリンク入りの行は送られず closed_site_link で止まる（書き換えない）", async () => {
+    const { deps, rec } = await makeDeps({
+      page: { body: CLOSED_BODY, contentHash: await validHash("全員", CLOSED_BODY) },
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.status).toBe("rejected");
+    expect(res.code).toBe("closed_site_link");
+    expect(httpStatusFor(res)).toBe(422);
+    expect(rec.sends).toHaveLength(0);
+    expect(rec.claims).toBe(0);
+    expect(rec.errors.join("\n")).toContain("閉店中");
+  });
+
+  it.skipIf(EC_SITE_OPEN)("スキーム無しの elxea.com/ja でも止まる", async () => {
+    const body = "続きは elxea.com/ja で。";
+    const { deps, rec } = await makeDeps({ page: { body, contentHash: await validHash("全員", body) } });
+    expect((await sendOneDelivery(deps, req)).code).toBe("closed_site_link");
+    expect(rec.sends).toHaveLength(0);
+  });
+
+  it("Amazon の URL と info@elxea.com だけなら閉店中も送る", async () => {
+    const { deps, rec } = await makeDeps({
+      page: { body: OPEN_BODY, contentHash: await validHash("全員", OPEN_BODY) },
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.code).toBe("sent");
+    expect(rec.sends).toHaveLength(1);
+  });
+
+  it("開店中は検査で止めない（閉じたリンクの判定が働かない）", async () => {
+    const { deps, rec } = await makeDeps({
+      page: { body: CLOSED_BODY, contentHash: await validHash("全員", CLOSED_BODY) },
+    });
+    const res = await sendOneDelivery({ ...deps, siteOpen: true }, req);
+    expect(res.code).toBe("sent");
+    expect(rec.sends).toHaveLength(1);
+  });
+
+  it.runIf(EC_SITE_OPEN)("開店時（storefront.ts の開店フラグ・siteOpen 未指定）は公式 EC のリンク入りの行も送る", async () => {
+    const { deps, rec } = await makeDeps({
+      page: { body: CLOSED_BODY, contentHash: await validHash("全員", CLOSED_BODY) },
+    });
+    const res = await sendOneDelivery(deps, req);
+    expect(res.code).toBe("sent");
+    expect(rec.sends).toHaveLength(1);
   });
 });
 

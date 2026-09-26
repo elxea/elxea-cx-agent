@@ -25,6 +25,14 @@ import {
 } from "../lib/firestore";
 import { getUserRatings, positiveRatedProductNos } from "../lib/product-ratings";
 import { fetchSellingTeas } from "../lib/tea-menu";
+import { EC_SITE_OPEN, stripClosedLinks } from "../lib/storefront";
+import { AGENT_FALLBACK_REPLY } from "./fallback-reply";
+import {
+  gateAgentExtras,
+  gateAgentResult,
+  gateStreamCallbacks,
+  logClosedLinkGate,
+} from "../lib/closed-link-gate";
 import {
   buildPersonalizationContext,
   type EntrySource,
@@ -117,15 +125,39 @@ export function historySpansChannels(history: Message[]): boolean {
  * これで AI は「LINE で伺った」「サイトのチャットで伺った」と言い分けられる。
  * 印の意味は buildCrossChannelNote がシステム側で説明する（印そのものは本文に出させない）。
  */
-export function buildHistoryMessages(history: Message[]): Anthropic.MessageParam[] {
+export function buildHistoryMessages(
+  history: Message[],
+  siteOpen: boolean = EC_SITE_OPEN,
+): Anthropic.MessageParam[] {
   const labelled = historySpansChannels(history);
-  return history.map((m) => {
+  const out: Anthropic.MessageParam[] = [];
+  let removed = 0;
+  let emptied = 0;
+  for (const m of history) {
+    // 送る関所 4 (履歴): 閉店中は AI の過去の発言から閉じたリンクを消してから渡す
+    // (切替前に送った `elxea.com/ja` 入りの返信を AI が真似しないように)。お客さんの発言は変えない。
+    // 空 (空白だけ) の AI の発言は渡さない。消した結果が空になったものも、空のまま保存されて届いたものも
+    // (空の発言は API に渡せない。続く user 発言は API がまとめる)。開店中は今のまま。
+    let content = m.content;
+    if (m.role === "assistant" && !siteOpen) {
+      const r = stripClosedLinks(content, false);
+      removed += r.removed;
+      content = r.text;
+      if (content.trim() === "") {
+        emptied++;
+        continue;
+      }
+    }
     const label = labelled ? channelLabel(m.channel) : null;
-    return {
+    out.push({
       role: m.role as "user" | "assistant",
-      content: label ? `[${label}] ${m.content}` : m.content,
-    };
-  });
+      content: label ? `[${label}] ${content}` : content,
+    });
+  }
+  if (removed > 0 || emptied > 0) {
+    logClosedLinkGate({ gate: "history", caller: "buildHistoryMessages", removed, ...(emptied > 0 ? { emptied: true, dropped: emptied } : {}) });
+  }
+  return out;
 }
 
 /**
@@ -227,13 +259,57 @@ type ToolExecResult = {
 };
 
 /**
- * エージェントのメインループ。
+ * エージェントのメインループ（送る関所 3 = AI の出口つき）。
+ *
+ * 本体は runAgentUngated。閉店中は返事の本文から閉じたリンクを消し、Flex・商品カード・カートリンク・
+ * クイックリプライから閉じたリンク入りを外してから返す（開店中は何も変えない）。
+ * LINE の文字・画像の返事、web の画像はここで覆う。設計 rev2 第5章 / closed-link-gate.ts。
+ */
+export async function runAgent(
+  ...args: Parameters<typeof runAgentUngated>
+): Promise<AgentResult> {
+  const channel = args[4];
+  return gateAgentResult(await runAgentUngated(...args), `runAgent.${channel}`);
+}
+
+/**
+ * エージェントのストリーミング版（送る関所 3 = AI の出口つき）。
+ *
+ * 本体は runAgentStreamingUngated。閉店中は逐次送信のコールバックを包む: 文字は「URL に使える文字が
+ * 末尾に続く部分」だけを次の断片まで持ち越してから閉じたリンクを消し、商品カード・カートリンク・
+ * クイックリプライは閉じたリンク入りを外す。返す meta も同じく外す。web の逐次送信と声はここで覆う。
+ */
+export async function runAgentStreaming(
+  ...args: Parameters<typeof runAgentStreamingUngated>
+): Promise<StreamingAgentMeta> {
+  const [userMessage, conversationHistory, embedding, userId, channel, env, callbacks, options] = args;
+  const caller = `runAgentStreaming.${channel}`;
+  const gated = gateStreamCallbacks(callbacks, caller);
+  try {
+    const meta = await runAgentStreamingUngated(
+      userMessage,
+      conversationHistory,
+      embedding,
+      userId,
+      channel,
+      env,
+      gated.callbacks,
+      options,
+    );
+    return gateAgentExtras(meta, caller);
+  } finally {
+    gated.finish();
+  }
+}
+
+/**
+ * エージェントのメインループ（関所の手前の本体。外からは runAgent を呼ぶ）。
  *
  * 1. ハイブリッド検索（ベクトル + キーワード）で関連ナレッジを取得
  * 2. Claude を呼び出し（ツール使用があればループ）
  * 3. エスカレーション・ナレッジ不足検知
  */
-export async function runAgent(
+async function runAgentUngated(
   userMessage: string,
   conversationHistory: Message[],
   embedding: number[],
@@ -507,7 +583,7 @@ export async function runAgent(
       const quickReplies = generateQuickReplies(usedTools, escalated, isSalesSurfaceEnabled(env));
 
       return {
-        response: finalText || "申し訳ありません、お返事の生成に失敗しました。",
+        response: finalText || AGENT_FALLBACK_REPLY,
         escalated,
         escalationReason,
         escalationCategory,
@@ -707,8 +783,10 @@ export async function runAgent(
  *
  * - 初回ターンは非ストリーミングで実行（ツール呼び出しの有無を確認）
  * - ツール使用後の最終ターンはストリーミング API を使用
+ *
+ * 関所の手前の本体。外からは runAgentStreaming を呼ぶ。
  */
-export async function runAgentStreaming(
+async function runAgentStreamingUngated(
   userMessage: string,
   conversationHistory: Message[],
   embedding: number[],
@@ -947,7 +1025,7 @@ export async function runAgentStreaming(
     // egress brand-fact ガード: 保存・最終確定に使う全文を送信直前に是正する（冪等）。
     const fullResponse =
       applyBrandGuard(accumulatedText + finalText, { channel, userId }) ||
-      "申し訳ありません、お返事の生成に失敗しました。";
+      AGENT_FALLBACK_REPLY;
     callbacks.onDone(fullResponse);
     return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies };
   };

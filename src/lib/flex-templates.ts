@@ -6,6 +6,8 @@
  * MS5 5.3: 注文確認カードテンプレート
  */
 
+import { byStore, EC_SITE_OPEN } from "./storefront";
+
 /** elxea ブランドカラー */
 const COLORS = {
   cream: "#FFFEF2",
@@ -841,6 +843,10 @@ export function preferDirectR2(raw: string | null | undefined): string | null {
   return url.startsWith("https://") ? url : null;
 }
 
+/** お茶カードのボタン名（開店時 = master の「見る」/ 閉店中 = 文言 v2 C-8・copy-as-data）。 */
+export const TEA_CARD_BUTTON_LABEL_OPEN = "見る";
+export const TEA_CARD_BUTTON_LABEL_CLOSED = "Amazon ストアを見る";
+
 /**
  * お茶レコメンドカード（UX③・写真つき or 写真なし graceful）。
  *
@@ -859,6 +865,8 @@ export function teaRecommendCard(params: {
   productUrl: string;
   /** マッチ理由 1 行（任意）。 */
   matchReason?: string;
+  /** 開店状態（既定 EC_SITE_OPEN）。ボタン名を開店時 / 閉店中で選ぶ。テストで両方を固定するため。 */
+  siteOpen?: boolean;
 }): Record<string, unknown> {
   const bodyContents: Record<string, unknown>[] = [
     {
@@ -921,7 +929,15 @@ export function teaRecommendCard(params: {
       contents: [
         {
           type: "button",
-          action: { type: "uri", label: "見る", uri: params.productUrl },
+          action: {
+            type: "uri",
+            label: byStore(
+              TEA_CARD_BUTTON_LABEL_OPEN,
+              TEA_CARD_BUTTON_LABEL_CLOSED,
+              params.siteOpen ?? EC_SITE_OPEN,
+            ),
+            uri: params.productUrl,
+          },
           style: "primary",
           color: COLORS.charcoal,
           height: "sm",

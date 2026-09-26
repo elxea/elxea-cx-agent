@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { isSalesSurfaceEnabled, type SalesSurfaceEnv } from "../lib/sales-surface";
+import { byStore, PURCHASE_URL } from "../lib/storefront";
 
 /**
  * エージェントが使用できるツール定義。
@@ -78,6 +79,11 @@ const ORDER_DETAIL_TOOL: Anthropic.Tool = {
   },
 };
 
+/** recommend_product の product_url の説明（開店時 = master の文 / 閉店中 = 文言 v2 C-18・copy-as-data）。 */
+export const PRODUCT_URL_DESCRIPTION_OPEN =
+  "商品ページURL（elxea.com のURL。不明な場合は https://elxea.com/ja/products を使用）";
+export const PRODUCT_URL_DESCRIPTION_CLOSED = `商品ページURL（不明な場合は ${PURCHASE_URL} を使用）`;
+
 /** 商品カード送信ツール（MS5 5.1/5.4） */
 const RECOMMEND_PRODUCT_TOOL: Anthropic.Tool = {
   name: "recommend_product",
@@ -105,8 +111,7 @@ const RECOMMEND_PRODUCT_TOOL: Anthropic.Tool = {
             },
             product_url: {
               type: "string",
-              description:
-                "商品ページURL（elxea.com のURL。不明な場合は https://elxea.com/ja/products を使用）",
+              description: byStore(PRODUCT_URL_DESCRIPTION_OPEN, PRODUCT_URL_DESCRIPTION_CLOSED),
             },
           },
           required: ["name", "description", "price", "product_url"],

@@ -62,18 +62,30 @@ https://elxea-agent-staging.setaka-on.workers.dev/webhook/line
 
 ### 4. リッチメニューをテストチャネルへ登録
 
-テストトークンを export してから実行する。スクリプトは `LINE_CHANNEL_ACCESS_TOKEN_TEST` を
-優先して使い、起動時に対象チャネル（`test(@426vlcyb)`）をラベル表示する。
+テストOA（@426vlcyb）に載せる。`--channel test` は必須。**`--stateless` は付けない**。本体の `.dev.vars` に
+`LINE_CHANNEL_ID_TEST` が無い（2026-09-26時点）ため、`--stateless` だと必要な値が足りずに止まる。代わりに、本体 `.dev.vars` の
+既存のテスト用トークン `LINE_CHANNEL_ACCESS_TOKEN_TEST` を環境変数で渡す（`--stateless` なしのときスクリプトは `.dev.vars` を
+読まないので、`DEV_VARS_PATH` では渡らない）。値は表示しない。トークンを得た直後にbasicIdを照合し、`@426vlcyb` でなければ
+何も書き込まずに止まる。2026-09-26に実際にこの手順で通した（下の記録）。
 
 ```bash
-export LINE_CHANNEL_ACCESS_TOKEN_TEST=<テストチャネルのアクセストークン>
-pnpm setup-rich-menu
-# 出力の「🎯 対象チャネル: test(@426vlcyb)」を必ず目視確認する。
-# prod(@307tzhkw) と出たら *_TEST が未設定 → 中断してトークンを設定し直す。
+# 本体 .dev.vars のテスト用トークンを、値を表示せずに環境変数へ載せる
+export LINE_CHANNEL_ACCESS_TOKEN_TEST="$(grep -E '^LINE_CHANNEL_ACCESS_TOKEN_TEST=' \
+  /Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
+
+pnpm setup-rich-menu -- --channel test --list   # 照合結果・今の既定 ID・一覧（読み取りのみ）。既定 ID を控える
+pnpm setup-rich-menu -- --channel test          # 3 枠メニューを作って既定にする（画像も自動で上げる）
+pnpm setup-rich-menu -- --channel test --list   # 既定が新 ID になり、旧メニューも残っていることを読み返す
+# 戻すとき: pnpm setup-rich-menu -- --channel test --set-default <控えた旧ID>
+unset LINE_CHANNEL_ACCESS_TOKEN_TEST   # 終わったらシェルからトークンを消す
 ```
 
-その後 LINE Official Account Manager（テスト OA 側）でリッチメニュー画像
-（2500x1686px・6 分割）をアップロードする。
+> 記録（2026-09-26・staging version `24632976-6aeb-44d1-9e14-5d87994d7898` / commit `63e3e20`）: テストOAの既定を
+> `richmenu-56c4ed49df58f999c31d01ad5b803f9c`（旧6枠）→ `richmenu-f307e277fa1f49c0e012b702dff8badd`（仮3枠）に差し替えた。
+> 旧6枠は消えずに残っている。③ の行き先は `https://elxea-agent-staging.setaka-on.workers.dev/go/store?openExternalBrowser=1`。
+
+画像は `assets/rich-menu/richmenu-temp-3slot-amazon.png`（2500x843）が既定で使われる（`RICH_MENU_IMAGE_PATH` で上書き可）。
+OA Managerでの手作業のアップロードは要らない。詳しくは「リッチメニューの差し替えと戻し方」節。
 
 ### 5. スタッフがテスト OA を友だち追加して確認
 
@@ -87,6 +99,164 @@ CXエージェントとの会話を実機確認する。この段階では配信
 
 > ⚠ 取り違え注意（最重要）: 手順 1・3・4 は **すべてテストチャネル（@426vlcyb）**。
 > 本番 OA（@307tzhkw / 友だち約 48 人）のトークン・Webhook・リッチメニューには一切触れない。
+
+## リッチメニューの差し替えと戻し方（2026-09-26〜 仮メニュー 3 枠・Amazon）
+
+メニューの形の正本は `scripts/lib/rich-menu-definition.ts`（① お茶の淹れ方 / ② 好み診断 / ③ Amazon ストア・2500x843・1 段 3 列）。
+①② は今の話しかけの言葉（message）。③ は uri で、チャネルごとの Worker の `/go/store?openExternalBrowser=1` を開く
+（本番 OA → `https://elxea-agent.setaka-on.workers.dev`、テスト OA → `https://elxea-agent-staging.setaka-on.workers.dev`）。
+
+- `openExternalBrowser=1` は、LINE の中のブラウザではなく外のブラウザで開くための LINE 公式のクエリ。LINE の中のブラウザだと
+  Amazon にログインしていない状態になりうるため付ける。根拠: LINE Developers「Opening a URL in an external browser」
+  <https://developers.line.biz/en/docs/line-login/using-line-url-scheme/#opening-url-in-external-browser>
+  （「openExternalBrowser=1 — Opens target URL, in an external browser」「These query parameters work for all URLs accessed
+  from the LINE app, except for on LIFF apps.」）
+- `/go/store` は Worker 側の転送口（購入先へ 302・押された回数を記録）。**Worker のデプロイが先**。未デプロイのまま③を押すと開けない。
+
+| やりたいこと | コマンド | LINE への書き込み |
+|---|---|---|
+| どのOAか・今の既定ID・一覧を見る | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless` | なし |
+| 3枠を既定にする | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --stateless` | 作成 → 画像 → 既定化 → 同名の旧メニュー削除 |
+| 元（旧6枠）に戻す | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <控えた旧ID> --stateless` | 既定化1回（読み返して確認） |
+
+本番OAの値（`LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`）は本体 `/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars` にだけある。
+worktreeには `.dev.vars` が無いので、本番のメニュー操作には必ず `DEV_VARS_PATH=` を付ける（付け忘れると値が無くて止まる）。
+テストOAの手順は「Staging Bring-Up」の手順4（`--stateless` なし・テスト用トークンを環境変数で渡す）。
+
+- `--stateless`: `.dev.vars`（実行したディレクトリのもの。`DEV_VARS_PATH` で変えられる）の `LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`
+  （test は `*_TEST`）から 15 分で切れるステートレストークンを発行し、メモリ上だけで使う。本数の上限が無く、本番 Worker が
+  使っている 30 日トークン（自動更新 `com.elxea.line-token-rotation`。25 日ごとに差し替え、判定は毎日 05:45）を失効させない。値は表示しない。
+  長期トークンの再発行・短期トークンの追加発行・`line-token-rotation.sh --force` は使わない。
+  根拠: <https://developers.line.biz/en/docs/basics/channel-access-token/>
+- basicId の照合: どのモードでも、トークンを得た直後に `GET /v2/bot/info` の basicId を期待値（prod `@307tzhkw` / test `@426vlcyb`）と
+  照らし合わせる。違えば作成・画像・既定化・削除のどれも呼ばずに止まる。
+- 画像: 既定は `assets/rich-menu/richmenu-temp-3slot-amazon.png`。PNG・2500x843・1,000,000 バイト以下でなければ、何も作らずに止まる
+  （LINE 公式「Max file size: 1 MB」を単位の取り違えが無いようバイトで固定。`tests/unit/rich-menu-definition.test.ts` でも固定）。
+- 旧 6 枠（`elxea メインメニュー（6 枠 Option A）`）は名前が違うので、差し替えても消えずに残る。差し替えの前に `--list` で
+  今の既定 ID を控え、戻すときはその ID を `--set-default` に渡す（2026-08-10 の記録では
+  `richmenu-4383dd8074a470e13a19bf2463ef8ee3`。必ず `--list` の実測を使う）。差し替えの実行時にも、画面に
+  「元に戻すとき」のコマンドが今の既定 ID つきで出る。
+- お客さんの画面への反映は、トークを開き直したとき（最大1分）。
+- 開店時（`src/lib/storefront.ts` の `EC_SITE_OPEN = true`）は、メニュー画像（③ の文字）の作り直しと再登録も要る。
+
+### 本番に出す手順（正本・仮メニュー3枠・Amazon）
+
+本番のコマンド列の正本はこの節。本番デプロイと本番メニューの差し替えはSetakaの実施GOが要る（Tier 2）。順番を崩さない
+（Workerが先・メニューが後。`/go/store` が無いまま ③ を出すと開けない）。
+
+**前提（すべて満たしてから始める）**
+
+1. 統合ブランチ `feat/line-temp-menu-amazon-20260926` をoriginにpushし、master宛てのPRを開いてCIを通す。
+2. masterへのマージは **SetakaのGO後にだけ**行う。
+3. 本番には **masterから**載せる。origin/masterから新しいworktreeを作り、install / typecheck / test:unitを通してから
+   `pnpm run deploy` する（`pnpm run deploy` は `scripts/deploy-preflight.sh` で「作業ツリーがきれい」「HEAD == origin/master」を確かめる）。
+   ⚠ 必ず `pnpm run deploy` と書く。pnpm 10 では `pnpm deploy` が組み込みコマンド（ワークスペースの切り出し）として先に動き、
+   package.json の deploy スクリプト（preflight → wrangler）は実行されない（2026-09-26 QA F7）。
+4. ⚠ **禁止**: `DEPLOY_ALLOW_NON_DEFAULT=1` を付けて統合ブランチを直接本番に載せること。masterと本番がずれ、次にmasterを
+   本番に出したときに、閉店中の文と `/go/store` が消える（③ が開けなくなり、閉じたリンクも戻る）。
+
+```bash
+# 0. マージ後の origin/master から新しい worktree を作り、検査を通す
+cd /Users/setaka/github/elxea/products/elxea-cx-agent
+git fetch origin
+git worktree add -b deploy/line-temp-menu-YYYYMMDD ../_wt/cx-prod-line-temp-menu origin/master
+cd ../_wt/cx-prod-line-temp-menu
+grep -n 'EC_SITE_OPEN *=' src/lib/storefront.ts   # false であること
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test:unit
+
+# 1. 今の本番メニューの既定 ID を控える（読み取りのみ）→ 以下「旧ID」
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+
+# 2. デプロイ直前に、今の本番 Worker の版 ID を控える（緊急時の wrangler rollback 用）→ 以下「旧版ID」
+pnpm exec wrangler deployments status
+
+# 3. Worker のデプロイ（preflight を通る）
+pnpm run deploy
+
+# 4. /go/store を HEAD で確かめる（GET だと押下の記録が 1 件残るので、本番では GET を使わない）
+curl -s -I https://elxea-agent.setaka-on.workers.dev/go/store | grep -i -E '^HTTP|^location'
+#    期待: 302 / location: https://www.amazon.co.jp/stores/page/0C75602F-4851-4957-8D54-9A17590AF63C
+
+# 5. 3 枠メニューを作って既定にする（実行時に「元に戻すとき」のコマンドも旧 ID つきで出る）
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --stateless
+
+# 6. 読み返す: 既定が新 ID になり、旧 6 枠も残っている
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+```
+
+**事後確認（読み取りのみ）**
+
+- 本番Workerのログを数分見る（`pnpm exec wrangler tail --format pretty`。`--env` を付けない＝本番）。ダッシュボードのWorkers Logsで
+  同じ語を検索してもよい。確かめること:
+  - LINE APIの **401**（トークン無効）が **0件**。
+  - `[closed-link-gate]` の行（閉店中の関所がリンクを消した記録）が **0件**。決まった文の経路では消す数は0のはずなので、出たら
+    どこかに閉じたリンクが残っている。
+- LINE E2E SpecのChangelogへの追記は **Boss側の作業**（この手順の実行者は行わない）。
+
+**戻し方（第一手はメニュー。コードは原則戻さない）**
+
+お客さんへの影響（3 枠の見た目・③ の行き先）を止める第一手は、メニューを旧 6 枠に戻すこと。LINE 側の既定を向け直すだけで、デプロイは要らない。
+
+```bash
+# 第一手: メニューを旧 6 枠に戻す（1 で控えた旧ID）
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧ID> --stateless
+# 既定が旧ID に戻ったかを読み返す
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+```
+
+- **コードは原則戻さない**。今回のコードは閉店中の文を出すためのもの（購入先を Amazon ストアに向け、閉じたサイトへのリンクを
+  お客さんに出さない）。コードを旧版に戻すと、閉じたサイト（elxea.com）へのリンクが返事や配信の文面に戻る。
+  メニューを旧 6 枠に戻しても `/go/store` は残るだけで害はない。
+
+**コードを戻す必要があるときの標準手順（git revert → 通常の deploy）**
+
+1. 先にメニューを戻す（上の第一手）。逆順だと、③ の `/go/store` が無い状態が生じる。
+2. master で、戻したいコミットを `git revert` する PR を作り、CI を通す。
+3. Setaka の GO 後に master へマージする。
+4. origin/master から新しい worktree を作り、install / typecheck / test:unit を通してから `pnpm run deploy` する
+   （この節の手順0・3と同じ。`DEPLOY_ALLOW_NON_DEFAULT=1` は使わない）。ただし手順0とは次の2点を変える:
+   - worktreeの場所とブランチ名は、最初のdeployで作ったもの（`../_wt/cx-prod-line-temp-menu` / `deploy/line-temp-menu-YYYYMMDD`）と
+     別の名前にする（例: `../_wt/cx-prod-revert-YYYYMMDD` / `deploy/revert-YYYYMMDD`）。同じ名前が残っていると `git worktree add` が拒否する。
+   - `grep -n 'EC_SITE_OPEN *=' src/lib/storefront.ts` の確認は飛ばす。storefront.tsは今回の変更で足したファイルなので、全部を
+     revertすると無くなり、grepが「No such file」で失敗する。一部だけrevertしてstorefront.tsが残る場合は、今までどおりfalseを確かめる。
+5. `curl -s https://elxea-agent.setaka-on.workers.dev/` で `{"status":"ok",...}` を確かめ、事後確認（LINE API の 401 が 0 件）を行う。
+
+- **通常の deploy は、今の secret をそのまま引き継いだ新しい版を作る**（wrangler 4.71.0 の `wrangler-dist/cli.js` で確認）:
+  - `wrangler deploy` の本体（`async function deploy`・L290584）は `keepVars = props.keepVars || config.keep_vars`（L290702）とし、
+    アップロードに `keepSecrets: keepVars`（L290923・コメント「keepVars implies keepSecrets」）を渡す。
+  - アップロードの組み立て（`createWorkerUploadForm`）は、keepSecrets のとき `keep_bindings` に `secret_text` / `secret_key` を入れる
+    （L150172-150175）＝「前の版の secret を引き継ぐ」指定。
+  - このリポジトリの wrangler.toml は最上位に `keep_vars = true`（L10）があり、`keep_vars` は全 env に効く（cli.js L4026
+    `keep_vars: rawConfig.keep_vars`）。よって `pnpm run deploy` は、最新の LINE トークンを含む今の secret を引き継ぐ。
+- **引き継ぐ指定が送られない条件**: wrangler.toml の `keep_vars = true` を外す・false にしたとき（`--keep-vars` も付けない場合）。
+  そのとき Cloudflare 側で secret がどうなるかは cli.js からは分からない（未確認）。
+  対処: `keep_vars = true` を外さない。revert やマージで wrangler.toml の `keep_vars` が変わる場合は、デプロイの前に止めて Boss に
+  確かめる。デプロイの後は `pnpm exec wrangler secret list` で secret の名前がそろっていることを確かめる。
+
+**`wrangler rollback` は緊急時だけ**（上の標準手順を待てないとき。例: 本番が返事できない）
+
+```bash
+pnpm exec wrangler rollback <旧版ID>   # 2 で控えた版へ、トラフィックを移す
+curl -s https://elxea-agent.setaka-on.workers.dev/   # {"status":"ok",...} を確認
+```
+
+- rollback は、トラフィックを旧版に移すだけで、新しい版を作らない。secret も旧版の時点の値で動く（控えた版のあとで secret が
+  変わっていると、wrangler は「The following secrets have changed since version <ID> was deployed. Please confirm ...」と、
+  変わった secret の名前を出して確認を求める。cli.js の `CANNOT_ROLLBACK_WITH_MODIFIED_SECERT_CODE` の分岐）。
+- ⚠ **次に通常の deploy をするまで、`wrangler secret put` は失敗し続ける**。最新の版が載っていないため、エラー 10215
+  「the latest version of your Worker isn't currently deployed」で拒否される（cli.js L230184 付近）。
+  - LINE トークンの自動更新（`com.elxea.line-token-rotation` = `scripts/line-token-rotation.sh`。25 日ごとに差し替え、判定は
+    毎日 05:45）も、差し替えの時期に入ると secret の投入で失敗し（exit 4）、次に通常の deploy をするまで毎朝失敗し続ける。
+    この更新は、Worker の secret を入れたあと、Web アプリ（Vercel）の env、本体 `.dev.vars` の順に書く。Worker への投入で失敗すると
+    後ろの 2 つも更新されない（状態ファイルも更新しないので、翌朝また差し替えを試みる）。
+  - 旧版の時点のトークンが失効していれば、返信は 401 で失敗しうる。rollback の後に secret を入れ直すことはできない。
+- ⚠ **wrangler がエラーで勧める 2 つの方法には従わない**（`wrangler versions secret put` / 「deploy the latest version first」＝
+  いま載っていない最新の版を先に載せ直す）。どちらも、戻したいはずの新しいコードの版をもう一度載せることになり、rollback そのものを
+  取り消してしまう。revert したコードを `pnpm run deploy` するのはこれに当たらない（戻したコードで新しい版を作る）。
+- rollback は一時しのぎ。**できるだけ早く、上の標準手順（git revert → CI → マージ → 新しい worktree → `pnpm run deploy`）で
+  出し直す**。出し直した時点で、secret の投入と自動更新は元どおり動く。
 
 ## Staging Deploy
 
@@ -237,7 +407,7 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 
 | 経路 | ゲート |
 |---|---|
-| `pnpm deploy`（bare `wrangler deploy`） | 実行 |
+| `pnpm run deploy`（bare `wrangler deploy`） | 実行 |
 | `scripts/deploy-prod.sh` / deploy-prod workflow | preflight STEP 1で実行 |
 | `pnpm deploy:staging` | **対象外**（featureブランチからの検証デプロイが正常運用） |
 
@@ -256,7 +426,7 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 git fetch origin && git checkout master && git merge --ff-only origin/master
 
 # どうしても今の HEAD を載せる必要があるとき（意図を明示）
-DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
+DEPLOY_ALLOW_NON_DEFAULT=1 pnpm run deploy
 ```
 
 リグレッションテストは `tests/unit/deploy-preflight.test.ts`（`pnpm test:unit` に組み込み済み。
@@ -265,7 +435,7 @@ DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
 ### Deploy Order
 
 1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
-2. **elxea-cx-agent**: `pnpm deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflowが
+2. **elxea-cx-agent**: `pnpm run deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflowが
    preflight → migration → deploy → health(+webhook検証) → version_skew_reportを一括実行）
    - migrationは**明示指定制**。`MIGRATE_ONLY` で当てるversionを名指しする（当てないなら `MIGRATE_ONLY=NONE`）。
      未指定は中断する（fail-closed）。workflowから回す場合は `migrate_only` 入力に同じ値を入れる。
@@ -289,8 +459,8 @@ DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
 npx tsx scripts/verify-staging.ts
 
 # 2. Deploy to production
-#    ⚠ `pnpm deploy` はwranglerの前にscripts/deploy-preflight.shを通る（下記「デプロイ前ゲート」）。
-pnpm deploy
+#    ⚠ `pnpm run deploy` はwranglerの前にscripts/deploy-preflight.shを通る（下記「デプロイ前ゲート」）。
+pnpm run deploy
 
 # 3. Verify production (health check only, no Claude API calls)
 curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
@@ -328,13 +498,9 @@ npx wrangler versions deploy <version-id>@<percent> <current-version-id>@<percen
 
 ### Rollback
 
-```bash
-# Rollback to previous version
-wrangler rollback
-
-# Verify rollback
-curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
-```
+本番Workerの戻し方の正本は「本番に出す手順（正本・仮メニュー3枠・Amazon）」の「戻し方（第一手はメニュー。コードは原則戻さない）」（ここに手順は置かない）。
+- 第一手はメニューを旧6枠に戻すこと。コードを戻すときの標準は、git revertのPR → CI → マージ → origin/masterの新しいworktreeで `pnpm run deploy`。
+- `wrangler rollback` は緊急時だけ。次に通常のdeployをするまで `wrangler secret put` がエラー10215で拒否され、LINEトークンの自動更新も失敗する。wranglerがエラーで勧める方法には従わない。
 
 ## LINE配信の運用（送信条件 / env分離 / テスト配信）
 
@@ -740,7 +906,7 @@ pnpm exec wrangler secret list --env staging
 | 承認を取り消す | All Tasks 判定行の「判定」を承認以外に戻す（さらに念のため配信DB行を Approved → Draft） | 判定行が承認でなければ send-one は `judgment_not_approved` で止まる（第二の防御）。配信DB行の Status も第一の門として効く |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
-| コードごと戻す | `wrangler rollback` | 直前バージョンへ（secret は消えない・`keep_vars = true`） |
+| コードごと戻す | 標準は git revert の PR → マージ → `pnpm run deploy`（secret は引き継がれる・`keep_vars = true`）。`wrangler rollback` は緊急時だけ | rollback は旧版へトラフィックを移すだけで、次の通常 deploy まで `secret put` と LINE トークンの自動更新が失敗する（「本番に出す手順」の戻し方） |
 
 **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
 
@@ -837,7 +1003,7 @@ Cloudflareのsecretは**本番の値を読み出せない**（`wrangler secret l
 | 止めたいもの | 手順 | 効果 | デプロイ |
 |---|---|---|---|
 | **アンケートそのもの**（推奨・最速） | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`<br>（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | 合言葉もボタンも無反応。器にも1行も書かない。**masterと同じ挙動に戻る** | **不要**（次のリクエストから即時） |
-| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。`scripts/setup-rich-menu.ts` の当該枠の定義を元の6枠に戻し、`RICH_MENU_IMAGE_PATH=assets/rich-menu/richmenu-optionA-6slot-xs12-final.png pnpm setup-rich-menu -- --channel prod` を実行 | 元の6枠に戻る。スクリプトは「新作成 → 画像 → 既定化 → 旧削除」の順なので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
+| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。2026-09-26〜 スクリプトは仮メニュー 3 枠を作るため、旧 6 枠へは `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧6枠のID> --stateless` で既定を向け直す（旧 6 枠は名前が違うので残っている。ID は `--list` で確かめる。「リッチメニューの差し替えと戻し方」節） | 元の6枠に戻る。既定を向け直すだけなので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
 
 - **削除と `"false"` 投入は等価**（ON判定は `"true"` の完全一致のみ）。
   ただし**削除の方が外から検証できる**（`wrangler secret list` の名前一覧から消えるため）。

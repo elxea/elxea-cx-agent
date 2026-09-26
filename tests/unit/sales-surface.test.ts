@@ -18,8 +18,8 @@ import {
   isSalesTool,
   SALES_TOOL_NAMES,
   SALES_TOOL_DISABLED_RESULT,
-  EC_SITE_URL,
 } from "../../src/lib/sales-surface";
+import { PURCHASE_URL } from "../../src/lib/storefront";
 import { AGENT_TOOLS, SALES_TOOLS, agentTools } from "../../src/agent/tools";
 import {
   SYSTEM_PROMPT,
@@ -120,8 +120,8 @@ it("isSalesTool が売り込みツールだけを true と判定する", () => {
   assertEqual(isSalesTool("get_order_detail"), false, "get_order_detail");
 });
 
-it("実行拒否時の文言は購入導線を EC サイトへ寄せ、偽の約束をしない", () => {
-  assert(SALES_TOOL_DISABLED_RESULT.includes(EC_SITE_URL), "EC サイトの受け皿が示されていない");
+it("実行拒否時の文言は購入導線を購入先（storefront.ts の PURCHASE_URL）へ寄せ、偽の約束をしない", () => {
+  assert(SALES_TOOL_DISABLED_RESULT.includes(PURCHASE_URL), "購入先の受け皿が示されていない");
   assert(!SALES_TOOL_DISABLED_RESULT.includes("カートに入れ"), "カート追加を示唆している");
 });
 
@@ -136,7 +136,7 @@ it("既定の System Prompt に売り込みツールの使用指示が無い", (
 it("既定の System Prompt に「買う導線を置かない」が常設されている", () => {
   const p = systemPrompt(OFF);
   assert(p.includes("買う導線を置かない"), "売り込み禁止の節が無い");
-  assert(p.includes(EC_SITE_URL), "購入の受け皿（EC サイト）の案内が無い");
+  assert(p.includes(PURCHASE_URL), "購入の受け皿（購入先）の案内が無い");
 });
 
 it("既定は SYSTEM_PROMPT と完全一致（プロンプトキャッシュを壊さない）", () => {
@@ -175,21 +175,34 @@ it("既定でも利用中の方へのお手続き案内は維持する（購入�
   );
 });
 
-it("フラグ ON では従来の出し分けに戻る（退行なく復活できる）", () => {
+it("フラグ ON では従来の出し分けに戻る（退行なく復活できる・公式 EC の開店時）", () => {
   assertEqual(
-    decideSubscriptionResponse({ salesEnabled: true, linked: true, isSubscriber: false }),
+    decideSubscriptionResponse({ salesEnabled: true, linked: true, isSubscriber: false, siteOpen: true }),
     "generic",
     "連携済み非定期便・ON",
   );
   assertEqual(
-    decideSubscriptionResponse({ salesEnabled: true, linked: false, isSubscriber: false }),
+    decideSubscriptionResponse({ salesEnabled: true, linked: false, isSubscriber: false, siteOpen: true }),
     "generic_with_linkage",
     "未連携・ON",
   );
   assertEqual(
-    decideSubscriptionResponse({ salesEnabled: true, linked: true, isSubscriber: true }),
+    decideSubscriptionResponse({ salesEnabled: true, linked: true, isSubscriber: true, siteOpen: true }),
     "subscriber",
     "定期便利用中・ON",
+  );
+});
+
+it("公式 EC の閉店中は、フラグ ON でも未連携の方を連携ボタンのファネルに乗せない（実装設計 rev2 第4章）", () => {
+  assertEqual(
+    decideSubscriptionResponse({ salesEnabled: true, linked: false, isSubscriber: false, siteOpen: false }),
+    "generic",
+    "未連携・ON・閉店中",
+  );
+  assertEqual(
+    decideSubscriptionResponse({ salesEnabled: true, linked: true, isSubscriber: true, siteOpen: false }),
+    "subscriber",
+    "定期便利用中・ON・閉店中",
   );
 });
 
@@ -211,8 +224,8 @@ it("中立応答に便益訴求・煽り語・購入ボタンの語が無い", (
   }
 });
 
-it("中立応答は問い合わせの受け皿として案内先を 1 つだけ示す", () => {
-  const m = buildSubscriptionInquiryReply();
+it("中立応答は問い合わせの受け皿として案内先を 1 つだけ示す（開店時）", () => {
+  const m = buildSubscriptionInquiryReply(true);
   const urls = m.match(/https:\/\/[^\s]+/g) ?? [];
   assertEqual(urls.length, 1, "案内先 URL は 1 つ");
   assert(m.length <= 160, `1 通が長すぎる（${m.length} 文字）`);
@@ -220,7 +233,7 @@ it("中立応答は問い合わせの受け皿として案内先を 1 つだけ�
 
 it("従来の generic 紹介文は温存されている（復活可能・削除していない）", () => {
   assert(
-    buildSubscriptionMessage("generic").includes("選ぶ手間なく"),
+    buildSubscriptionMessage("generic", true).includes("選ぶ手間なく"),
     "generic 紹介文が失われている",
   );
 });

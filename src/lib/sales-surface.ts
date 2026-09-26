@@ -24,8 +24,9 @@
  *   （lookup_my_orders / get_order_detail）だけで、これは購入後のサポートであり売り込みではない。
  */
 
-/** EC サイト（購入導線の受け皿）。CX Agent は買う場所を持たず、ここに寄せる。 */
-export const EC_SITE_URL = "https://elxea.com/ja";
+import { byStore, EC_STORE_URL, PURCHASE_URL } from "./storefront";
+
+// 購入導線の受け皿の URL は storefront.ts（PURCHASE_URL / EC_STORE_URL）に 1 か所化した（旧 EC_SITE_URL は削除）。
 
 /** 売り込み面に属するツール名（フラグ無効時は AI に露出させず、実行も拒否する）。 */
 export const SALES_TOOL_NAMES = ["recommend_product", "create_cart_link"] as const;
@@ -54,6 +55,16 @@ export function isSalesTool(name: string): name is SalesToolName {
  * 売り込みツールがフラグ無効下で呼ばれたときに LLM へ返す文字列（fail-closed の受け皿）。
  * 「道具は無い」ことだけを伝え、AI が存在しない購入導線を約束しないようにする。
  */
-export const SALES_TOOL_DISABLED_RESULT =
+export const SALES_TOOL_DISABLED_RESULT_OPEN =
   "この道具は現在使用できません。商品カード・カートリンクは提示せず、" +
-  `購入や在庫のご相談は elxea のサイト（${EC_SITE_URL}）でご覧いただける旨を、控えめに一度だけ案内してください。`;
+  `購入や在庫のご相談は elxea のサイト（${EC_STORE_URL}）でご覧いただける旨を、控えめに一度だけ案内してください。`;
+
+/** 閉店中（公式 EC の開店まで）の返し。文言 v2 C-2 をそのまま使う（copy-as-data）。 */
+export const SALES_TOOL_DISABLED_RESULT_CLOSED =
+  `この道具は現在使用できません。商品カード・カートリンクは提示せず、購入や在庫のご相談には、Amazon の elxea ストア（${PURCHASE_URL}）で、いまのお取り扱いをご覧いただける旨を、控えめに一度だけ案内してください。尋ねられたお茶がストアにあるとは言い切らず、ストアそのものを案内してください。公式サイトは開店準備中のため、購入先として案内しないでください。`;
+
+/** いまの返し（storefront.ts の EC_SITE_OPEN で開店時 / 閉店中を選ぶ）。 */
+export const SALES_TOOL_DISABLED_RESULT = byStore(
+  SALES_TOOL_DISABLED_RESULT_OPEN,
+  SALES_TOOL_DISABLED_RESULT_CLOSED,
+);

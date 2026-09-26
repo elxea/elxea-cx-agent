@@ -17,6 +17,8 @@ import { installHermeticFetch, type Hermetic } from "../lib/hermetic";
 import { dispatchLineWebhook, settle } from "../lib/webhook";
 import { messageEvent, synthLineUserId } from "../lib/synthetic";
 import { LINKAGE_TRIGGER } from "../../src/lib/subscriber-linkage";
+import { EC_SITE_OPEN, collectLinks, isClosedSiteLink } from "../../src/lib/storefront";
+import { LINKAGE_PREPARING_BODY } from "../../src/lib/brand-copy";
 
 let h: Hermetic;
 
@@ -29,7 +31,9 @@ afterEach(() => {
 });
 
 describe("hermetic L1 — 動線3: 連携ファネル（便益+連携ボタン）", () => {
-  it("未連携 + トリガー → 連携ボタン(Flex) + flow_events(link.invite_shown surface=trigger)", async () => {
+  // 公式 EC の開店時の経路（EC_SITE_OPEN=true で有効に戻る）。閉店中は次のテスト（実装設計 rev2 第4章）。
+  //   開店時のボタン提示そのものは tests/unit/subscriber-linkage.test.ts（emitLinkageButton / sendLinkageInvite）でも固定している。
+  it.runIf(EC_SITE_OPEN)("未連携 + トリガー → 連携ボタン(Flex) + flow_events(link.invite_shown surface=trigger)", async () => {
     const user = synthLineUserId("f3a"); // customer_linkages に seed しない = 未連携。
 
     const { status } = await dispatchLineWebhook({
@@ -54,6 +58,29 @@ describe("hermetic L1 — 動線3: 連携ファネル（便益+連携ボタン�
     );
     expect(invite, "link.invite_shown が記録される").toBeTruthy();
     expect((invite?.metadata as { surface?: string } | undefined)?.surface).toBe("trigger");
+  });
+
+  it.runIf(!EC_SITE_OPEN)("公式 EC の閉店中: 未連携 + トリガー → 連携ボタンを出さず C-13 の一言だけ（invite_shown なし）", async () => {
+    const user = synthLineUserId("f3c"); // customer_linkages に seed しない = 未連携。
+
+    const { status } = await dispatchLineWebhook({
+      env,
+      channelSecret: String(env.LINE_CHANNEL_SECRET),
+      events: [messageEvent(user, LINKAGE_TRIGGER)],
+    });
+    expect(status).toBe(200);
+
+    // LIFF のモック URL が設定されていても、連携ボタン（Flex）は出ない。
+    expect(h.line.flexes().length, "連携招待の Flex を出さない").toBe(0);
+    expect(h.line.texts()).toContain(LINKAGE_PREPARING_BODY);
+    expect(h.line.texts().join("\n")).not.toContain("liff.line.me/e2e-mock-liff");
+    expect(collectLinks(h.line.texts()).filter((l) => isClosedSiteLink(l, false))).toEqual([]);
+
+    await settle();
+    const invite = h.supabase
+      .all("flow_events")
+      .find((e) => e.user_ref === user && e.event_name === "link.invite_shown");
+    expect(invite, "link.invite_shown を記録しない").toBeFalsy();
   });
 
   it("連携済み + トリガー → 連携ボタンは出ない（Flex なし・invite_shown なし）", async () => {

@@ -129,7 +129,7 @@ pnpm exec wrangler deploy --env staging
 # 3. 既存 unit test green を確認
 pnpm test:unit
 # 4. Setaka 承認（Tier 2）後に本番へ
-pnpm deploy      # = wrangler deploy（本番）
+pnpm run deploy  # = preflight → wrangler deploy（本番）。pnpm 10 では `pnpm deploy` だと組み込みコマンドが動く
 ```
 
 > 本番デプロイは Setaka 承認後にのみ実行する。crons（`wrangler.toml`）は R1 では空のまま触らない（cron 再開は FIX-13）。
