@@ -1,4 +1,5 @@
 import type { Env } from "../index";
+import { gateLineMessages } from "./closed-link-gate";
 
 /**
  * LINE Webhook の署名を検証する（Web Crypto API — Workers 互換）。
@@ -215,7 +216,10 @@ export async function pushTextMessage(
   env: Env,
   quickReplyItems?: QuickReplyItem[],
 ): Promise<void> {
-  await linePush(userId, [buildTextMessage(text, quickReplyItems)], env);
+  // 送る関所 1 (LINE の送信): 閉店中は閉じたリンクを消す。消した結果が空なら送らない (closed-link-gate.ts)。
+  const messages = gateLineMessages([buildTextMessage(text, quickReplyItems)], "push.text");
+  if (messages.length === 0) return;
+  await linePush(userId, messages, env);
 }
 
 /** LINE Push API で Flex Message を送信 */
@@ -225,7 +229,10 @@ export async function pushFlexMessage(
   contents: Record<string, unknown>,
   env: Env,
 ): Promise<void> {
-  await linePush(userId, [buildFlexMessage(altText, contents)], env);
+  // 送る関所 1 (LINE の送信): 閉店中は閉じたリンク入りの Flex を送らない (closed-link-gate.ts)。
+  const messages = gateLineMessages([buildFlexMessage(altText, contents)], "push.flex");
+  if (messages.length === 0) return;
+  await linePush(userId, messages, env);
 }
 
 /**
@@ -281,16 +288,22 @@ export function createResponder(
     await linePush(userId, messages, env);
   }
 
+  // 送る関所 1 (LINE の送信): sendOne の手前で、閉店中は閉じたリンクを消す / 閉じたリンク入りの Flex を送らない。
+  // 何も残らなければ送らない (reply token も消費しない)。決まった文の経路では消す数は 0 のはず (closed-link-gate.ts)。
   return {
     async text(text: string, quickReplyItems?: QuickReplyItem[]): Promise<void> {
-      await sendOne([buildTextMessage(text, quickReplyItems)]);
+      const messages = gateLineMessages([buildTextMessage(text, quickReplyItems)], "responder.text");
+      if (messages.length === 0) return;
+      await sendOne(messages);
     },
     async flex(
       altText: string,
       contents: Record<string, unknown>,
       quickReplyItems?: QuickReplyItem[],
     ): Promise<void> {
-      await sendOne([buildFlexMessage(altText, contents, quickReplyItems)]);
+      const messages = gateLineMessages([buildFlexMessage(altText, contents, quickReplyItems)], "responder.flex");
+      if (messages.length === 0) return;
+      await sendOne(messages);
     },
   };
 }
