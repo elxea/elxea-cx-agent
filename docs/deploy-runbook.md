@@ -77,6 +77,7 @@ pnpm setup-rich-menu -- --channel test --list   # 照合結果・今の既定 ID
 pnpm setup-rich-menu -- --channel test          # 3 枠メニューを作って既定にする（画像も自動で上げる）
 pnpm setup-rich-menu -- --channel test --list   # 既定が新 ID になり、旧メニューも残っていることを読み返す
 # 戻すとき: pnpm setup-rich-menu -- --channel test --set-default <控えた旧ID>
+unset LINE_CHANNEL_ACCESS_TOKEN_TEST   # 終わったらシェルからトークンを消す
 ```
 
 > 記録（2026-09-26・staging version `24632976-6aeb-44d1-9e14-5d87994d7898` / commit `63e3e20`）: テストOAの既定を
@@ -148,7 +149,9 @@ worktreeには `.dev.vars` が無いので、本番のメニュー操作には�
 1. 統合ブランチ `feat/line-temp-menu-amazon-20260926` をoriginにpushし、master宛てのPRを開いてCIを通す。
 2. masterへのマージは **SetakaのGO後にだけ**行う。
 3. 本番には **masterから**載せる。origin/masterから新しいworktreeを作り、install / typecheck / test:unitを通してから
-   `pnpm deploy` する（`pnpm deploy` は `scripts/deploy-preflight.sh` で「作業ツリーがきれい」「HEAD == origin/master」を確かめる）。
+   `pnpm run deploy` する（`pnpm run deploy` は `scripts/deploy-preflight.sh` で「作業ツリーがきれい」「HEAD == origin/master」を確かめる）。
+   ⚠ 必ず `pnpm run deploy` と書く。pnpm 10 では `pnpm deploy` が組み込みコマンド（ワークスペースの切り出し）として先に動き、
+   package.json の deploy スクリプト（preflight → wrangler）は実行されない（2026-09-26 QA F7）。
 4. ⚠ **禁止**: `DEPLOY_ALLOW_NON_DEFAULT=1` を付けて統合ブランチを直接本番に載せること。masterと本番がずれ、次にmasterを
    本番に出したときに、閉店中の文と `/go/store` が消える（③ が開けなくなり、閉じたリンクも戻る）。
 
@@ -170,7 +173,7 @@ DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm 
 pnpm exec wrangler deployments status
 
 # 3. Worker のデプロイ（preflight を通る）
-pnpm deploy
+pnpm run deploy
 
 # 4. /go/store を HEAD で確かめる（GET だと押下の記録が 1 件残るので、本番では GET を使わない）
 curl -s -I https://elxea-agent.setaka-on.workers.dev/go/store | grep -i -E '^HTTP|^location'
@@ -205,10 +208,20 @@ curl -s https://elxea-agent.setaka-on.workers.dev/   # {"status":"ok",...} を�
 
 - 逆順（コードを先に戻す）だと、③ の `/go/store` が無い状態が生じる。
 - `wrangler rollback` は本番を一時的に戻すだけ。masterには新しいコードが残るので、恒久的に戻すならmasterでgit revertする
-  PRを出し、同じ手順（新しいworktree → 検査 → `pnpm deploy`）で出し直す。
-- ⚠ デプロイの後にSecret Change（`wrangler secret put` 等）が入り、そのあとで古い版へ `wrangler rollback` した場合に、secretも
-  一緒に戻るかは**未確認**。rollbackの前に `pnpm exec wrangler deployments list` で、控えた版より後にSecret Changeが
-  入っていないかを見る。入っていたら、rollbackの後に `pnpm exec wrangler secret list` でsecretの名前がそろっているかを確かめる。
+  PRを出し、同じ手順（新しいworktree → 検査 → `pnpm run deploy`）で出し直す。
+- ⚠ **rollbackするとsecretも控えた版の時点の値に戻る**（前提として扱う）。wrangler 4.71の `rollback` は、控えた版のあとで
+  secretが変わっていると「The following secrets have changed since version <ID> was deployed. Please confirm ...」と、変わった
+  secretの名前を出して確認を求める（wranglerのrollbackの実装 `CANNOT_ROLLBACK_WITH_MODIFIED_SECERT_CODE` の分岐）。
+  確認して進めると、たとえば毎日更新されるLINEのトークンが古い値（失効済みのことがある）に戻り、返信が401で失敗しうる。
+  - rollbackの前に `pnpm exec wrangler deployments list` で、控えた版より後にSecret Changeが入っているかを見ておく。
+  - 確認の画面に出たsecretの名前を控えてから進める。
+  - rollbackの後、控えたsecretを**最新の値で入れ直す**（値は表示しない・標準入力で渡す）。値の取得元:
+    - `LINE_CHANNEL_ACCESS_TOKEN` → 本体 `.dev.vars` の同名の項目（毎日の自動更新 `com.elxea.line-token-rotation`
+      = `scripts/line-token-rotation.sh` が、Workerのsecretと同時にここへ書く）。
+      `printf '%s' "$(grep -E '^LINE_CHANNEL_ACCESS_TOKEN=' /Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')" | pnpm exec wrangler secret put LINE_CHANNEL_ACCESS_TOKEN`
+    - それ以外のsecret → そのsecretを入れたときの記録にある保管先（Bitwardenの該当項目など）。保管先が分からないsecretは
+      入れ直さずに止めて、Bossに確かめる。
+  - 入れ直した後、本番WorkerのログでLINE APIの401が出ていないことを確かめる（事後確認と同じ見方）。
 
 ## Staging Deploy
 
@@ -359,7 +372,7 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 
 | 経路 | ゲート |
 |---|---|
-| `pnpm deploy`（bare `wrangler deploy`） | 実行 |
+| `pnpm run deploy`（bare `wrangler deploy`） | 実行 |
 | `scripts/deploy-prod.sh` / deploy-prod workflow | preflight STEP 1で実行 |
 | `pnpm deploy:staging` | **対象外**（featureブランチからの検証デプロイが正常運用） |
 
@@ -378,7 +391,7 @@ pending 適用を deploy-prod workflow 経由で回す場合、本ファイル�
 git fetch origin && git checkout master && git merge --ff-only origin/master
 
 # どうしても今の HEAD を載せる必要があるとき（意図を明示）
-DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
+DEPLOY_ALLOW_NON_DEFAULT=1 pnpm run deploy
 ```
 
 リグレッションテストは `tests/unit/deploy-preflight.test.ts`（`pnpm test:unit` に組み込み済み。
@@ -387,7 +400,7 @@ DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
 ### Deploy Order
 
 1. **Supabase migrations** (if any pending) — 初回は上記 baseline を先に通す。
-2. **elxea-cx-agent**: `pnpm deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflowが
+2. **elxea-cx-agent**: `pnpm run deploy`（本番フル反映は `scripts/deploy-prod.sh` / deploy-prod workflowが
    preflight → migration → deploy → health(+webhook検証) → version_skew_reportを一括実行）
    - migrationは**明示指定制**。`MIGRATE_ONLY` で当てるversionを名指しする（当てないなら `MIGRATE_ONLY=NONE`）。
      未指定は中断する（fail-closed）。workflowから回す場合は `migrate_only` 入力に同じ値を入れる。
@@ -411,8 +424,8 @@ DEPLOY_ALLOW_NON_DEFAULT=1 pnpm deploy
 npx tsx scripts/verify-staging.ts
 
 # 2. Deploy to production
-#    ⚠ `pnpm deploy` はwranglerの前にscripts/deploy-preflight.shを通る（下記「デプロイ前ゲート」）。
-pnpm deploy
+#    ⚠ `pnpm run deploy` はwranglerの前にscripts/deploy-preflight.shを通る（下記「デプロイ前ゲート」）。
+pnpm run deploy
 
 # 3. Verify production (health check only, no Claude API calls)
 curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
