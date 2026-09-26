@@ -26,6 +26,7 @@ import {
 import { getUserRatings, positiveRatedProductNos } from "../lib/product-ratings";
 import { fetchSellingTeas } from "../lib/tea-menu";
 import { EC_SITE_OPEN, stripClosedLinks } from "../lib/storefront";
+import { AGENT_FALLBACK_REPLY } from "./fallback-reply";
 import {
   gateAgentExtras,
   gateAgentResult,
@@ -135,17 +136,16 @@ export function buildHistoryMessages(
   for (const m of history) {
     // 送る関所 4 (履歴): 閉店中は AI の過去の発言から閉じたリンクを消してから渡す
     // (切替前に送った `elxea.com/ja` 入りの返信を AI が真似しないように)。お客さんの発言は変えない。
-    // 消した結果が空になった発言は渡さない (空の発言は API に渡せない。続く user 発言は API がまとめる)。
+    // 空 (空白だけ) の AI の発言は渡さない。消した結果が空になったものも、空のまま保存されて届いたものも
+    // (空の発言は API に渡せない。続く user 発言は API がまとめる)。開店中は今のまま。
     let content = m.content;
     if (m.role === "assistant" && !siteOpen) {
       const r = stripClosedLinks(content, false);
-      if (r.removed > 0) {
-        removed += r.removed;
-        content = r.text;
-        if (content.trim() === "") {
-          emptied++;
-          continue;
-        }
+      removed += r.removed;
+      content = r.text;
+      if (content.trim() === "") {
+        emptied++;
+        continue;
       }
     }
     const label = labelled ? channelLabel(m.channel) : null;
@@ -154,7 +154,7 @@ export function buildHistoryMessages(
       content: label ? `[${label}] ${content}` : content,
     });
   }
-  if (removed > 0) {
+  if (removed > 0 || emptied > 0) {
     logClosedLinkGate({ gate: "history", caller: "buildHistoryMessages", removed, ...(emptied > 0 ? { emptied: true, dropped: emptied } : {}) });
   }
   return out;
@@ -583,7 +583,7 @@ async function runAgentUngated(
       const quickReplies = generateQuickReplies(usedTools, escalated, isSalesSurfaceEnabled(env));
 
       return {
-        response: finalText || "申し訳ありません、お返事の生成に失敗しました。",
+        response: finalText || AGENT_FALLBACK_REPLY,
         escalated,
         escalationReason,
         escalationCategory,
@@ -1025,7 +1025,7 @@ async function runAgentStreamingUngated(
     // egress brand-fact ガード: 保存・最終確定に使う全文を送信直前に是正する（冪等）。
     const fullResponse =
       applyBrandGuard(accumulatedText + finalText, { channel, userId }) ||
-      "申し訳ありません、お返事の生成に失敗しました。";
+      AGENT_FALLBACK_REPLY;
     callbacks.onDone(fullResponse);
     return { escalated, escalationReason, escalationCategory, flexMessages, productCards, cartLink, quickReplies };
   };

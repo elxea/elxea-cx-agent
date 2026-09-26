@@ -19,6 +19,7 @@ import { getHermetic, type Hermetic } from "../lib/hermetic";
 import { dispatchLineWebhook, settle } from "../lib/webhook";
 import { messageEvent, synthLineUserId } from "../lib/synthetic";
 import { AMAZON_STORE_URL, collectLinks, isClosedSiteLink } from "../../src/lib/storefront";
+import { AGENT_FALLBACK_REPLY } from "../../src/agent/fallback-reply";
 
 const AI_REPLY =
   "ほうじ茶がおすすめです。ご購入はこちら https://elxea.com/ja からどうぞ。\n" +
@@ -37,9 +38,13 @@ function closedIn(message: unknown): string[] {
   return collectLinks(message).filter((l) => isClosedSiteLink(l, false));
 }
 
+/** AI の返事 (テストごとに差し替える)。 */
+let aiReply = AI_REPLY;
+
 beforeEach(() => {
   h = getHermetic();
   llmMessages = [];
+  aiReply = AI_REPLY;
   const inner = globalThis.fetch;
   innerFetch = inner;
   const wrapper = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -58,7 +63,7 @@ beforeEach(() => {
           type: "message",
           role: "assistant",
           model: "claude-mock",
-          content: [{ type: "text", text: AI_REPLY }],
+          content: [{ type: "text", text: aiReply }],
           stop_reason: "end_turn",
           stop_sequence: null,
           usage: { input_tokens: 1, output_tokens: 1 },
@@ -138,5 +143,58 @@ describe("送る関所: 閉店中、AI の返事の閉じたリンクはお客�
       message: { type: "image", id: `e2e-img-${Date.now()}`, contentProvider: { type: "line" } },
     });
     expectNoClosedLinks(userId);
+  });
+});
+
+/**
+ * D2b QA F1: AI の返事が閉じたリンクだけのとき、実配線 (AI の出口 → LINE の送信・保存 → 次の履歴) を通しても
+ * 空の本文を送らず・空の発言を保存せず・次の履歴に空を入れない。無言にせず既存の fallback 文を 1 通だけ返す。
+ */
+describe("送る関所: AI の返事が閉じたリンクだけのとき (実 webhook 経路)", () => {
+  function expectFallbackOnce(userId: string): void {
+    const texts = h.line.texts();
+    expect(texts.filter((t) => t.trim() === ""), "空の本文を送った").toEqual([]);
+    expect(texts.filter((t) => t === AGENT_FALLBACK_REPLY), "fallback 文が 1 通だけ届いていない").toHaveLength(1);
+    expect(closedIn(h.line.allMessages()), "閉じたリンクが届いた").toEqual([]);
+    const saved = (h.supabase.all("conversations") as unknown as Array<Record<string, unknown>>).filter(
+      (r) => r.user_id === userId && r.role === "assistant" && r.content !== OLD_ASSISTANT,
+    );
+    expect(saved.map((r) => r.content), "保存した AI の発言").toEqual([AGENT_FALLBACK_REPLY]);
+  }
+
+  async function expectNextHistoryClean(userId: string): Promise<void> {
+    const before = llmMessages.length;
+    aiReply = "ほうじ茶の香りは焙煎からきています。";
+    await dispatch(messageEvent(userId, "ほかにも教えてください", 1));
+    const calls = llmMessages.slice(before);
+    expect(calls.length, "次の会話で AI に到達していない").toBeGreaterThan(0);
+    for (const call of calls) {
+      for (const m of call.filter((x) => x.role === "assistant")) {
+        expect(typeof m.content === "string" ? m.content.trim() : "x", "次の履歴に空の AI の発言").not.toBe("");
+      }
+      expect(closedIn(call.filter((x) => x.role === "assistant")), "次の履歴に閉じたリンク").toEqual([]);
+    }
+  }
+
+  it("LINE の文字: fallback 文が 1 通だけ届き、保存も fallback、次の履歴に空が無い", async () => {
+    const userId = synthLineUserId("flow28-text-linkonly");
+    seedOldConversation(userId);
+    aiReply = "https://elxea.com/ja/subscription";
+    await dispatch(messageEvent(userId, "定期便はどこから申し込めますか"));
+    expectFallbackOnce(userId);
+    await expectNextHistoryClean(userId);
+  });
+
+  it("LINE の画像: fallback 文が 1 通だけ届き、保存も fallback、次の履歴に空が無い", async () => {
+    const userId = synthLineUserId("flow28-image-linkonly");
+    seedOldConversation(userId);
+    aiReply = "（https://elxea.com/ja）";
+    const base = messageEvent(userId, "");
+    await dispatch({
+      ...base,
+      message: { type: "image", id: `e2e-img-lo-${Date.now()}`, contentProvider: { type: "line" } },
+    });
+    expectFallbackOnce(userId);
+    await expectNextHistoryClean(userId);
   });
 });

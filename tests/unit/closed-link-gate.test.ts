@@ -20,9 +20,11 @@
  * 使用方法: npx tsx tests/unit/closed-link-gate.test.ts
  */
 
+import { AGENT_FALLBACK_REPLY } from "../../src/agent/fallback-reply";
 import {
   createStreamingTextGate,
   gateAgentResult,
+  gateAssistantText,
   gateLineMessages,
   gateStreamCallbacks,
   gateText,
@@ -378,8 +380,8 @@ it("逐次送信のコールバック: 商品カード・カートリンクも�
   w.restore();
   assertEqual(
     events.join(" | "),
-    // 「続きは」の後ろの空白は、消えたリンクと一緒に持ち越して消える。
-    `text:こちらです  | text:abc | cards:${AMAZON_STORE_URL} | text:続きは | done`,
+    // 断片の末尾の空白は持ち越す (次の断片の頭にくっつく)。「続きは」の後ろの空白は、消えたリンクと一緒に消える。
+    `text:こちらです | text: abc | cards:${AMAZON_STORE_URL} | text:続きは | done`,
     "順序と中身",
   );
   assertEqual(closedIn(done).length, 0, "保存用の全文");
@@ -407,6 +409,196 @@ it("履歴: AI の過去の発言から閉じたリンクが消え、お客さ�
   const open = buildHistoryMessages(history, true);
   assertEqual(open.length, 4, "開店中は何も変えない");
   assertEqual(open[1].content, "こちらからどうぞ https://elxea.com/ja", "開店中の AI の発言");
+});
+
+// ---------------------------------------------------------------------------
+// D2b QA 直し 1 回目: F1 (空になった本文) と n1 (逐次送信の「（）」)
+// ---------------------------------------------------------------------------
+
+const LINK_ONLY = "https://elxea.com/ja/subscription";
+
+/** 保存された行を、次の会話の履歴の形に戻す。 */
+function asHistory(rows: Array<Record<string, unknown>>): Message[] {
+  return rows.map((r) => ({ role: r.role as "user" | "assistant", content: String(r.content), channel: String(r.channel) }));
+}
+
+/** 履歴に空の AI の発言も閉じたリンクも無いこと。 */
+function assertCleanHistory(history: ReturnType<typeof buildHistoryMessages>, label: string) {
+  for (const m of history) {
+    assert(typeof m.content === "string" && m.content.trim() !== "", `${label}: 履歴に空の発言`);
+  }
+  assertEqual(closedIn(history).length, 0, `${label}: 履歴に閉じたリンク`);
+}
+
+function countOf(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+it("F1 AI の出口: 返事がリンクだけなら fallback 文に置き換え、fallback の warn を出す (本文は出さない)", () => {
+  const w = captureWarn();
+  const out = gateAgentResult({ response: ` ${LINK_ONLY} `, escalated: false }, "test", false);
+  w.restore();
+  assertEqual(out.response, AGENT_FALLBACK_REPLY, "fallback 文");
+  assert(w.lines.some((l) => l.includes('"fallback":true')), `fallback の warn: ${w.lines.join(" | ")}`);
+  assert(!w.lines.some((l) => l.includes("subscription")), "ログに本文");
+  assertEqual(gateAgentResult({ response: LINK_ONLY, escalated: false }, "test", true).response, LINK_ONLY, "開店中は今のまま");
+});
+
+it("F1 後段の守り: 閉店中は空の本文を送らず・保存せず・履歴に渡さない (warn)。開店中は今のまま", async () => {
+  const w = captureWarn();
+  assertEqual(gateLineMessages([{ type: "text", text: "  " }], "test", false).length, 0, "LINE: 空は送らない");
+  const openMsgs = [{ type: "text", text: "" }];
+  assertEqual(gateLineMessages(openMsgs, "test", true), openMsgs, "LINE: 開店中は今のまま");
+  assertEqual(gateAssistantText("", "save", "test", false).drop, true, "保存: 空は保存しない");
+  assertEqual(gateAssistantText("", "save", "test", true).drop, false, "保存: 開店中は今のまま");
+  const { client, inserted } = fakeSupabase();
+  await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: "" });
+  await saveMessage(client, { userId: "u", channel: "line", role: "user", content: "" });
+  assertEqual(inserted.length, 1, "保存: 空の AI の発言だけ保存しない (お客さんの発言は変えない)");
+  const history: Message[] = [
+    { role: "user", content: "こんにちは", channel: "line" },
+    { role: "assistant", content: " ", channel: "line" },
+  ];
+  assertEqual(buildHistoryMessages(history, false).length, 1, "履歴: 空の AI の発言は渡さない");
+  assertEqual(buildHistoryMessages(history, true).length, 2, "履歴: 開店中は今のまま");
+  w.restore();
+  assert(w.lines.filter((l) => l.includes('"emptied":true')).length >= 3, `emptied の warn: ${w.lines.join(" | ")}`);
+});
+
+/** LINE の文字・画像の返事の配線 (routes/line.ts: runAgent → responder.text と saveMessage → 次の履歴)。 */
+async function lineRoute(result: { response: string; escalated: boolean; flexMessages?: Array<{ altText: string; contents: Record<string, unknown> }> }) {
+  const gated = gateAgentResult(result, "runAgent.line", false);
+  const s = stubFetch();
+  const { client, inserted } = fakeSupabase();
+  try {
+    const r = createResponder("Uuser", "rt", env);
+    await Promise.all([
+      r.text(gated.response),
+      saveMessage(client, { userId: "Uuser", channel: "line", role: "assistant", content: gated.response }),
+    ]);
+    for (const f of gated.flexMessages ?? []) await r.flex(f.altText, f.contents);
+  } finally {
+    s.restore();
+  }
+  return { bodies: s.bodies, inserted };
+}
+
+it("組み合わせ LINE の文字: 返事がリンクだけ → fallback 文が 1 通だけ届き、保存も fallback、次の履歴に空が無い", async () => {
+  const w = captureWarn();
+  const { bodies, inserted } = await lineRoute({ response: LINK_ONLY, escalated: false });
+  w.restore();
+  const sent = bodies.flatMap((b) => b.messages as Array<{ type: string; text?: string }>);
+  assertEqual(sent.length, 1, "届いた通数");
+  assertEqual(sent[0].text, AGENT_FALLBACK_REPLY, "届いた本文");
+  assertEqual(inserted.length, 1, "保存件数");
+  assertEqual(inserted[0].content, AGENT_FALLBACK_REPLY, "保存した本文");
+  assertCleanHistory(buildHistoryMessages(asHistory(inserted), false), "LINE の文字");
+});
+
+it("組み合わせ LINE の画像: 返事がリンクだけ + 閉じたリンク入りの Flex → fallback 文だけが届き、Flex は送らない", async () => {
+  const w = captureWarn();
+  const { bodies, inserted } = await lineRoute({
+    response: `（${LINK_ONLY}）`,
+    escalated: false,
+    flexMessages: [{ altText: "商品", contents: { action: { type: "uri", uri: "https://elxea.com/ja/products/a" } } }],
+  });
+  w.restore();
+  const sent = bodies.flatMap((b) => b.messages as Array<{ type: string; text?: string }>);
+  assertEqual(sent.map((m) => m.type).join(","), "text", "届いたのは文字 1 通だけ");
+  assertEqual(sent[0].text, AGENT_FALLBACK_REPLY, "届いた本文");
+  assertEqual(inserted[0].content, AGENT_FALLBACK_REPLY, "保存した本文");
+  assertCleanHistory(buildHistoryMessages(asHistory(inserted), false), "LINE の画像");
+});
+
+it("組み合わせ web の逐次送信: 本文がリンクだけ → 画面には fallback 文が 1 回だけ出て、保存も fallback", async () => {
+  const screen: string[] = [];
+  const { client, inserted } = fakeSupabase();
+  const pending: Array<Promise<void>> = [];
+  // routes/web.ts の callbacks と同じ形 (文字は SSE へ、onDone で保存)。
+  const web: GateableStreamCallbacks = {
+    onTextDelta: (t) => screen.push(t),
+    onProductCards: () => {},
+    onCartLink: () => {},
+    onQuickReplies: () => {},
+    onDone: (full) => {
+      pending.push(saveMessage(client, { userId: "sess", channel: "web", role: "assistant", content: full }));
+    },
+    onError: () => {},
+  };
+  const w = captureWarn();
+  const { callbacks, finish } = gateStreamCallbacks(web, "runAgentStreaming.web", false);
+  callbacks.onTextDelta("https://elx");
+  callbacks.onTextDelta("ea.com/ja/sub");
+  callbacks.onTextDelta("scription");
+  callbacks.onDone(LINK_ONLY);
+  finish();
+  await Promise.all(pending);
+  w.restore();
+  const shown = screen.join("");
+  assertEqual(shown, AGENT_FALLBACK_REPLY, "画面に出た文");
+  assertEqual(countOf(shown, AGENT_FALLBACK_REPLY), 1, "fallback 文は 1 回だけ");
+  assertEqual(inserted.length, 1, "保存件数");
+  assertEqual(inserted[0].content, AGENT_FALLBACK_REPLY, "保存した本文");
+  assertCleanHistory(buildHistoryMessages(asHistory(inserted), false), "web の逐次送信");
+  assert(w.lines.some((l) => l.includes('"fallback":true')), "fallback の warn");
+});
+
+it("組み合わせ web の逐次送信: 本文にリンク以外もあれば fallback 文は出さない", () => {
+  const screen: string[] = [];
+  let done = "";
+  const w = captureWarn();
+  const { callbacks, finish } = gateStreamCallbacks(
+    {
+      onTextDelta: (t) => screen.push(t),
+      onProductCards: () => {},
+      onCartLink: () => {},
+      onQuickReplies: () => {},
+      onDone: (full) => {
+        done = full;
+      },
+      onError: () => {},
+    },
+    "test",
+    false,
+  );
+  callbacks.onTextDelta("ほうじ茶です。");
+  callbacks.onTextDelta(` ${LINK_ONLY}`);
+  callbacks.onDone(`ほうじ茶です。 ${LINK_ONLY}`);
+  finish();
+  w.restore();
+  assertEqual(screen.join(""), "ほうじ茶です。", "画面");
+  assertEqual(done, "ほうじ茶です。", "保存用の全文");
+  assertEqual(countOf(screen.join(""), AGENT_FALLBACK_REPLY), 0, "fallback 文は出さない");
+});
+
+it("組み合わせ web の画像: 返事がリンクだけ → 返す JSON も保存も fallback 文", async () => {
+  // routes/web.ts の画像: runAgent → saveMessage → JSON で返す。
+  const w = captureWarn();
+  const gated = gateAgentResult({ response: LINK_ONLY, escalated: false }, "runAgent.web", false);
+  const { client, inserted } = fakeSupabase();
+  await saveMessage(client, { userId: "sess", channel: "web", role: "assistant", content: gated.response });
+  const json = JSON.parse(JSON.stringify({ response: gated.response })) as { response: string };
+  w.restore();
+  assertEqual(json.response, AGENT_FALLBACK_REPLY, "返す本文");
+  assertEqual(inserted[0].content, AGENT_FALLBACK_REPLY, "保存した本文");
+  assertCleanHistory(buildHistoryMessages(asHistory(inserted), false), "web の画像");
+});
+
+it("n1 逐次送信: 断片が「（」や空白の直後で切れても「（）」や空白が残らない", () => {
+  for (const [a, b] of [
+    ["ご案内（", `${LINK_ONLY}）です。`],
+    ["ご案内（ ", `${LINK_ONLY} ）です。`],
+    ["ご案内 ", `${LINK_ONLY}\n次の行です。`],
+  ]) {
+    const emitted: string[] = [];
+    const g = createStreamingTextGate((s) => emitted.push(s), false);
+    g.push(a);
+    g.push(b);
+    g.flush();
+    const all = emitted.join("");
+    assertEqual(all, stripClosedLinks(a + b, false).text, `まとめて消したときと同じ: ${JSON.stringify(a)}`);
+    assert(!all.includes("（）") && !all.includes("( )") && !all.includes("（ ）"), `括弧が残った: ${all}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -34,11 +34,17 @@
  * プロンプト (C-4・C-6) に従って Amazon の URL を出す。
  *
  * ログ: どの関所で (gate)・どの呼び出し元で (caller)・何本消したか (removed) を 1 行の JSON で出す。
- * 本文は出さない。消した結果が空になった本文は送らず・保存せず、`emptied: true` の warn を必ず出す
- * (設計 QA 3 回目 m4)。決まった文の経路では消す数は 0 のはずなので、ログが出たら文の対の実装漏れの合図。
+ * 本文は出さない。決まった文の経路では消す数は 0 のはずなので、ログが出たら文の対の実装漏れの合図。
+ *
+ * 空になった本文 (設計 QA 3 回目 m4 / D2b QA F1・Boss 確定):
+ *   - AI の出口で閉じたリンクを消した結果、AI の返事が空 (空白だけ) になったら、無言にせず既存の fallback 文
+ *     (AGENT_FALLBACK_REPLY) に置き換え、`fallback: true` の warn を出す。これで後段に空が流れない。
+ *   - 後段の守り: 閉店中は、LINE の送信の関所は空の本文を送らない・保存の関所は空の AI の発言を保存しない・
+ *     履歴の関所は空の AI の発言を渡さない (どれも `emptied: true` の warn)。開店中は今のまま。
  */
 
 import { EC_SITE_OPEN, collectLinks, isClosedSiteLink, stripClosedLinks } from "./storefront";
+import { AGENT_FALLBACK_REPLY } from "../agent/fallback-reply";
 
 /** 関所の名前 (ログの gate)。 */
 export type ClosedLinkGateName = "line_send" | "save" | "agent_exit" | "history" | "delivery";
@@ -50,6 +56,8 @@ export function logClosedLinkGate(entry: {
   removed?: number;
   dropped?: number;
   emptied?: boolean;
+  /** 空になった AI の返事を fallback 文に置き換えた。 */
+  fallback?: boolean;
 }): void {
   console.warn(`[closed-link-gate] ${JSON.stringify(entry)}`);
 }
@@ -114,7 +122,12 @@ export function gateLineMessages(
   for (const msg of messages) {
     if (msg.type === "text" && typeof msg.text === "string") {
       const g = gateText(msg.text, "line_send", caller, false);
-      if (g.emptied) continue;
+      if (g.text.trim() === "") {
+        // 後段の守り: 閉店中は空 (空白だけ) の本文を送らない (LINE は空の本文を受け付けない)。
+        // 前段 (AI の出口) で空になって届いたものにも気づけるよう、ここで消していなくても warn を出す。
+        if (!g.emptied) logClosedLinkGate({ gate: "line_send", caller, emptied: true });
+        continue;
+      }
       const withText = g.removed > 0 ? { ...msg, text: g.text } : msg;
       const q = gateQuickReply(withText);
       if (q.dropped > 0) logClosedLinkGate({ gate: "line_send", caller: `${caller}.quickReply`, dropped: q.dropped });
@@ -179,8 +192,26 @@ export function gateAgentExtras<T extends AgentExtras>(
 }
 
 /**
+ * 保存の関所 (AI の発言): 閉店中は閉じたリンクを消し、空 (空白だけ) なら drop を立てる (保存しない)。
+ * 前段で空になって届いたものにも気づけるよう、ここで消していなくても空なら warn を出す。開店中は今のまま。
+ */
+export function gateAssistantText(
+  text: string,
+  gate: ClosedLinkGateName,
+  caller: string,
+  siteOpen: boolean = EC_SITE_OPEN,
+): { text: string; drop: boolean } {
+  if (siteOpen) return { text, drop: false };
+  const g = gateText(text, gate, caller, false);
+  if (g.text.trim() !== "") return { text: g.text, drop: false };
+  if (!g.emptied) logClosedLinkGate({ gate, caller, emptied: true });
+  return { text: g.text, drop: true };
+}
+
+/**
  * runAgent の結果の関所: 返事の本文から閉じたリンクを消し、付いてくるものから閉じたリンク入りを外す。
- * 本文が空になっても結果の形は変えない (送る側の LINE の関所・保存の関所が空の本文を落とす)。
+ * 消した結果、本文が空 (空白だけ) になったら、無言にせず既存の fallback 文 (AGENT_FALLBACK_REPLY) に置き換え、
+ * `fallback: true` の warn を出す (後段に空の本文を流さない)。
  */
 export function gateAgentResult<T extends AgentExtras & { response: string }>(
   result: T,
@@ -190,7 +221,12 @@ export function gateAgentResult<T extends AgentExtras & { response: string }>(
   if (siteOpen) return result;
   const g = gateText(result.response, "agent_exit", caller, false);
   const next = gateAgentExtras(result, caller, false);
-  return g.removed > 0 ? { ...next, response: g.text } : next;
+  if (g.removed === 0) return next;
+  if (g.text.trim() === "") {
+    logClosedLinkGate({ gate: "agent_exit", caller, fallback: true });
+    return { ...next, response: AGENT_FALLBACK_REPLY };
+  }
+  return { ...next, response: g.text };
 }
 
 /** URL に使える文字 (設計 第5章: 英数字と `./:_-%?=&#~+@`)。逐次送信で末尾に続く部分だけを持ち越す。 */
@@ -223,13 +259,23 @@ export function createStreamingTextGate(
   let removed = 0;
   let received = false;
   let emitted = false;
+  /** これまでに出した最後の文字 ("" = まだ何も出していない)。 */
+  let lastChar = "";
+  /**
+   * 行頭かどうかの手がかり。stripClosedLinks は「文字列の先頭 = 行頭」とみなしてリンクだけの行の改行を消すため、
+   * 行の途中から始まる断片には、前に文字があることを示す印 (URL にも空白にも括弧にもならない制御文字) を付けて消す。
+   */
+  const NOT_LINE_START = "\u0001";
   const out = (s: string): void => {
     if (s === "") return;
-    const r = stripClosedLinks(s, false);
+    const ctx = lastChar === "" || lastChar === "\n" ? "" : NOT_LINE_START;
+    const r = stripClosedLinks(ctx + s, false);
     removed += r.removed;
-    if (r.text !== "") {
-      if (r.text.trim() !== "") emitted = true;
-      emit(r.text);
+    const t = ctx !== "" && r.text.startsWith(ctx) ? r.text.slice(ctx.length) : r.text;
+    if (t !== "") {
+      if (t.trim() !== "") emitted = true;
+      lastChar = t[t.length - 1];
+      emit(t);
     }
   };
   return {
@@ -242,11 +288,10 @@ export function createStreamingTextGate(
       const buf = carry + delta;
       let cut = buf.length;
       while (cut > 0 && URL_CARRY_CHAR_RE.test(buf[cut - 1])) cut--;
-      // URL の文字を持ち越すときだけ、その直前の行内の空白と開き括弧も一緒に持ち越す
-      // (消すときに「前の空白・リンクだけを囲む括弧」ごと消せるように。stripClosedLinks の後始末と同じ結果にする)。
-      if (cut < buf.length) {
-        while (cut > 0 && URL_CARRY_PREFIX_RE.test(buf[cut - 1])) cut--;
-      }
+      // その直前 (または断片の末尾) の行内の空白と開き括弧も、URL の文字が続かなくても持ち越す
+      // (次の断片が URL で始まったとき、「前の空白・リンクだけを囲む括弧」ごと消せるように。
+      //  stripClosedLinks の後始末と同じ結果にする。遅れは 1〜2 文字。D2b QA n1)。
+      while (cut > 0 && URL_CARRY_PREFIX_RE.test(buf[cut - 1])) cut--;
       carry = buf.slice(cut);
       out(buf.slice(0, cut));
     },
@@ -288,16 +333,31 @@ export function gateStreamCallbacks(
   callbacks: GateableStreamCallbacks,
   caller: string,
   siteOpen: boolean = EC_SITE_OPEN,
-): { callbacks: GateableStreamCallbacks; finish: () => void } {
+): { callbacks: GateableStreamCallbacks; finish: (withFallback?: boolean) => void } {
   if (siteOpen) return { callbacks, finish: () => {} };
   const text = createStreamingTextGate((s) => callbacks.onTextDelta(s), false);
   let logged = false;
-  const finish = (): void => {
+  let fallbackSent = false;
+  /**
+   * 持ち越しを出し切る。withFallback のとき (完了時) は、受け取った本文があったのに閉じたリンクを消した結果
+   * 1 文字も出さなかったら、fallback 文を 1 回だけ出す (画面が無言にならない・二重にならない)。
+   */
+  const finish = (withFallback: boolean = false): void => {
     text.flush();
+    if (withFallback && text.emptied && !fallbackSent) {
+      fallbackSent = true;
+      callbacks.onTextDelta(AGENT_FALLBACK_REPLY);
+    }
     if (logged) return;
     if (text.removed > 0) {
       logged = true;
-      logClosedLinkGate({ gate: "agent_exit", caller: `${caller}.stream`, removed: text.removed, ...(text.emptied ? { emptied: true } : {}) });
+      logClosedLinkGate({
+        gate: "agent_exit",
+        caller: `${caller}.stream`,
+        removed: text.removed,
+        ...(text.emptied ? { emptied: true } : {}),
+        ...(fallbackSent ? { fallback: true } : {}),
+      });
     }
   };
   const wrapped: GateableStreamCallbacks = {
@@ -327,8 +387,10 @@ export function gateStreamCallbacks(
       callbacks.onQuickReplies(kept);
     },
     onDone: (fullResponse: string) => {
-      finish();
-      callbacks.onDone(gateText(fullResponse, "agent_exit", `${caller}.done`, false).text);
+      finish(true);
+      // 保存用の全文も同じく: 消した結果が空なら fallback 文にする (画面に出した文と保存する文をそろえる)。
+      const g = gateText(fullResponse, "agent_exit", `${caller}.done`, false);
+      callbacks.onDone(g.removed > 0 && g.text.trim() === "" ? AGENT_FALLBACK_REPLY : g.text);
     },
     onError: (error: string) => {
       finish();

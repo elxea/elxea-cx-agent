@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
 import type { SourceType } from "./query-classifier";
-import { gateText } from "./closed-link-gate";
+import { gateAssistantText } from "./closed-link-gate";
 
 export function createSupabaseClient(env: Env): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
@@ -22,12 +22,13 @@ export async function saveMessage(
   },
 ): Promise<void> {
   // 送る関所 2 (保存): 閉店中は AI の発言から閉じたリンクを消してから保存する (次の会話の履歴を汚さない)。
-  // 消した結果が空なら保存しない (空の発言は履歴として AI に渡せない。warn は gateText が出す)。
+  // 空 (空白だけ) の AI の発言は保存しない。消した結果が空になったものも、空のまま届いたものも
+  // (空の発言は履歴として AI に渡せない。warn は gateAssistantText が出す)。開店中は今のまま。
   // お客さんの発言 (role=user) は変えない。設計 rev2 第5章 / closed-link-gate.ts。
   let content = params.content;
   if (params.role === "assistant") {
-    const gated = gateText(content, "save", params.channel);
-    if (gated.emptied) return;
+    const gated = gateAssistantText(content, "save", params.channel);
+    if (gated.drop) return;
     content = gated.text;
   }
   const { error } = await supabase.from("conversations").insert({
