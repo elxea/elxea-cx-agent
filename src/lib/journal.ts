@@ -35,7 +35,8 @@ import type { Env } from "../index";
 import type { LineResponder, QuickReplyItem } from "./line";
 import { createSupabaseClient } from "./supabase";
 import { loadCustomerKarte } from "./customer-karte";
-import { SITE_URL_JA } from "./brand-copy";
+import { READING_PREPARING_BODY, SITE_URL_JA } from "./brand-copy";
+import { EC_SITE_OPEN } from "./storefront";
 import { articleCarousel, articleCard } from "./flex-templates";
 import { parseTargetEnv } from "./delivery-channel";
 import type { PersonaType } from "./firestore";
@@ -453,6 +454,8 @@ export interface JournalFlowDeps {
   loadKarte?: (lineUserId: string, env: Env) => Promise<JournalKarte>;
   /** 記事一覧のローダ。既定は fetchJournalArticles（Content Hub + TTL キャッシュ）。 */
   loadArticles?: (env: Env) => Promise<ArticleItem[]>;
+  /** 公式 EC が開店しているか（既定 EC_SITE_OPEN）。テストは開店時の経路を true で残す。 */
+  siteOpen?: boolean;
 }
 
 /**
@@ -471,6 +474,14 @@ export async function handleJournalFlow(
   deps?: JournalFlowDeps,
 ): Promise<boolean> {
   if (!isReadingTrigger(userMessage)) return false;
+
+  // C-22（文言 v2・実装設計 rev2 第3章）: 公式 EC が閉じている間は記事を読みに行かず、
+  //   「準備中」の 1 通だけを返す（カード・ボタン・quick reply なし）。記事の行き先（/ja/blogs/journal/…）が閉じているため。
+  //   記事 URL の組み立て（DUMMY_ARTICLE_URL_BASE / mapArticlePage / pickArticles）は roji が使うので触らない。
+  if (!(deps?.siteOpen ?? EC_SITE_OPEN)) {
+    await responder.text(READING_PREPARING_BODY);
+    return true;
+  }
 
   const loadKarte =
     deps?.loadKarte ??

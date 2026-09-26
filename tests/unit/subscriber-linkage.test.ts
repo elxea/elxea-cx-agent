@@ -187,8 +187,10 @@ async function run() {
 
   console.log("\n--- (d) 文言（分岐・絵文字なし・押し売りなし） ---");
   it("trigger 定数", () => assertEqual(LINKAGE_TRIGGER, "アカウントを連携する"));
-  it("selectLinkageMessage: 未連携=案内", () => {
-    const m = selectLinkageMessage({ linked: false, shopifyCustomerId: null, isSubscriber: false, source: "none" });
+  // 開店時（siteOpen=true）は master の文・URL のまま。閉店中（既定）は文言 v2 C-13 / C-14
+  //   （完全一致と連携の状態別の返事は tests/hermetic/closed-site-copy-d2a.test.ts）。
+  it("selectLinkageMessage: 未連携=案内（開店時）", () => {
+    const m = selectLinkageMessage({ linked: false, shopifyCustomerId: null, isSubscriber: false, source: "none" }, true);
     assert(m.includes(LINKAGE_INVITE_BODY.slice(0, 20)), "invite body");
   });
   it("selectLinkageMessage: 連携済み定期便=定期便客応答", () => {
@@ -211,9 +213,9 @@ async function run() {
       for (const w of banned) assert(!m.includes(w), `banned word "${w}" in: ${m}`);
     }
   });
-  it("案内・お断りは URL を含む", () => {
-    assert(buildLinkageInviteMessage().includes("https://"), "invite url");
-    assert(buildNonSubscriberDeclineMessage().includes("https://elxea.com/ja/subscription"), "decline url");
+  it("案内・お断りは URL を含む（開店時）", () => {
+    assert(buildLinkageInviteMessage(undefined, true).includes("https://"), "invite url");
+    assert(buildNonSubscriberDeclineMessage(true).includes("https://elxea.com/ja/subscription"), "decline url");
   });
 
   console.log("\n--- (e) LIFF 連携ボタン導線（トーク内入り口・ブロック4） ---");
@@ -223,10 +225,11 @@ async function run() {
     assertEqual(resolveLiffLinkageUrl({}), null, "unset");
   });
   it("buildLinkageInviteMessage: liffUrl 指定→LIFF 着地 / 未指定→従来 elxea.com/ja（点4 fail-safe）", () => {
-    assert(buildLinkageInviteMessage(LIFF_URL).includes(LIFF_URL), "liff landing");
-    assert(!buildLinkageInviteMessage(LIFF_URL).includes(SITE_URL_JA), "no legacy url when liff set");
-    assert(buildLinkageInviteMessage(null).includes(SITE_URL_JA), "legacy url when unset");
-    assert(buildLinkageInviteMessage().includes(SITE_URL_JA), "legacy url when arg absent");
+    // 開店時の経路（siteOpen=true）。閉店中は LIFF の有無に関係なく C-13 の一言（URL なし）。
+    assert(buildLinkageInviteMessage(LIFF_URL, true).includes(LIFF_URL), "liff landing");
+    assert(!buildLinkageInviteMessage(LIFF_URL, true).includes(SITE_URL_JA), "no legacy url when liff set");
+    assert(buildLinkageInviteMessage(null, true).includes(SITE_URL_JA), "legacy url when unset");
+    assert(!buildLinkageInviteMessage(LIFF_URL, false).includes("https://"), "closed: no url even when liff set");
   });
   it("buildLinkageInviteFlex: 便益1行 + LIFF を開く URI ボタン（ラベル一致・絵文字なし）", () => {
     const flex = buildLinkageInviteFlex(LIFF_URL);

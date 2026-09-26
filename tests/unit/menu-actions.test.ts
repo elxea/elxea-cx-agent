@@ -106,14 +106,16 @@ it("相談の quick reply text は tea-menu / menu トリガーと衝突しな�
 
 console.log("\n--- (c) ④定期便: subscriber / generic 出し分け ---");
 
-it("subscriber: 御礼 + プラン確認リンク（/ja/subscription）を含む", () => {
-  const s = buildSubscriptionMessage("subscriber");
+// 開店時（siteOpen=true）は master の文・リンクのまま。閉店中（既定）は文言 v2 C-9 / C-10 / C-12
+//   （完全一致は tests/hermetic/closed-site-copy-d2a.test.ts）。
+it("subscriber（開店時）: 御礼 + プラン確認リンク（/ja/subscription）を含む", () => {
+  const s = buildSubscriptionMessage("subscriber", true);
   assert(s.includes("https://elxea.com/ja/subscription"), "has subscription link");
   assert(s.includes("ありがとう"), "thanks existing subscriber");
 });
 
-it("generic: 押し売りしない紹介 + リンクを含む", () => {
-  const g = buildSubscriptionMessage("generic");
+it("generic（開店時）: 押し売りしない紹介 + リンクを含む", () => {
+  const g = buildSubscriptionMessage("generic", true);
   assert(g.includes("https://elxea.com/ja/subscription"), "has subscription link");
   assert(g.includes("定期便"), "introduces subscription");
 });
@@ -127,8 +129,8 @@ it("subscriber と generic は別文面", () => {
 
 console.log("\n--- (d) elxea について（発話専用） ---");
 
-it("ブランド紹介 + 実在 URL(/ja) + AI 開示 + 配信頻度（opt-out 約束は書かない）", () => {
-  const a = buildAboutMessage();
+it("ブランド紹介 + 実在 URL(/ja) + AI 開示 + 配信頻度（opt-out 約束は書かない・開店時）", () => {
+  const a = buildAboutMessage(true);
   assert(a.includes("elxea"), "mentions brand");
   assert(a.includes("https://elxea.com/ja"), "has site URL");
   assert(a.includes("AI"), "AI 開示1文（P0-5）");
@@ -165,7 +167,7 @@ it("④分岐は resolveLinkedSubscriber で 3 態（subscriber / 連携済み�
 it("未連携分岐は generic 紹介テキストの後に emitLinkageButton(surface=menu4) を出す", () => {
   const src = readFileSync(new URL("../../src/lib/menu-actions.ts", import.meta.url), "utf8");
   const branch = src.slice(src.indexOf("if (t === SUBSCRIPTION_TRIGGER)"));
-  const iText = branch.indexOf('buildSubscriptionMessage("generic")');
+  const iText = branch.indexOf('buildSubscriptionMessage("generic", siteOpen)');
   const iButton = branch.indexOf("emitLinkageButton(");
   assert(iText > -1, "generic intro sent");
   assert(iButton > -1, "linkage button emitted");

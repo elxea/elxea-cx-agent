@@ -50,7 +50,10 @@ import {
   ACCOUNT_LINK_UNLINKED_BODY,
   ACCOUNT_LINK_NOT_LINKED_BODY,
   ACCOUNT_LINK_UNLINK_FAILED_BODY,
+  LINKAGE_PREPARING_BODY,
+  NON_SUBSCRIBER_DECLINE_BODY_CLOSED,
 } from "./brand-copy";
+import { byStore, EC_SITE_OPEN } from "./storefront";
 import { logFlowEvent } from "./flow-events";
 import { issueLinkToken, buildAccountLinkEntryUrl } from "./account-link";
 import { clearCustomerLinkage } from "./customer-linkage";
@@ -236,7 +239,13 @@ export async function resolveLinkedSubscriber(
  * 着地先（体験重大3対応）: liffUrl があれば LIFF（マイページ相当）へ、無ければ従来の elxea.com/ja へ。
  *   prod（LIFF 未設定）では従来どおり SITE_URL_JA（fail-safe・文言不変）。
  */
-export function buildLinkageInviteMessage(liffUrl?: string | null): string {
+export function buildLinkageInviteMessage(
+  liffUrl?: string | null,
+  siteOpen: boolean = EC_SITE_OPEN,
+): string {
+  // C-13（文言 v2）: 公式 EC が閉じている間は、マイページへの案内（URL）を出さず「準備中」の一言にする。
+  //   LIFF の有無（本番 / staging）に関係なく同じ文（連携先の購入アカウントが開店前には無いため）。
+  if (!siteOpen) return LINKAGE_PREPARING_BODY;
   const url = liffUrl && liffUrl.length > 0 ? liffUrl : SITE_URL_JA;
   return `${LINKAGE_INVITE_BODY}\n${url}`;
 }
@@ -247,8 +256,13 @@ export function buildSubscriberLinkedMessage(): string {
 }
 
 /** 連携済みだが定期便でないお客さまへの、丁寧なお断り。 */
-export function buildNonSubscriberDeclineMessage(): string {
-  return `${NON_SUBSCRIBER_DECLINE_BODY}\n${SUBSCRIPTION_URL}`;
+export function buildNonSubscriberDeclineMessage(siteOpen: boolean = EC_SITE_OPEN): string {
+  // C-14（文言 v2）: 公式 EC が閉じている間は定期便ページへの案内を外し、連携完了の知らせだけ残す。
+  return byStore(
+    `${NON_SUBSCRIBER_DECLINE_BODY}\n${SUBSCRIPTION_URL}`,
+    NON_SUBSCRIBER_DECLINE_BODY_CLOSED,
+    siteOpen,
+  );
 }
 
 /**
@@ -257,15 +271,28 @@ export function buildNonSubscriberDeclineMessage(): string {
  *   - 連携済み＋定期便 → 定期便客としての応答
  *   - 連携済み＋非定期便 → 丁寧なお断り
  */
-export function selectLinkageMessage(resolution: LinkageResolution): string {
-  if (!resolution.linked) return buildLinkageInviteMessage();
+export function selectLinkageMessage(
+  resolution: LinkageResolution,
+  siteOpen: boolean = EC_SITE_OPEN,
+): string {
+  if (!resolution.linked) return buildLinkageInviteMessage(undefined, siteOpen);
   if (resolution.isSubscriber) return buildSubscriberLinkedMessage();
-  return buildNonSubscriberDeclineMessage();
+  return buildNonSubscriberDeclineMessage(siteOpen);
 }
 
 // ---------------------------------------------------------------------------
 // トーク内入り口の「便益 + 連携ボタン」（LIFF 導線・staging 先行・ブロック4）
 // ---------------------------------------------------------------------------
+
+/**
+ * handleLinkageFlow の開店状態と連携状態の読み取りの注入（テストは fake を渡し、実 I/O なしで
+ * 開店時 / 閉店中 × 連携の状態を固定する）。省略時は EC_SITE_OPEN / resolveLinkedSubscriber / isMarcheSourceUser。
+ */
+export interface LinkageSiteDeps {
+  siteOpen?: boolean;
+  resolveLinkage?: (lineUserId: string, env: Env) => Promise<LinkageResolution>;
+  isMarcheSource?: (lineUserId: string, env: Env) => Promise<boolean>;
+}
 
 /** 連携ボタンを出した文脈（flow_events link.invite_shown の metadata.surface）。 */
 export type LinkageSurface = "trigger" | "menu4";
@@ -548,6 +575,14 @@ export async function handleLinkageUnlink(
  *   - 連携済み定期便 → 定期便客としての応答（従来どおり）。
  *   - 連携済み非定期便 → 丁寧なお断り（従来どおり）。
  *
+ * 公式 EC が閉じている間（実装設計 rev2 第4章）:
+ *   - 「連携を解除する」は今までどおり（閉店の分岐より前に置く・LINE の必須義務）。
+ *   - 連携ボタン（sendLinkageInvite / emitLinkageButton）は呼ばない。ACCOUNT_LINK_ENTRY_URL /
+ *     LIFF_LINKAGE_URL の値に関係なく出ない（本番も staging も同じ）。
+ *   - 未連携 → C-13（準備中の一言）/ 未連携のマルシェ客 → MARCHE_LINKAGE_SOFT_ACK（今の文のまま）/
+ *     連携済み定期便 → 今の文のまま / 連携済み非定期便 → C-14。
+ *   連携済み定期便の文を変えないため、閉店中も連携状態の読み取り（resolveLinkedSubscriber）は行う。
+ *
  * @returns 処理したら true（ここで応答完結）。トリガー非一致なら false。
  */
 export async function handleLinkageFlow(
@@ -555,8 +590,11 @@ export async function handleLinkageFlow(
   userMessage: string,
   env: Env,
   responder: LineResponder,
-  deps?: LinkageUrlDeps & LinkageUnlinkDeps,
+  deps?: LinkageUrlDeps & LinkageUnlinkDeps & LinkageSiteDeps,
 ): Promise<boolean> {
+  const siteOpen = deps?.siteOpen ?? EC_SITE_OPEN;
+  const resolveLinkage = deps?.resolveLinkage ?? ((id: string, e: Env) => resolveLinkedSubscriber(id, e));
+  const isMarcheSource = deps?.isMarcheSource ?? ((id: string, e: Env) => isMarcheSourceUser(id, e));
   const trimmed = userMessage.trim();
 
   // 解除（必須義務）: 連携中かどうかに関わらず、この一言で完結させる。
@@ -567,13 +605,18 @@ export async function handleLinkageFlow(
 
   if (trimmed !== LINKAGE_TRIGGER) return false;
 
-  const resolution = await resolveLinkedSubscriber(lineUserId, env);
+  const resolution = await resolveLinkage(lineUserId, env);
   if (!resolution.linked) {
     // マルシェ流入のお客さまには連携ボタンを出さない（空振り連携の抑止・CX S1/S2）。
     //   マルシェ客はオンラインのご購入アカウントを持たないことが多く、連携を促すと袋小路になる。
     //   明示トリガーでも押し売りにせず、静かな受け止めに着地する（沈黙にはしない）。
-    if (await isMarcheSourceUser(lineUserId, env)) {
+    if (await isMarcheSource(lineUserId, env)) {
       await responder.text(MARCHE_LINKAGE_SOFT_ACK);
+      return true;
+    }
+    // 閉店中: 連携ボタンを出さず、準備中の一言（C-13）だけを返す。
+    if (!siteOpen) {
+      await responder.text(buildLinkageInviteMessage(undefined, false));
       return true;
     }
     // 未連携: 便益 + ボタン（連携 URL 設定時）。fail-safe は従来の案内テキスト（着地先も env 連動）。
@@ -581,12 +624,12 @@ export async function handleLinkageFlow(
       lineUserId,
       env,
       responder,
-      buildLinkageInviteMessage(resolveLiffLinkageUrl(env)),
+      buildLinkageInviteMessage(resolveLiffLinkageUrl(env), siteOpen),
       deps,
     );
     return true;
   }
-  // 連携済み（定期便客 / 非定期便）は従来どおりテキスト応答。
-  await responder.text(selectLinkageMessage(resolution));
+  // 連携済み（定期便客 / 非定期便）は従来どおりテキスト応答（閉店中の非定期便は C-14）。
+  await responder.text(selectLinkageMessage(resolution, siteOpen));
   return true;
 }

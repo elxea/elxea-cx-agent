@@ -114,6 +114,7 @@ describe("hermetic L1 — 動線14: 読みものの出し分け（UX④）", () 
     const cap = captureResponder();
 
     const handled = await handleJournalFlow(user, READING_TRIGGER, env, cap.responder, {
+      siteOpen: true, // 開店時の経路（記事カード）。閉店中は C-22 の 1 通（下の describe）。
       loadKarte: async (): Promise<JournalKarte> => ({ persona: "serenity" }),
       loadArticles: async () => POOL,
     });
@@ -145,6 +146,7 @@ describe("hermetic L1 — 動線14: 読みものの出し分け（UX④）", () 
     const user = synthLineUserId("f14n");
     const cap = captureResponder();
     await handleJournalFlow(user, READING_TRIGGER, env, cap.responder, {
+      siteOpen: true, // 開店時の経路（記事カード）。閉店中は C-22 の 1 通（下の describe）。
       loadKarte: async (): Promise<JournalKarte> => ({ persona: "sensory" }),
       loadArticles: async () => POOL,
     });
@@ -157,6 +159,7 @@ describe("hermetic L1 — 動線14: 読みものの出し分け（UX④）", () 
     const user = synthLineUserId("f14x");
     const cap = captureResponder();
     await handleJournalFlow(user, READING_TRIGGER, env, cap.responder, {
+      siteOpen: true, // 開店時の経路（記事カード）。閉店中は C-22 の 1 通（下の describe）。
       loadKarte: async (): Promise<JournalKarte> => ({ persona: null }),
       loadArticles: async () => POOL,
     });
@@ -170,6 +173,7 @@ describe("hermetic L1 — 動線14: 読みものの出し分け（UX④）", () 
     );
     const cap = captureResponder();
     await handleJournalFlow(synthLineUserId("f14c"), READING_TRIGGER, env, cap.responder, {
+      siteOpen: true, // 開店時の経路（記事カード）。閉店中は C-22 の 1 通（下の describe）。
       loadKarte: async (): Promise<JournalKarte> => ({ persona: null }),
       loadArticles: async () => many,
     });
@@ -196,6 +200,7 @@ describe("hermetic L1 — 動線14: 読みものの出し分け（UX④）", () 
   it("記事 0 件 → テキストで graceful（行き止まりにしない）・Flex は出さない", async () => {
     const cap = captureResponder();
     const handled = await handleJournalFlow(synthLineUserId("f14e"), READING_TRIGGER, env, cap.responder, {
+      siteOpen: true, // 開店時の経路（記事カード）。閉店中は C-22 の 1 通（下の describe）。
       loadKarte: async (): Promise<JournalKarte> => ({ persona: "serenity" }),
       loadArticles: async () => [],
     });

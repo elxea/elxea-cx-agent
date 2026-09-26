@@ -16,7 +16,7 @@
  *   等の非正本文言がユーザー向けに混入していたため是正し、本ファイルに集約した。
  */
 
-import { byStore, PURCHASE_URL } from "./storefront";
+import { byStore, EC_SITE_OPEN, PURCHASE_URL } from "./storefront";
 
 // --- ブランド識別（brand-context skill）---
 
@@ -251,6 +251,53 @@ export const SUBSCRIBER_LINKED_BODY =
 export const NON_SUBSCRIBER_DECLINE_BODY =
   "アカウントの連携が完了しました。これからは、あなたの好みに合わせたご案内を、このトークでお届けしますね。" +
   "定期便のご案内をご希望のときは、こちらからいつでもご覧いただけます。";
+
+// --- 公式 EC の開店までの文（閉店中の文・文言 v2）---
+//
+// 公式 EC（elxea.com）が閉じている間は、閉じたページ（マイページ・定期便ページ・記録ページ・記事）へ
+// 案内しない。開店時の文は上の各定数・各 builder のまま（master の文を 1 文字も変えない）で、
+// storefront.ts の EC_SITE_OPEN（または各 builder の siteOpen 引数）で開店時 / 閉店中を選ぶ。
+// 文言の正本: 文言 v2（elxea-ccs）https://app.notion.com/p/3e770c9d064c818eb5eee425b35dba90
+//   閉店中の文は「新しい文」をそのまま使う（句読点・半角スペース・改行も変えない）。
+// 実装設計: rev2 第3・4章 https://app.notion.com/p/3e770c9d064c81cd8100df0e5775513d
+
+/**
+ * C-13: 未連携のお客さまが「アカウントを連携する」と送ったときの閉店中の返事（連携ボタンも出さない）。
+ * 開店時は LINKAGE_INVITE_BODY + URL（buildLinkageInviteMessage）/ 連携ボタン。
+ * 本番（LIFF なし）と staging（LIFF あり）の両方の経路でこの文を返す（連携先の購入アカウントが開店前には無いため）。
+ */
+export const LINKAGE_PREPARING_BODY =
+  "アカウントの連携は、いま準備を進めているところです。\n\nお茶のことでしたら、このままメッセージでお尋ねくださいね。";
+
+/**
+ * C-14: 連携済みで定期便でないお客さまへの閉店中の返事（定期便ページへの案内を外し、連携完了の知らせだけ残す）。
+ * 開店時は NON_SUBSCRIBER_DECLINE_BODY + 定期便ページの URL（buildNonSubscriberDeclineMessage）。
+ */
+export const NON_SUBSCRIBER_DECLINE_BODY_CLOSED =
+  "アカウントの連携が完了しました。これからは、あなたの好みに合わせたご案内を、このトークでお届けしますね。";
+
+/**
+ * C-22: 「読みもの」「ジャーナル」と話しかけられたときの閉店中の返事（この 1 通だけ。カードもボタンも出さない）。
+ * 開店時は journal.ts の記事カード（handleJournalFlow の従来経路）。
+ */
+export const READING_PREPARING_BODY =
+  "読みものは、いま準備を進めているところです。\n\nお茶のことでしたら、このままメッセージでお尋ねくださいね。";
+
+/**
+ * C-15: AI 会話の 5 往復目に返事の末尾へ足す「体験を記録する」の一言（開店時の文）。
+ * master の routes/line.ts TASTING_NOTE_CTA_TEXT と同じ文字列（1 文字も変えない）。
+ */
+export const TASTING_NOTE_CTA_TEXT_OPEN =
+  "\n\n✿ 体験を記録する → https://elxea.com/ja/tasting-note";
+
+/**
+ * C-15: 体験を記録する一言を、いま付けるならその文を、付けないなら null を返す。
+ * 閉店中は記録ページが閉じているので付けない（文言 v2: 公式サイトの開店まで付けない・文言なし）。
+ * routes/line.ts（D2b の範囲）は、これが null のときは末尾に足さず、表示済みの記録もしない。
+ */
+export function tastingNoteCtaText(siteOpen: boolean = EC_SITE_OPEN): string | null {
+  return byStore<string | null>(TASTING_NOTE_CTA_TEXT_OPEN, null, siteOpen);
+}
 
 // --- アカウント連携（LINE 純正 Account Link）の完了・解除 ---
 //
