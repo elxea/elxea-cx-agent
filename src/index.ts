@@ -11,6 +11,7 @@ import {
 } from "./routes/web";
 import { surveyHandler } from "./routes/survey";
 import { clmChatCompletionsHandler } from "./routes/clm";
+import { GO_STORE_PATH, goStoreHandler } from "./routes/go-store";
 import { eventsIntakeHandler } from "./routes/events";
 import {
   cdpL0EventsHandler,
@@ -336,11 +337,28 @@ export type Env = {
    * 未設定でも動く（その場合ハッシュが総当たりに弱いだけ）。
    */
   CLM_SESSION_SALT?: string;
+  /**
+   * LINE 仮メニュー ③「Amazonストア」の押下の記録先（Workers Analytics Engine・D4）。
+   * wrangler.toml で本番 = elxea_store_taps / staging = elxea_store_taps_staging に分けて束縛する。
+   * 未束縛でも /go/store の転送は 302 で成功する（記録だけを飛ばす）。src/routes/go-store.ts 参照。
+   */
+  STORE_TAP_EVENTS?: AnalyticsEngineDataset;
 };
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/", (c) => c.json({ status: "ok", service: "elxea-agent" }));
+
+/**
+ * D4 — 転送口 /go/store（LINE 仮メニュー ③ の押下を記録して購入先へ 302）。
+ *
+ * 下の Firestore 起動ゲートより **前** に登録し、ゲートの除外リストにも入れる（二重）。
+ * この口は顧客データを読まず・書かず（記録は Analytics Engine の匿名の 1 件だけ）、
+ * お客さんがメニューを押した先の転送なので、無関係な設定の不備で 503 にしてはならない
+ * （「記録に失敗しても転送は必ず成功する」を設定の不備にまで広げる）。
+ * app.all で受けて、GET・HEAD 以外の 405 は handler が返す。
+ */
+app.all(GO_STORE_PATH, goStoreHandler);
 
 /**
  * E6' — Firebase 接続先の契約を外から確かめるための口。
@@ -386,7 +404,8 @@ app.get("/health/firebase", (c) => {
  * Workers に「起動」の瞬間は無いので、**最初のリクエストで落ちる**形で実現する。
  * 未設定なら 503 を返して以降も返し続ける = 事実上の起動拒否。
  *
- * 除外するのは `/`（サービス生存）と `/health/firebase`（設定状況そのものの報告）だけ。
+ * 除外するのは `/`（サービス生存）と `/health/firebase`（設定状況そのものの報告）、
+ * それに顧客データに触れない転送口 `/go/store`（D4・LINE 仮メニュー ③）だけ。
  * ここまで 503 にすると「なぜ止まっているのか」を外から読む手段が消え、
  * 静かに壊れているのと区別がつかなくなるため。
  *
@@ -398,7 +417,8 @@ app.get("/health/firebase", (c) => {
  * 詳細な理由・例外表は src/lib/firestore.ts の assertFirestoreConfigured を参照
  * （二重に書かない）。
  */
-const FIRESTORE_GATE_EXEMPT_PATHS = new Set(["/", "/health/firebase"]);
+// /go/store（D4）は顧客データに触れない転送口なので除外する（登録位置の注記は上の app.all を参照）。
+const FIRESTORE_GATE_EXEMPT_PATHS = new Set(["/", "/health/firebase", GO_STORE_PATH]);
 
 app.use("*", async (c, next) => {
   if (FIRESTORE_GATE_EXEMPT_PATHS.has(c.req.path)) return next();

@@ -31,6 +31,15 @@ binding = "AI"
 [observability]
 enabled = true
 
+# ── Workers Analytics Engine（D4: LINE 仮メニュー ③「Amazonストア」の押下の記録・本番）──
+# /go/store（src/routes/go-store.ts）が GET 1 回につき 1 件 writeDataPoint する（待たない・失敗しても 302 は返す）。
+# 記録先（dataset）は最初の書き込みで自動作成される。本番のデータベース（Supabase）は変えない（migration なし）。
+# 無料枠の範囲で使う（課金の設定はしない）。記録先は env ごとに引き継がれないので staging にも別名で書く。
+# 設計: https://app.notion.com/p/3e770c9d064c81cd8100df0e5775513d 第7章
+[[analytics_engine_datasets]]
+binding = "STORE_TAP_EVENTS"
+dataset = "elxea_store_taps"
+
 # ── Cron Triggers ──
 # ⚠ 2026-08-22（Setaka 指示・完全オンデマンド化）: **一斉配信の cron は登録しない**。
 #   旧 "*/15 * * * *"（15分毎の自動配信）は撤去した。承認済み行が時刻到来で自動送信される経路は
@@ -105,6 +114,14 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 [env.staging.ai]
 binding = "AI"
+
+# ── Workers Analytics Engine（D4・staging）──
+# top-level の [[analytics_engine_datasets]] は staging に引き継がれない（env ごとに独立）ため、
+# 本番とは別の記録先を明示する。⚠ ここに本番の dataset 名（elxea_store_taps）を書かないこと
+# （テスト OA の押下が本番の回数に混ざる）。
+[[env.staging.analytics_engine_datasets]]
+binding = "STORE_TAP_EVENTS"
+dataset = "elxea_store_taps_staging"
 
 # ── Staging 限定 Cron Triggers（P0-7b 配信計測 fetch + ブロック3-B 休眠検知）──
 # Cloudflare の triggers は継承キー（vars と違い env に継承される）。ここで env 上書きすると
