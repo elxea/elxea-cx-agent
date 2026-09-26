@@ -81,7 +81,7 @@ Notion からナレッジをエージェントに同期します。通常は lau
 | 変数名 | 設定先 | 必須 | 説明 |
 |--------|--------|------|------|
 | `LINE_CHANNEL_SECRET` | Workers Secrets | Yes | LINE Messaging API チャネルシークレット |
-| `LINE_CHANNEL_ACCESS_TOKEN` | Workers Secrets | Yes | LINE アクセストークン（30 日の短期トークン。長期ではない。毎日の自動更新 `com.elxea.line-token-rotation` / `scripts/line-token-rotation.sh` が期限前に差し替える） |
+| `LINE_CHANNEL_ACCESS_TOKEN` | Workers Secrets | Yes | LINE アクセストークン（30 日の短期トークン。長期ではない。自動更新 `com.elxea.line-token-rotation` / `scripts/line-token-rotation.sh` が 25 日ごとに差し替える。判定は毎日 05:45） |
 | `LINE_CHANNEL_ID` / `LINE_CHANNEL_ID_TEST` | 手元の .dev.vars | `setup-rich-menu --stateless` のとき | チャネル ID（秘密情報ではない）。シークレットと組でステートレストークン（15 分）を発行する |
 | `ANTHROPIC_API_KEY` | Workers Secrets | Yes | Claude API キー |
 | `SUPABASE_URL` | Workers Secrets | Yes | Supabase プロジェクト URL |

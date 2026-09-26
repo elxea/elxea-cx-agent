@@ -125,7 +125,7 @@ worktreeには `.dev.vars` が無いので、本番のメニュー操作には�
 
 - `--stateless`: `.dev.vars`（実行したディレクトリのもの。`DEV_VARS_PATH` で変えられる）の `LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`
   （test は `*_TEST`）から 15 分で切れるステートレストークンを発行し、メモリ上だけで使う。本数の上限が無く、本番 Worker が
-  使っている 30 日トークン（毎日の自動更新 `com.elxea.line-token-rotation`）を失効させない。値は表示しない。
+  使っている 30 日トークン（自動更新 `com.elxea.line-token-rotation`。25 日ごとに差し替え、判定は毎日 05:45）を失効させない。値は表示しない。
   長期トークンの再発行・短期トークンの追加発行・`line-token-rotation.sh --force` は使わない。
   根拠: <https://developers.line.biz/en/docs/basics/channel-access-token/>
 - basicId の照合: どのモードでも、トークンを得た直後に `GET /v2/bot/info` の basicId を期待値（prod `@307tzhkw` / test `@426vlcyb`）と
@@ -169,7 +169,7 @@ pnpm test:unit
 # 1. 今の本番メニューの既定 ID を控える（読み取りのみ）→ 以下「旧ID」
 DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
 
-# 2. デプロイ直前に、今の本番 Worker の版 ID を控える（wrangler rollback 用）→ 以下「旧版ID」
+# 2. デプロイ直前に、今の本番 Worker の版 ID を控える（緊急時の wrangler rollback 用）→ 以下「旧版ID」
 pnpm exec wrangler deployments status
 
 # 3. Worker のデプロイ（preflight を通る）
@@ -195,33 +195,64 @@ DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm 
     どこかに閉じたリンクが残っている。
 - LINE E2E SpecのChangelogへの追記は **Boss側の作業**（この手順の実行者は行わない）。
 
-**戻し方（メニューが先・コードが後）**
+**戻し方（第一手はメニュー。コードは原則戻さない）**
+
+お客さんへの影響（3 枠の見た目・③ の行き先）を止める第一手は、メニューを旧 6 枠に戻すこと。LINE 側の既定を向け直すだけで、デプロイは要らない。
 
 ```bash
-# メニューを旧 6 枠に戻す（1 で控えた旧ID）
+# 第一手: メニューを旧 6 枠に戻す（1 で控えた旧ID）
 DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧ID> --stateless
+# 既定が旧ID に戻ったかを読み返す
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+```
 
-# コードも戻すときは、メニューを戻した後に、2 で控えた版へ戻す
-pnpm exec wrangler rollback <旧版ID>
+- **コードは原則戻さない**。今回のコードは閉店中の文を出すためのもの（購入先を Amazon ストアに向け、閉じたサイトへのリンクを
+  お客さんに出さない）。コードを旧版に戻すと、閉じたサイト（elxea.com）へのリンクが返事や配信の文面に戻る。
+  メニューを旧 6 枠に戻しても `/go/store` は残るだけで害はない。
+
+**コードを戻す必要があるときの標準手順（git revert → 通常の deploy）**
+
+1. 先にメニューを戻す（上の第一手）。逆順だと、③ の `/go/store` が無い状態が生じる。
+2. master で、戻したいコミットを `git revert` する PR を作り、CI を通す。
+3. Setaka の GO 後に master へマージする。
+4. origin/master から新しい worktree を作り、install / typecheck / test:unit を通してから `pnpm run deploy` する
+   （この節の手順 0・3 と同じ。`DEPLOY_ALLOW_NON_DEFAULT=1` は使わない）。
+5. `curl -s https://elxea-agent.setaka-on.workers.dev/` で `{"status":"ok",...}` を確かめ、事後確認（LINE API の 401 が 0 件）を行う。
+
+- **通常の deploy は、今の secret をそのまま引き継いだ新しい版を作る**（wrangler 4.71.0 の `wrangler-dist/cli.js` で確認）:
+  - `wrangler deploy` の本体（`async function deploy`・L290584）は `keepVars = props.keepVars || config.keep_vars`（L290702）とし、
+    アップロードに `keepSecrets: keepVars`（L290923・コメント「keepVars implies keepSecrets」）を渡す。
+  - アップロードの組み立て（`createWorkerUploadForm`）は、keepSecrets のとき `keep_bindings` に `secret_text` / `secret_key` を入れる
+    （L150172-150175）＝「前の版の secret を引き継ぐ」指定。
+  - このリポジトリの wrangler.toml は最上位に `keep_vars = true`（L10）があり、`keep_vars` は全 env に効く（cli.js L4026
+    `keep_vars: rawConfig.keep_vars`）。よって `pnpm run deploy` は、最新の LINE トークンを含む今の secret を引き継ぐ。
+- **引き継ぐ指定が送られない条件**: wrangler.toml の `keep_vars = true` を外す・false にしたとき（`--keep-vars` も付けない場合）。
+  そのとき Cloudflare 側で secret がどうなるかは cli.js からは分からない（未確認）。
+  対処: `keep_vars = true` を外さない。revert やマージで wrangler.toml の `keep_vars` が変わる場合は、デプロイの前に止めて Boss に
+  確かめる。デプロイの後は `pnpm exec wrangler secret list` で secret の名前がそろっていることを確かめる。
+
+**`wrangler rollback` は緊急時だけ**（上の標準手順を待てないとき。例: 本番が返事できない）
+
+```bash
+pnpm exec wrangler rollback <旧版ID>   # 2 で控えた版へ、トラフィックを移す
 curl -s https://elxea-agent.setaka-on.workers.dev/   # {"status":"ok",...} を確認
 ```
 
-- 逆順（コードを先に戻す）だと、③ の `/go/store` が無い状態が生じる。
-- `wrangler rollback` は本番を一時的に戻すだけ。masterには新しいコードが残るので、恒久的に戻すならmasterでgit revertする
-  PRを出し、同じ手順（新しいworktree → 検査 → `pnpm run deploy`）で出し直す。
-- ⚠ **rollbackするとsecretも控えた版の時点の値に戻る**（前提として扱う）。wrangler 4.71の `rollback` は、控えた版のあとで
-  secretが変わっていると「The following secrets have changed since version <ID> was deployed. Please confirm ...」と、変わった
-  secretの名前を出して確認を求める（wranglerのrollbackの実装 `CANNOT_ROLLBACK_WITH_MODIFIED_SECERT_CODE` の分岐）。
-  確認して進めると、たとえば毎日更新されるLINEのトークンが古い値（失効済みのことがある）に戻り、返信が401で失敗しうる。
-  - rollbackの前に `pnpm exec wrangler deployments list` で、控えた版より後にSecret Changeが入っているかを見ておく。
-  - 確認の画面に出たsecretの名前を控えてから進める。
-  - rollbackの後、控えたsecretを**最新の値で入れ直す**（値は表示しない・標準入力で渡す）。値の取得元:
-    - `LINE_CHANNEL_ACCESS_TOKEN` → 本体 `.dev.vars` の同名の項目（毎日の自動更新 `com.elxea.line-token-rotation`
-      = `scripts/line-token-rotation.sh` が、Workerのsecretと同時にここへ書く）。
-      `printf '%s' "$(grep -E '^LINE_CHANNEL_ACCESS_TOKEN=' /Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')" | pnpm exec wrangler secret put LINE_CHANNEL_ACCESS_TOKEN`
-    - それ以外のsecret → そのsecretを入れたときの記録にある保管先（Bitwardenの該当項目など）。保管先が分からないsecretは
-      入れ直さずに止めて、Bossに確かめる。
-  - 入れ直した後、本番WorkerのログでLINE APIの401が出ていないことを確かめる（事後確認と同じ見方）。
+- rollback は、トラフィックを旧版に移すだけで、新しい版を作らない。secret も旧版の時点の値で動く（控えた版のあとで secret が
+  変わっていると、wrangler は「The following secrets have changed since version <ID> was deployed. Please confirm ...」と、
+  変わった secret の名前を出して確認を求める。cli.js の `CANNOT_ROLLBACK_WITH_MODIFIED_SECERT_CODE` の分岐）。
+- ⚠ **次に通常の deploy をするまで、`wrangler secret put` は失敗し続ける**。最新の版が載っていないため、エラー 10215
+  「the latest version of your Worker isn't currently deployed」で拒否される（cli.js L230184 付近）。
+  - LINE トークンの自動更新（`com.elxea.line-token-rotation` = `scripts/line-token-rotation.sh`。25 日ごとに差し替え、判定は
+    毎日 05:45）も、差し替えの時期に入ると secret の投入で失敗し（exit 4）、次に通常の deploy をするまで毎朝失敗し続ける。
+    この更新は、Worker の secret を入れたあと、Web アプリ（Vercel）の env、本体 `.dev.vars` の順に書く。Worker への投入で失敗すると
+    後ろの 2 つも更新されない（状態ファイルも更新しないので、翌朝また差し替えを試みる）。
+  - 旧版の時点のトークンが失効していれば、返信は 401 で失敗しうる。rollback の後に secret を入れ直すことはできない。
+- ⚠ **wrangler がエラーで勧める 2 つの方法には従わない**（`wrangler versions secret put` / 「deploy the latest version first」＝
+  いま載っていない最新の版を先に載せ直す）。どちらも、戻したいはずの新しいコードの版をもう一度載せることになり、rollback そのものを
+  取り消してしまう。revert したコードを `pnpm run deploy` するのはこれに当たらない（戻したコードで新しい版を作る）。
+- rollback は一時しのぎ。**できるだけ早く、上の標準手順（git revert → CI → マージ → 新しい worktree → `pnpm run deploy`）で
+  出し直す**。出し直した時点で、secret の投入と自動更新は元どおり動く。
 
 ## Staging Deploy
 
@@ -875,7 +906,7 @@ pnpm exec wrangler secret list --env staging
 | 承認を取り消す | All Tasks 判定行の「判定」を承認以外に戻す（さらに念のため配信DB行を Approved → Draft） | 判定行が承認でなければ send-one は `judgment_not_approved` で止まる（第二の防御）。配信DB行の Status も第一の門として効く |
 | 画像つき配信を止める | `pnpm exec wrangler secret delete R2_API_TOKEN` | 画像つき行の承認 pin が fail-closed（テキストのみ配信は継続） |
 | roji最初のアンケートを止める | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | アンケートが一切起動しなくなる（合言葉もボタンも無反応・器にも書かない）。詳細は下記「roji最初のアンケートの停止スイッチ」 |
-| コードごと戻す | `wrangler rollback` | 直前バージョンへ（secret は消えない・`keep_vars = true`） |
+| コードごと戻す | 標準は git revert の PR → マージ → `pnpm run deploy`（secret は引き継がれる・`keep_vars = true`）。`wrangler rollback` は緊急時だけ | rollback は旧版へトラフィックを移すだけで、次の通常 deploy まで `secret put` と LINE トークンの自動更新が失敗する（「本番に出す手順」の戻し方） |
 
 **送信済みは取り消せない**。訂正はお詫び・訂正配信を新規作成 → 承認で行う。
 
