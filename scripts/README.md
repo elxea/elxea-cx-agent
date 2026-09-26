@@ -45,10 +45,17 @@ bash scripts/setup-vercel-env.sh
 ### 5. LINE リッチメニューの設定
 
 ```bash
-LINE_CHANNEL_ACCESS_TOKEN=your-token npx tsx scripts/setup-rich-menu.ts
+pnpm setup-rich-menu -- --channel test --list --stateless               # どの OA か・今の既定 ID・一覧（読み取りのみ）
+pnpm setup-rich-menu -- --channel test --stateless                      # 3 枠メニューを作って既定にする
+pnpm setup-rich-menu -- --channel test --set-default <ID> --stateless   # 既定を指定 ID に戻す
 ```
 
-6 分割のリッチメニューを設定します。メニュー画像は LINE Official Account Manager で別途設定が必要です。
+仮メニュー 3 枠（① お茶の淹れ方 / ② 好み診断 / ③ Amazon ストア・2500x843）を設定します。形の正本は
+`scripts/lib/rich-menu-definition.ts`。画像は `assets/rich-menu/richmenu-temp-3slot-amazon.png` を自動でアップロードします
+（`RICH_MENU_IMAGE_PATH` で上書き可。PNG・2500x843・1,000,000 バイト以下でなければ何も作らずに止まる）。
+`--channel prod|test` は必須。`--stateless` は .dev.vars のチャネル ID / シークレットから 15 分で切れるトークンを発行し、
+他のトークンを失効させません。basicId が違う OA なら何も書き込まずに止まります。
+本番の手順と戻し方は `docs/deploy-runbook.md`「リッチメニューの差し替えと戻し方」。
 
 ---
 
@@ -69,7 +76,8 @@ Notion からナレッジをエージェントに同期します。通常は lau
 | 変数名 | 設定先 | 必須 | 説明 |
 |--------|--------|------|------|
 | `LINE_CHANNEL_SECRET` | Workers Secrets | Yes | LINE Messaging API チャネルシークレット |
-| `LINE_CHANNEL_ACCESS_TOKEN` | Workers Secrets | Yes | LINE アクセストークン（長期） |
+| `LINE_CHANNEL_ACCESS_TOKEN` | Workers Secrets | Yes | LINE アクセストークン（30 日の短期トークン。長期ではない。毎日の自動更新 `com.elxea.line-token-rotation` / `scripts/line-token-rotation.sh` が期限前に差し替える） |
+| `LINE_CHANNEL_ID` / `LINE_CHANNEL_ID_TEST` | 手元の .dev.vars | `setup-rich-menu --stateless` のとき | チャネル ID（秘密情報ではない）。シークレットと組でステートレストークン（15 分）を発行する |
 | `ANTHROPIC_API_KEY` | Workers Secrets | Yes | Claude API キー |
 | `SUPABASE_URL` | Workers Secrets | Yes | Supabase プロジェクト URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Workers Secrets | Yes | Supabase サービスロールキー |
