@@ -2,7 +2,7 @@
  * Unit Tests -- menu-actions（相談 / ④定期便 / elxea について の決定的応答）
  *
  * 純粋ロジック（Notion / LINE push / Firestore に触れない）を検証する:
- *   (a) トリガー文言がリッチメニュー（setup-rich-menu.ts）の message text と一致
+ *   (a) トリガー文言がリッチメニュー（scripts/lib/rich-menu-definition.ts）の message text と一致
  *   (b) 相談: 初手 quick reply が 2-3 個・text は tea-menu / menu トリガーと非衝突（AI へ素通り）
  *   (c) ④定期便: subscriber / generic の出し分けメッセージ（両方リンクを含む）
  *   (d) elxea について: ブランド紹介（URL 実在 /ja）＋ 配信設定の受け皿
@@ -15,6 +15,7 @@
  * 使用方法: npx tsx tests/unit/menu-actions.test.ts
  */
 
+import { buildRichMenuBody, storeUriFor } from "../../scripts/lib/rich-menu-definition";
 import { readFileSync } from "node:fs";
 import {
   CONSULTATION_TRIGGER,
@@ -57,28 +58,30 @@ function assertEqual<T>(actual: T, expected: T, label = "") {
 
 console.log("\n--- (a) トリガー文言はリッチメニューの message text と一致 ---");
 
-it("トリガー定数が setup-rich-menu.ts の各枠 message text と一致（6枠 Option A）", () => {
-  const src = readFileSync(new URL("../../scripts/setup-rich-menu.ts", import.meta.url), "utf8");
-  // 6枠 Option A: ①お茶の淹れ方 / ②好み診断 / ③マイカルテ / ④定期便 / ⑤読みもの / ⑥roji アンケート
-  //   （相談 は 2026-07 に、elxea について は 2026-08-09 commit e98843e に意図的に廃止
-  //     = いずれもリッチメニューから削除済み・発話トリガーとしてのみ存続）。
+it("トリガー定数がリッチメニュー定義の message text と一致（仮メニュー 3 枠・Amazon）", () => {
+  // メニューの形の正本は scripts/lib/rich-menu-definition.ts（2026-09-26〜 仮メニュー 3 枠）。
+  //   ① お茶の淹れ方（message）/ ② 好み診断（message）/ ③ Amazon ストア（uri → Worker の /go/store）。
+  //   旧 6 枠の ③マイカルテ / ④定期便 / ⑤読みもの / ⑥roji アンケートは枠を外し、発話トリガーとしてのみ存続。
+  //   相談 / elxea について も枠を持たない（2026-07 / 2026-08-09 commit e98843e に廃止済み）。
+  //   ここを固定して「メニュー定義を戻すと旧導線に巻き戻る」回帰（Issue: richmenu6-trigger-gap）を再発させない。
+  const body = buildRichMenuBody(storeUriFor("prod"));
+  const texts = body.areas.flatMap((a) => (a.action.type === "message" ? [a.action.text] : []));
   // ①お茶の淹れ方 は tea-menu が処理（トリガー一致は tea-menu 側で担保）
-  assert(src.includes(`text: "お茶の淹れ方を知りたい"`), "①tea text present");
+  assertEqual(texts[0], "お茶の淹れ方を知りたい", "①tea text");
   // ②好み診断 は AI 会話へ（本モジュール非対象）
-  assert(src.includes(`text: "好みに合うお茶を診断してほしいです"`), "②diagnosis text present");
-  // ③マイカルテ（★新規 = my-karte.ts MY_KARTE_TRIGGER と一致）
-  assert(src.includes(`text: "${MY_KARTE_TRIGGER}"`), "③マイカルテ text matches");
-  // ④定期便
-  assert(src.includes(`text: "${SUBSCRIPTION_TRIGGER}"`), "④定期便 text matches");
-  // ⑤読みもの（★新規 = journal.ts READING_TRIGGER と一致）
-  assert(src.includes(`text: "${READING_TRIGGER}"`), "⑤読みもの text matches");
-  // ⑥roji アンケート導線（= roji-survey-copy.ts SURVEY_TRIGGER と一致 / commit e98843e で差し替え）
-  assert(src.includes(`text: "${SURVEY_TRIGGER}"`), "⑥roji アンケート text matches");
-  // 相談（CONSULTATION_TRIGGER）/ elxea について（ABOUT_TRIGGER）は枠を持たない。
-  //   本番リッチメニュー画像が SoT。ここを固定して「setup-rich-menu.ts を実行すると
-  //   旧導線に巻き戻る」回帰（Issue: richmenu6-trigger-gap）を再発させない。
-  assert(!src.includes(`text: "${CONSULTATION_TRIGGER}"`), "相談 は削除済み（メニューに無い）");
-  assert(!src.includes(`text: "${ABOUT_TRIGGER}"`), "elxea について は削除済み（メニューに無い）");
+  assertEqual(texts[1], "好みに合うお茶を診断してほしいです", "②diagnosis text");
+  assertEqual(texts.length, 2, "message の枠は ①② の 2 つだけ（③ は uri）");
+  assertEqual(body.areas[2].action.type, "uri", "③ Amazon ストアは uri");
+  for (const [trigger, label] of [
+    [MY_KARTE_TRIGGER, "マイカルテ"],
+    [SUBSCRIPTION_TRIGGER, "定期便"],
+    [READING_TRIGGER, "読みもの"],
+    [SURVEY_TRIGGER, "roji アンケート"],
+    [CONSULTATION_TRIGGER, "相談"],
+    [ABOUT_TRIGGER, "elxea について"],
+  ] as const) {
+    assert(!texts.includes(trigger), `${label} は枠を外した（メニューに無い）`);
+  }
 });
 
 console.log("\n--- (b) 相談（発話専用）: 初手 quick reply ---");

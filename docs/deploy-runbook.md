@@ -62,18 +62,17 @@ https://elxea-agent-staging.setaka-on.workers.dev/webhook/line
 
 ### 4. リッチメニューをテストチャネルへ登録
 
-テストトークンを export してから実行する。スクリプトは `LINE_CHANNEL_ACCESS_TOKEN_TEST` を
-優先して使い、起動時に対象チャネル（`test(@426vlcyb)`）をラベル表示する。
+テスト OA（@426vlcyb）に載せる。`--channel test` は必須。トークンは、.dev.vars のテスト用チャネル ID /
+シークレット（`LINE_CHANNEL_ID_TEST` / `LINE_CHANNEL_SECRET_TEST`）から 15 分で切れるステートレストークンを
+スクリプトの中で発行して使う。発行の直後に basicId を照合し、`@426vlcyb` でなければ何も書き込まずに止まる。
 
 ```bash
-export LINE_CHANNEL_ACCESS_TOKEN_TEST=<テストチャネルのアクセストークン>
-pnpm setup-rich-menu
-# 出力の「🎯 対象チャネル: test(@426vlcyb)」を必ず目視確認する。
-# prod(@307tzhkw) と出たら *_TEST が未設定 → 中断してトークンを設定し直す。
+pnpm setup-rich-menu -- --channel test --list --stateless   # 照合結果・今の既定 ID・一覧（読み取りのみ）
+pnpm setup-rich-menu -- --channel test --stateless          # 3 枠メニューを作って既定にする（画像も自動で上げる）
 ```
 
-その後 LINE Official Account Manager（テスト OA 側）でリッチメニュー画像
-（2500x1686px・6 分割）をアップロードする。
+画像は `assets/rich-menu/richmenu-temp-3slot-amazon.png`（2500x843）が既定で使われる（`RICH_MENU_IMAGE_PATH` で上書き可）。
+OA Manager での手作業のアップロードは要らない。詳しくは「リッチメニューの差し替えと戻し方」節。
 
 ### 5. スタッフがテスト OA を友だち追加して確認
 
@@ -87,6 +86,43 @@ CXエージェントとの会話を実機確認する。この段階では配信
 
 > ⚠ 取り違え注意（最重要）: 手順 1・3・4 は **すべてテストチャネル（@426vlcyb）**。
 > 本番 OA（@307tzhkw / 友だち約 48 人）のトークン・Webhook・リッチメニューには一切触れない。
+
+## リッチメニューの差し替えと戻し方（2026-09-26〜 仮メニュー 3 枠・Amazon）
+
+メニューの形の正本は `scripts/lib/rich-menu-definition.ts`（① お茶の淹れ方 / ② 好み診断 / ③ Amazon ストア・2500x843・1 段 3 列）。
+①② は今の話しかけの言葉（message）。③ は uri で、チャネルごとの Worker の `/go/store?openExternalBrowser=1` を開く
+（本番 OA → `https://elxea-agent.setaka-on.workers.dev`、テスト OA → `https://elxea-agent-staging.setaka-on.workers.dev`）。
+
+- `openExternalBrowser=1` は、LINE の中のブラウザではなく外のブラウザで開くための LINE 公式のクエリ。LINE の中のブラウザだと
+  Amazon にログインしていない状態になりうるため付ける。根拠: LINE Developers「Opening a URL in an external browser」
+  <https://developers.line.biz/en/docs/line-login/using-line-url-scheme/#opening-url-in-external-browser>
+  （「openExternalBrowser=1 — Opens target URL, in an external browser」「These query parameters work for all URLs accessed
+  from the LINE app, except for on LIFF apps.」）
+- `/go/store` は Worker 側の転送口（購入先へ 302・押された回数を記録）。**Worker のデプロイが先**。未デプロイのまま③を押すと開けない。
+
+| やりたいこと | コマンド | LINE への書き込み |
+|---|---|---|
+| どの OA か・今の既定 ID・一覧を見る | `pnpm setup-rich-menu -- --channel prod --list --stateless` | なし |
+| 3 枠を既定にする | `pnpm setup-rich-menu -- --channel prod --stateless` | 作成 → 画像 → 既定化 → 同名の旧メニュー削除 |
+| 元（旧 6 枠）に戻す | `pnpm setup-rich-menu -- --channel prod --set-default <控えた旧ID> --stateless` | 既定化 1 回（読み返して確認） |
+
+- `--stateless`: `.dev.vars`（実行したディレクトリのもの。`DEV_VARS_PATH` で変えられる）の `LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`
+  （test は `*_TEST`）から 15 分で切れるステートレストークンを発行し、メモリ上だけで使う。本数の上限が無く、本番 Worker が
+  使っている 30 日トークン（毎日の自動更新 `com.elxea.line-token-rotation`）を失効させない。値は表示しない。
+  長期トークンの再発行・短期トークンの追加発行・`line-token-rotation.sh --force` は使わない。
+  根拠: <https://developers.line.biz/en/docs/basics/channel-access-token/>
+- basicId の照合: どのモードでも、トークンを得た直後に `GET /v2/bot/info` の basicId を期待値（prod `@307tzhkw` / test `@426vlcyb`）と
+  照らし合わせる。違えば作成・画像・既定化・削除のどれも呼ばずに止まる。
+- 画像: 既定は `assets/rich-menu/richmenu-temp-3slot-amazon.png`。PNG・2500x843・1,000,000 バイト以下でなければ、何も作らずに止まる
+  （LINE 公式「Max file size: 1 MB」を単位の取り違えが無いようバイトで固定。`tests/unit/rich-menu-definition.test.ts` でも固定）。
+- 旧 6 枠（`elxea メインメニュー（6 枠 Option A）`）は名前が違うので、差し替えても消えずに残る。差し替えの前に `--list` で
+  今の既定 ID を控え、戻すときはその ID を `--set-default` に渡す（2026-08-10 の記録では
+  `richmenu-4383dd8074a470e13a19bf2463ef8ee3`。必ず `--list` の実測を使う）。差し替えの実行時にも、画面に
+  「元に戻すとき」のコマンドが今の既定 ID つきで出る。
+- お客さんの画面への反映は、トークを開き直したとき（最大 1 分）。
+- 本番の順番: Worker のデプロイ（`/go/store` と閉店中の文）→ `--list` で旧 ID を控える → 差し替え → `--list` で既定が新 ID か確認。
+  本番デプロイと本番メニューの差し替えは Setaka の実施 GO が要る（Tier 2）。
+- 開店時（`src/lib/storefront.ts` の `EC_SITE_OPEN = true`）は、メニュー画像（③ の文字）の作り直しと再登録も要る。
 
 ## Staging Deploy
 
@@ -837,7 +873,7 @@ Cloudflareのsecretは**本番の値を読み出せない**（`wrangler secret l
 | 止めたいもの | 手順 | 効果 | デプロイ |
 |---|---|---|---|
 | **アンケートそのもの**（推奨・最速） | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`<br>（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | 合言葉もボタンも無反応。器にも1行も書かない。**masterと同じ挙動に戻る** | **不要**（次のリクエストから即時） |
-| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。`scripts/setup-rich-menu.ts` の当該枠の定義を元の6枠に戻し、`RICH_MENU_IMAGE_PATH=assets/rich-menu/richmenu-optionA-6slot-xs12-final.png pnpm setup-rich-menu -- --channel prod` を実行 | 元の6枠に戻る。スクリプトは「新作成 → 画像 → 既定化 → 旧削除」の順なので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
+| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。2026-09-26〜 スクリプトは仮メニュー 3 枠を作るため、旧 6 枠へは `pnpm setup-rich-menu -- --channel prod --set-default <旧6枠のID> --stateless` で既定を向け直す（旧 6 枠は名前が違うので残っている。ID は `--list` で確かめる。「リッチメニューの差し替えと戻し方」節） | 元の6枠に戻る。既定を向け直すだけなので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
 
 - **削除と `"false"` 投入は等価**（ON判定は `"true"` の完全一致のみ）。
   ただし**削除の方が外から検証できる**（`wrangler secret list` の名前一覧から消えるため）。
