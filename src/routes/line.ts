@@ -32,7 +32,6 @@ import { handleAccountLinkEvent } from "../lib/account-link";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { handleMyKarteFlow } from "../lib/my-karte";
 import { handleJournalFlow } from "../lib/journal";
-import { EC_SITE_OPEN } from "../lib/storefront";
 import { handleRojiSurvey } from "../lib/roji-survey-handler";
 import {
   buildResponseQuickReplies,
@@ -45,6 +44,7 @@ import {
   ONBOARDING_EXPLORE_INTRO,
   ONBOARDING_ABOUT_BODY,
   buildProductWelcome,
+  tastingNoteCtaText,
 } from "../lib/brand-copy";
 import {
   ONBOARDING_EXPLORE_TEXT,
@@ -80,9 +80,10 @@ const TASTING_NOTE_TURN_THRESHOLD = 5;
 /** テイスティングノート CTA 表示済みユーザー（インメモリ — セッション単位） */
 const tastingNoteCTAShown = new Set<string>();
 
-/** テイスティングノート CTA テキスト */
-const TASTING_NOTE_CTA_TEXT =
-  "\n\n\u273F 体験を記録する \u2192 https://elxea.com/ja/tasting-note";
+/*
+ * テイスティングノート CTA の文は brand-copy.ts の tastingNoteCtaText()（C-15 の正本）が持つ。
+ * 閉店中は null を返すので、ここでは付けず表示済みにも数えない。
+ */
 
 /**
  * オンボーディング Quick Reply のトリガーテキスト（従来 3 択）は
@@ -1165,14 +1166,15 @@ async function handleTextMessage(
 
   // テイスティングノート CTA: 5ターン以上 & 未表示の場合、応答末尾に追加
   // C-15: 行き先 (elxea.com/ja/tasting-note) は公式 EC の上にあるので、閉店中は付けない (表示済みにも数えない)。
-  //   文の選び方は持たず、開店フラグだけを見る最小の分岐 (設計 rev2 第3章 C-15)。
+  //   文と開店の判断は brand-copy.ts の tastingNoteCtaText() に一本化 (null = 付けない)。
   let responseText = result.response;
+  const tastingNoteCta = tastingNoteCtaText();
   if (
-    EC_SITE_OPEN &&
+    tastingNoteCta !== null &&
     !tastingNoteCTAShown.has(lineUserId) &&
     assistantTurnCount >= TASTING_NOTE_TURN_THRESHOLD
   ) {
-    responseText += TASTING_NOTE_CTA_TEXT;
+    responseText += tastingNoteCta;
     tastingNoteCTAShown.add(lineUserId);
   }
 

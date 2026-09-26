@@ -285,7 +285,8 @@ export const READING_PREPARING_BODY =
 
 /**
  * C-15: AI 会話の 5 往復目に返事の末尾へ足す「体験を記録する」の一言（開店時の文）。
- * master の routes/line.ts TASTING_NOTE_CTA_TEXT と同じ文字列（1 文字も変えない）。
+ * master（788baac）の routes/line.ts TASTING_NOTE_CTA_TEXT と同じ文字列（1 文字も変えない）。
+ * この一言の置き場はここだけ（routes/line.ts の定数は D2c で消し、tastingNoteCtaText() を呼ぶ形にした）。
  */
 export const TASTING_NOTE_CTA_TEXT_OPEN =
   "\n\n✿ 体験を記録する → https://elxea.com/ja/tasting-note";
@@ -293,7 +294,7 @@ export const TASTING_NOTE_CTA_TEXT_OPEN =
 /**
  * C-15: 体験を記録する一言を、いま付けるならその文を、付けないなら null を返す。
  * 閉店中は記録ページが閉じているので付けない（文言 v2: 公式サイトの開店まで付けない・文言なし）。
- * routes/line.ts（D2b の範囲）は、これが null のときは末尾に足さず、表示済みの記録もしない。
+ * routes/line.ts の handleTextMessage は、これが null のときは末尾に足さず、表示済みの記録もしない。
  */
 export function tastingNoteCtaText(siteOpen: boolean = EC_SITE_OPEN): string | null {
   return byStore<string | null>(TASTING_NOTE_CTA_TEXT_OPEN, null, siteOpen);

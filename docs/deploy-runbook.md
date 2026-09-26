@@ -64,7 +64,8 @@ https://elxea-agent-staging.setaka-on.workers.dev/webhook/line
 
 テスト OA（@426vlcyb）に載せる。`--channel test` は必須。トークンは、.dev.vars のテスト用チャネル ID /
 シークレット（`LINE_CHANNEL_ID_TEST` / `LINE_CHANNEL_SECRET_TEST`）から 15 分で切れるステートレストークンを
-スクリプトの中で発行して使う。発行の直後に basicId を照合し、`@426vlcyb` でなければ何も書き込まずに止まる。
+スクリプトの中で発行して使う。発行の直後にbasicIdを照合し、`@426vlcyb` でなければ何も書き込まずに止まる。
+`LINE_CHANNEL_ID_TEST` はLINE Developers Consoleの当該チャネル（テストOA）の「基本設定」にあるチャネルIDを `.dev.vars` に転記する（秘密情報ではない）。
 
 ```bash
 pnpm setup-rich-menu -- --channel test --list --stateless   # 照合結果・今の既定 ID・一覧（読み取りのみ）
@@ -121,7 +122,9 @@ CXエージェントとの会話を実機確認する。この段階では配信
   「元に戻すとき」のコマンドが今の既定 ID つきで出る。
 - お客さんの画面への反映は、トークを開き直したとき（最大 1 分）。
 - 本番の順番: Worker のデプロイ（`/go/store` と閉店中の文）→ `--list` で旧 ID を控える → 差し替え → `--list` で既定が新 ID か確認。
-  本番デプロイと本番メニューの差し替えは Setaka の実施 GO が要る（Tier 2）。
+  本番デプロイと本番メニューの差し替えはSetakaの実施GOが要る（Tier 2）。
+- コードも戻すときは、先にメニューを旧IDに戻し（`--set-default <旧ID> --stateless`）、そのあとコードをgit revertして再デプロイする
+  （逆順だと、③ の /go/store が無い状態が生じる）。
 - 開店時（`src/lib/storefront.ts` の `EC_SITE_OPEN = true`）は、メニュー画像（③ の文字）の作り直しと再登録も要る。
 
 ## Staging Deploy

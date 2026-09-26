@@ -4,7 +4,8 @@
  * 設計: 実装設計 rev2 第3・4・6・9章 https://app.notion.com/p/3e770c9d064c81cd8100df0e5775513d
  * 文言の正本: 文言 v2（elxea-ccs）https://app.notion.com/p/3e770c9d064c818eb5eee425b35dba90
  *   - 閉店中の文は文言 v2 の「新しい文」との完全一致（`${SUPPORT_EMAIL}` は brand-copy.ts の SUPPORT_EMAIL、
- *     `${PURCHASE_URL}` は storefront.ts の PURCHASE_URL を差し込む）
+ *     `${AMAZON_STORE_URL}` は storefront.ts の AMAZON_STORE_URL を差し込む。閉店中の期待値は開店フラグに
+ *     依存させない: PURCHASE_URL は開店時に公式 EC へ戻るので、閉店中の文の期待値には使わない）
  *   - 開店時の文は master（788baac）の今の文との完全一致（siteOpen=true を渡して固定する）
  *   文言が変わったらテストを文言に合わせる（文言が正）。
  *
@@ -19,7 +20,7 @@ import { installHermeticFetch, type Hermetic } from "../lib/hermetic";
 import { synthLineUserId } from "../lib/synthetic";
 import type { Env } from "../../src/index";
 import type { LineResponder, QuickReplyItem } from "../../src/lib/line";
-import { collectLinks, isClosedSiteLink, PURCHASE_URL, AMAZON_STORE_URL } from "../../src/lib/storefront";
+import { collectLinks, isClosedSiteLink, AMAZON_STORE_URL, EC_SITE_OPEN } from "../../src/lib/storefront";
 import {
   ABOUT_BLURB,
   WELCOME_DELIVERY_FREQUENCY,
@@ -131,7 +132,7 @@ const V2_C11 = "elxea の定期便は、いまお届けをはじめる準備を�
 const V2_C12 = `${ABOUT_BLURB}\n\n${ABOUT_TAIL}`;
 const V2_C13 = "アカウントの連携は、いま準備を進めているところです。\n\nお茶のことでしたら、このままメッセージでお尋ねくださいね。";
 const V2_C14 = "アカウントの連携が完了しました。これからは、あなたの好みに合わせたご案内を、このトークでお届けしますね。";
-const V2_C17 = `購入先（公式サイトの開店まで）: Amazon の elxea ストア ${PURCHASE_URL}`;
+const V2_C17 = `購入先（公式サイトの開店まで）: Amazon の elxea ストア ${AMAZON_STORE_URL}`;
 const V2_C21 = "ご注文内容の照会に必要なアカウントの連携は、いま準備を進めているところです。Amazon でのご注文は、Amazon の注文履歴からご確認いただけます。";
 const V2_C22 = "読みものは、いま準備を進めているところです。\n\nお茶のことでしたら、このままメッセージでお尋ねくださいね。";
 
@@ -193,25 +194,40 @@ describe("D2a 文の対: 開店時 = master の文 / 閉店中 = 文言 v2（完
 });
 
 describe("C-16 季節の配信テンプレート 15 件（末尾の URL を 1 つの関数で切り替える）", () => {
-  it("15 件すべて: 閉店中（いま）は閉じたリンクなし・末尾に空白や改行が残らない", () => {
+  // テンプレートの text は読み込み時の開店フラグで組み立て済み（開店時は末尾に URL が付く）。
+  // 比べるのは開店フラグと関係なく取り出した「元の本文」にする（EC_SITE_OPEN を true にしても落ちないように）。
+  const SITE_LINK_SUFFIX = "\n\nhttps://elxea.com/ja";
+  const bodyOf = (text: string): string =>
+    text.endsWith(SITE_LINK_SUFFIX) ? text.slice(0, -SITE_LINK_SUFFIX.length) : text;
+
+  it("15 件すべて: いまの開店フラグで 1 つの関数から組み立てられている", () => {
     expect(BROADCAST_TEMPLATES.length).toBe(15);
     for (const t of BROADCAST_TEMPLATES) {
-      expect(closedLinks(t.text), t.id).toEqual([]);
-      expect(t.text, t.id).toBe(t.text.trimEnd());
-      expect(withBroadcastSiteLink(t.text, false), t.id).toBe(t.text);
+      expect(t.text, t.id).toBe(withBroadcastSiteLink(bodyOf(t.text), EC_SITE_OPEN));
+    }
+  });
+  it("15 件すべて: 閉店中は閉じたリンクなし・末尾に空白や改行が残らない", () => {
+    for (const t of BROADCAST_TEMPLATES) {
+      const body = bodyOf(t.text);
+      const closed = withBroadcastSiteLink(body, false);
+      expect(closed, t.id).toBe(body);
+      expect(closedLinks(closed), t.id).toEqual([]);
+      expect(closed, t.id).toBe(closed.trimEnd());
     }
   });
   it("開店時は master の本文と同じ（本文 + 空行 + https://elxea.com/ja）", () => {
     const spring = BROADCAST_TEMPLATES.find((t) => t.id === "serenity-spring-01");
     const sensoryAll = BROADCAST_TEMPLATES.find((t) => t.id === "sensory-all-01");
-    expect(withBroadcastSiteLink(spring!.text, true)).toBe(
+    expect(withBroadcastSiteLink(bodyOf(spring!.text), true)).toBe(
       "桜の季節ですね。\n\n温かいお茶を片手に、窓の外をぼんやり眺める時間も悪くないですよ。\n\nhttps://elxea.com/ja",
     );
-    expect(withBroadcastSiteLink(sensoryAll!.text, true)).toBe(
+    expect(withBroadcastSiteLink(bodyOf(sensoryAll!.text), true)).toBe(
       "お茶の味わいは「甘み・渋み・苦み・旨味」のバランスで決まります。\n\n今の気分にぴったりの一杯、見つけてみませんか。\n\nhttps://elxea.com/ja",
     );
     for (const t of BROADCAST_TEMPLATES) {
-      expect(withBroadcastSiteLink(t.text, true).endsWith("\n\nhttps://elxea.com/ja"), t.id).toBe(true);
+      const opened = withBroadcastSiteLink(bodyOf(t.text), true);
+      expect(opened.endsWith(SITE_LINK_SUFFIX), t.id).toBe(true);
+      expect(opened.indexOf("https://elxea.com/ja"), t.id).toBe(opened.length - "https://elxea.com/ja".length);
     }
   });
 });
