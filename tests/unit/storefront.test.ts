@@ -142,6 +142,12 @@ it("isClosedSiteLink: 閉店中は elxea.com / *.elxea.com / *.myshopify.com / �
     "https://elxea.com./ja",
     "https://user@elxea.com/ja",
     "http://[::1",
+    // QA M1: スキーム無し + ポート付き (コロンの直後が数字 = ポート)
+    "elxea.com:443/ja",
+    "www.elxea.com:8080",
+    "elxea.com:443",
+    // QA m4: mailto / tel / line 以外のスキームはホストで判定する
+    "intent://elxea.com/ja#Intent;scheme=https;end",
   ]) {
     assert(isClosedSiteLink(l, false), `当たるべき: ${l}`);
   }
@@ -156,6 +162,10 @@ it("isClosedSiteLink: メールアドレス・mailto・Amazon・workers.dev・li
     "https://elxea-cx-agent.example.workers.dev/go/store",
     "https://liff.line.me/1234567890-abcdefgh",
     "tel:0120000000",
+    "MAILTO:info@elxea.com",
+    "line://ti/p/@elxea",
+    "sms:+81312345678",
+    "intent://www.amazon.co.jp/x#Intent;end",
     "https://elxea.com.example.org/",
     "https://notelxea.com/",
     "",
@@ -192,6 +202,52 @@ it("stripClosedLinks: 括弧の中の URL を消すと空の括弧も消す / �
   const r = stripClosedLinks(plain, false);
   assertEqual(r.removed, 0, "消した数 0");
   assertEqual(r.text, plain, "元の文のまま（末尾の改行も）");
+});
+
+it("stripClosedLinks: スキーム無し + ポート付き・直前が英数字のスキームつき・大文字のスキームも消す (QA M1・m1・m2)", () => {
+  assertEqual(
+    JSON.stringify(stripClosedLinks("ポート無しスキーム elxea.com:443/ja です", false)),
+    JSON.stringify({ text: "ポート無しスキーム  です", removed: 1 }),
+    "elxea.com:443/ja",
+  );
+  assertEqual(
+    JSON.stringify(stripClosedLinks("www.elxea.com:8080 と elxea.com:443", false)),
+    JSON.stringify({ text: " と", removed: 2 }),
+    "www.elxea.com:8080 / elxea.com:443",
+  );
+  assertEqual(
+    JSON.stringify(stripClosedLinks("LINEhttps://elxea.com/ja", false)),
+    JSON.stringify({ text: "LINE", removed: 1 }),
+    "直前が英数字のスキームつき",
+  );
+  assertEqual(
+    JSON.stringify(stripClosedLinks("URL: HTTPS://ELXEA.COM/JA です", false)),
+    JSON.stringify({ text: "URL:  です", removed: 1 }),
+    "大文字のスキームごと消す",
+  );
+});
+
+it("stripClosedLinks: 消した数 0 なら入力とまったく同じ文字列を返す (元の括弧・空白・空行を変えない。QA m3)", () => {
+  const src = `元の（ ）と ( ) はそのまま。  \n\n\n\n行末の空白 \t\ninfo@elxea.com\n${AMAZON_STORE_URL}\n`;
+  const r = stripClosedLinks(src, false);
+  assertEqual(r.removed, 0, "消した数");
+  assert(r.text === src, "入力と同じ文字列ではない");
+});
+
+it("stripClosedLinks: 後始末は消した箇所の周りだけ (QA m3)", () => {
+  const cases: Array<[string, string]> = [
+    ["元の（ ）はそのまま。  \n\n\n\nくわしくは（https://elxea.com/ja）へ。", "元の（ ）はそのまま。  \n\n\n\nくわしくはへ。"],
+    ["A\nhttps://elxea.com/ja\nB", "A\nB"],
+    ["A\n\nhttps://elxea.com/ja\n\nB", "A\n\nB"],
+    ["よろしければ。\nhttps://elxea.com/ja", "よろしければ。"],
+    ["see https://elxea.com/ja \nnext  \n", "see\nnext  \n"],
+    ["( ) と https://elxea.com/ja", "( ) と"],
+  ];
+  for (const [inp, exp] of cases) {
+    const r = stripClosedLinks(inp, false);
+    assertEqual(r.text, exp, JSON.stringify(inp));
+    assertEqual(r.removed, 1, `消した数: ${JSON.stringify(inp)}`);
+  }
 });
 
 it("stripClosedLinks: 開店中は何も変えない", () => {

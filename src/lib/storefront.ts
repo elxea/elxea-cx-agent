@@ -52,17 +52,31 @@ const CLOSED_HOST_SUFFIXES = [".elxea.com", ".myshopify.com"] as const;
 
 /** 文字列全体がメールアドレスか (`info@elxea.com` は閉じたリンクではない)。 */
 const EMAIL_ONLY_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
-/** スキームつきか (`https:` `mailto:` `tel:` `line:` など)。 */
-const HAS_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+/** サイトへのリンクではないスキーム (明示リスト。大文字小文字を区別しない)。 */
+const NON_SITE_SCHEME_RE = /^(?:mailto|tel|line):/i;
+/**
+ * スキームつきか。コロンの直後が数字ならスキームではなくポートとみなす
+ * (`elxea.com:443/ja` / `www.elxea.com:8080` はスキーム無し + ポート)。
+ */
+const HAS_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)/;
+
+/** 閉じたサイトのホストか (末尾のドットは無視)。 */
+function isClosedHost(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/\.$/, "");
+  if ((CLOSED_HOSTS as readonly string[]).includes(host)) return true;
+  return CLOSED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
+}
 
 /**
  * 閉じたサイトへのリンクか。
  *
  * - `siteOpen` が true なら常に false。
  * - 閉店中は、ホストが `elxea.com` / `*.elxea.com` / `*.myshopify.com` なら true。
- *   スキームの無い `elxea.com/ja` も対象。
- * - メールアドレス (`info@elxea.com`) と `mailto:` は対象外。`tel:` など http(s) 以外のスキームも対象外。
- * - http(s) なのに解析できないものは true (出さない側に倒す)。
+ *   スキームの無い `elxea.com/ja` も、ポートつきの `elxea.com:443/ja` も対象。
+ * - メールアドレス (`info@elxea.com`) と、スキームが `mailto:` / `tel:` / `line:` のものは対象外。
+ *   それ以外のスキーム (`https:` / `intent:` など) はホストで判定する。
+ * - http(s) なのに解析できない・ホストが空のものは true (出さない側に倒す)。
+ *   http(s) 以外でホストを持たないもの (`sms:` など) はサイトへのリンクではないので false。
  * - `amazon.co.jp` / `*.workers.dev` / `liff.line.me` は当たらない。
  */
 export function isClosedSiteLink(link: string, siteOpen: boolean = EC_SITE_OPEN): boolean {
@@ -70,22 +84,16 @@ export function isClosedSiteLink(link: string, siteOpen: boolean = EC_SITE_OPEN)
   const s = link.trim();
   if (s === "") return false;
   if (EMAIL_ONLY_RE.test(s)) return false;
-  let candidate: string;
-  if (HAS_SCHEME_RE.test(s)) {
-    if (!/^https?:/i.test(s)) return false; // mailto: / tel: / line: などはサイトへのリンクではない
-    candidate = s;
-  } else {
-    candidate = `https://${s.replace(/^\/\//, "")}`;
-  }
-  let host: string;
+  if (NON_SITE_SCHEME_RE.test(s)) return false;
+  const candidate = HAS_SCHEME_RE.test(s) ? s : `https://${s.replace(/^\/\//, "")}`;
+  let url: URL;
   try {
-    host = new URL(candidate).hostname.toLowerCase().replace(/\.$/, "");
+    url = new URL(candidate);
   } catch {
     return true;
   }
-  if (host === "") return true;
-  if ((CLOSED_HOSTS as readonly string[]).includes(host)) return true;
-  return CLOSED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
+  if (url.hostname === "") return /^https?:$/i.test(url.protocol);
+  return isClosedHost(url.hostname);
 }
 
 /**
@@ -93,7 +101,9 @@ export function isClosedSiteLink(link: string, siteOpen: boolean = EC_SITE_OPEN)
  * 使える文字は ASCII に限る (日本語の本文や全角括弧は URL に含めない)。
  */
 const URL_IN_TEXT_RE =
-  /(?:https?:\/\/[A-Za-z0-9._~:/?#@!$&*+,;=%-]+|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?(?:[/?#][A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?)/g;
+  /(?:https?:\/\/[A-Za-z0-9._~:/?#@!$&*+,;=%-]+|(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?(?:[/?#][A-Za-z0-9._~:/?#@!$&*+,;=%-]*)?)/gi;
+/** スキームつきの一致か (大文字小文字を区別しない)。 */
+const STARTS_WITH_HTTP_SCHEME_RE = /^https?:\/\//i;
 
 /** 文中の URL らしい部分を位置つきで取り出す (メールアドレスのドメイン部は除く)。 */
 function findLinksInText(text: string): Array<{ link: string; start: number; end: number }> {
@@ -101,9 +111,10 @@ function findLinksInText(text: string): Array<{ link: string; start: number; end
   for (const m of text.matchAll(URL_IN_TEXT_RE)) {
     const start = m.index ?? 0;
     const raw = m[0];
-    // 直前が `@` や英数字 = メールアドレスのドメイン部か単語の途中。リンクとして扱わない。
+    // スキーム無しの一致だけ: 直前が `@` や英数字なら、メールアドレスのドメイン部か単語の途中なので飛ばす。
+    // スキームつき (`LINEhttps://…`) は直前の文字に関係なくリンクとして扱う。
     const prev = start > 0 ? text[start - 1] : "";
-    if (prev !== "" && /[A-Za-z0-9@._%+-]/.test(prev)) continue;
+    if (!STARTS_WITH_HTTP_SCHEME_RE.test(raw) && prev !== "" && /[A-Za-z0-9@._%+-]/.test(prev)) continue;
     // 文末の句読点 (ASCII) は URL に含めない。
     const link = raw.replace(/[.,;:!?]+$/, "");
     if (link === "") continue;
@@ -112,9 +123,49 @@ function findLinksInText(text: string): Array<{ link: string; start: number; end
   return found;
 }
 
+/** 行の中の空白 (改行は含まない)。 */
+const INLINE_SPACE_RE = /[ \t　]/;
+/** 消したリンクを直接囲む括弧の対。 */
+const BRACKET_PAIRS: Record<string, string> = { "（": "）", "(": ")" };
+
+/**
+ * 1 本の閉じたリンク [start, end) を消すときに、あわせて消す範囲を決める。
+ * 後始末は **消した箇所の周りだけ** に限る (元からある文の括弧・空白・空行は変えない)。
+ *   1. リンクだけを囲む括弧 (`（URL）` / `(URL)`・内側の空白を含む) は括弧ごと消す
+ *   2. 消した箇所の後ろが行末 (行内の空白だけを挟んでもよい) なら、前後の行内の空白も消す
+ *   3. 消した箇所が文末に来るなら、直前の空白と改行も消す
+ *   4. リンクだけの行 (文の途中) は、その行の改行も消す。前後が空行なら空行を 1 つにまとめる
+ */
+function removalSpan(s: string, start: number, end: number): [number, number] {
+  let a = start;
+  let b = end;
+  let a2 = a;
+  let b2 = b;
+  while (a2 > 0 && INLINE_SPACE_RE.test(s[a2 - 1])) a2--;
+  while (b2 < s.length && INLINE_SPACE_RE.test(s[b2])) b2++;
+  if (a2 > 0 && b2 < s.length && BRACKET_PAIRS[s[a2 - 1]] === s[b2]) {
+    a = a2 - 1;
+    b = b2 + 1;
+  }
+  let b3 = b;
+  while (b3 < s.length && INLINE_SPACE_RE.test(s[b3])) b3++;
+  if (b3 === s.length || s[b3] === "\n") {
+    b = b3;
+    while (a > 0 && INLINE_SPACE_RE.test(s[a - 1])) a--;
+  }
+  if (b === s.length) {
+    while (a > 0 && /\s/.test(s[a - 1])) a--;
+  } else if (s[b] === "\n" && (a === 0 || s[a - 1] === "\n")) {
+    b++;
+    if (a >= 2 && s[a - 1] === "\n" && s[a - 2] === "\n" && s[b] === "\n") b++;
+  }
+  return [a, b];
+}
+
 /**
  * 文中の閉じたリンクを消す。消した数も返す (本文はログに出さない)。
- * 消した数が 0 のときは元の文をそのまま返す (決まった文の経路では 0 のはず)。
+ * 消した数が 0 のときは入力とまったく同じ文字列を返す (決まった文の経路では 0 のはず)。
+ * 消したときの後始末は消した箇所の周りだけ (removalSpan)。
  */
 export function stripClosedLinks(
   text: string,
@@ -123,20 +174,12 @@ export function stripClosedLinks(
   if (siteOpen) return { text, removed: 0 };
   const closed = findLinksInText(text).filter((f) => isClosedSiteLink(f.link, false));
   if (closed.length === 0) return { text, removed: 0 };
-  let out = "";
-  let cursor = 0;
-  for (const f of closed) {
-    out += text.slice(cursor, f.start);
-    cursor = f.end;
+  // 後ろから消す (前の位置がずれないように)。
+  let out = text;
+  for (let k = closed.length - 1; k >= 0; k--) {
+    const [a, b] = removalSpan(out, closed[k].start, closed[k].end);
+    out = out.slice(0, a) + out.slice(b);
   }
-  out += text.slice(cursor);
-  // 消した跡の空の括弧・行末の空白・3 行以上の空行を整える (消したときだけ)。
-  out = out
-    .replace(/（\s*）/g, "")
-    .replace(/\(\s*\)/g, "")
-    .replace(/[ \t　]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd();
   return { text: out, removed: closed.length };
 }
 
