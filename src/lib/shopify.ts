@@ -8,6 +8,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Env } from "../index";
 import { createSupabaseClient } from "./supabase";
+import { byStore, EC_SITE_OPEN } from "./storefront";
 
 const SHOPIFY_API_VERSION = "2025-01";
 
@@ -426,10 +427,27 @@ export type OrderDetailDeps = {
   ) => Promise<string | null>;
 };
 
-/** [SEC-A] 未連携ユーザー向けの注文照会不可メッセージ。 */
-function orderLinkRequiredMessage(channel: "line" | "web"): string {
+/** [SEC-A] LINE で未連携の方が注文を尋ねたときの AI への返し（開店時・master の文）。 */
+export const ORDER_LINK_REQUIRED_LINE_OPEN =
+  "ご注文内容の照会には、LINEアカウントとご購入時のShopifyアカウントの連携が必要です。マイページからアカウント連携をお願いします。連携後、ご自身の注文番号で照会いただけます。";
+
+/**
+ * C-21（文言 v2）: 公式 EC が閉じている間の、LINE で未連携の方が注文を尋ねたときの AI への返し。
+ * 連携は準備中（C-13）・Amazon の注文履歴へ（C-19）にそろえる。AI がこれを言い換えて伝える。
+ */
+export const ORDER_LINK_REQUIRED_LINE_CLOSED =
+  "ご注文内容の照会に必要なアカウントの連携は、いま準備を進めているところです。Amazon でのご注文は、Amazon の注文履歴からご確認いただけます。";
+
+/**
+ * [SEC-A] 未連携ユーザー向けの注文照会不可メッセージ。
+ * LINE 向けだけを開店時 / 閉店中の対で持つ（web 向けはサイトが閉じている間は届かないので対象外・実装設計 rev2 第3章）。
+ */
+export function orderLinkRequiredMessage(
+  channel: "line" | "web",
+  siteOpen: boolean = EC_SITE_OPEN,
+): string {
   if (channel === "line") {
-    return "ご注文内容の照会には、LINEアカウントとご購入時のShopifyアカウントの連携が必要です。マイページからアカウント連携をお願いします。連携後、ご自身の注文番号で照会いただけます。";
+    return byStore(ORDER_LINK_REQUIRED_LINE_OPEN, ORDER_LINK_REQUIRED_LINE_CLOSED, siteOpen);
   }
   return "ご注文内容の照会には、ご購入時のアカウントでのログイン（連携）が必要です。ログインのうえ、再度お試しください。";
 }

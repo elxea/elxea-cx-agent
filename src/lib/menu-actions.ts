@@ -17,11 +17,13 @@
 
 import type { Env } from "../index";
 import { type QuickReplyItem, type LineResponder } from "./line";
-import { ABOUT_BLURB, WELCOME_DELIVERY_FREQUENCY } from "./brand-copy";
+import { ABOUT_BLURB, SUPPORT_EMAIL, WELCOME_DELIVERY_FREQUENCY } from "./brand-copy";
+import { byStore, EC_SITE_OPEN } from "./storefront";
 import {
   resolveLinkedSubscriber,
   emitLinkageButton,
   isMarcheSourceUser,
+  type LinkageSiteDeps,
 } from "./subscriber-linkage";
 import { isSalesSurfaceEnabled } from "./sales-surface";
 
@@ -100,21 +102,58 @@ export function consultEntryValue(
   return null;
 }
 
-/** ⑤ elxea についての紹介（3-4 文・和の静けさ）＋ 配信設定の受け皿を末尾に一言。 */
-export function buildAboutMessage(): string {
+/**
+ * ⑤ elxea についての紹介（3-4 文・和の静けさ）＋ 配信設定の受け皿を末尾に一言。
+ *
+ * C-12（文言 v2）: 公式サイトが閉じている間は「くわしくはこちら」の 1 行ぶんを組み立てない
+ * （ブランド紹介の行き先は Amazon ストアではないため、案内だけ外す。前後の文はそのまま）。
+ * @param siteOpen 公式 EC が開店しているか（既定 EC_SITE_OPEN。テストは両方を渡して固定する）
+ */
+export function buildAboutMessage(siteOpen: boolean = EC_SITE_OPEN): string {
   return (
     `${ABOUT_BLURB}\n\n` +
-    `くわしくはこちらをご覧ください。\n${SITE_URL}\n\n` +
+    byStore(`くわしくはこちらをご覧ください。\n${SITE_URL}\n\n`, "", siteOpen) +
     "このトークは、elxea のサポートを担当する AI がお答えしています。お茶えらびのご相談など、気軽に話しかけてくださいね。\n\n" +
     WELCOME_DELIVERY_FREQUENCY
   );
 }
 
 /**
+ * C-9（文言 v2）: 定期便を利用中の方への閉店中の返事。定期便ページが閉じているので、
+ * 開いている窓口（問い合わせメール）へ向ける。
+ */
+export const SUBSCRIPTION_SUBSCRIBER_REPLY_CLOSED =
+  "いつも elxea の定期便をご利用いただき、ありがとうございます。\n\n" +
+  `お届け内容やお届け日のご確認・ご変更は、お手数ですが ${SUPPORT_EMAIL} までご連絡ください。\n\n` +
+  "ご不明な点があれば、このままメッセージでお気軽にお尋ねください。";
+
+/**
+ * C-10（文言 v2）: 定期便の紹介（売り込み面 ON の未利用の方）の閉店中の返事。
+ * 申し込めないものの魅力を語らず、開始時期の約束もしない。Amazon は定期便の代わりにならないので案内しない。
+ */
+export const SUBSCRIPTION_GENERIC_REPLY_CLOSED =
+  "elxea の定期便は、いまお届けをはじめる準備を進めています。\n\n" +
+  "気になることがあれば、このままメッセージでお尋ねくださいね。";
+
+/**
+ * C-11（文言 v2）: 定期便の既定の返事（売り込み面 OFF）の閉店中の文。C-10 と 1 文目をそろえている。
+ */
+export const SUBSCRIPTION_INQUIRY_REPLY_CLOSED =
+  "elxea の定期便は、いまお届けをはじめる準備を進めています。\n\n" +
+  "お茶のことでしたら、このままメッセージでお尋ねくださいね。";
+
+/**
  * ④ 定期便メッセージ。
  * @param kind "subscriber" = 連携済み & 定期便あり / "generic" = それ以外（未連携含む）
+ * @param siteOpen 公式 EC が開店しているか（既定 EC_SITE_OPEN）。閉店中は C-9 / C-10 を返す。
  */
-export function buildSubscriptionMessage(kind: "subscriber" | "generic"): string {
+export function buildSubscriptionMessage(
+  kind: "subscriber" | "generic",
+  siteOpen: boolean = EC_SITE_OPEN,
+): string {
+  if (!siteOpen) {
+    return kind === "subscriber" ? SUBSCRIPTION_SUBSCRIBER_REPLY_CLOSED : SUBSCRIPTION_GENERIC_REPLY_CLOSED;
+  }
   if (kind === "subscriber") {
     // TODO（Shopify 開店後）: Firestore/Shopify から現在のプラン名・次回お届け日・
     //   お届け間隔を取得し、この 1 通に差し込んで詳細化する。現段階は導線のみ。
@@ -162,13 +201,23 @@ export function decideSubscriptionResponse(opts: {
   salesEnabled: boolean;
   linked: boolean;
   isSubscriber: boolean;
+  /** 公式 EC が開店しているか（既定 EC_SITE_OPEN）。 */
+  siteOpen?: boolean;
 }): SubscriptionResponseKind {
   if (opts.isSubscriber) return "subscriber";
   if (!opts.salesEnabled) return "inquiry";
+  // 閉店中は連携ボタンのファネル（generic_with_linkage）に進ませない（実装設計 rev2 第4章）。
+  //   連携先の購入アカウントが開店前には無いため、未連携でも紹介 1 通（C-10）で着地させる。
+  if (!(opts.siteOpen ?? EC_SITE_OPEN)) return "generic";
   return opts.linked ? "generic" : "generic_with_linkage";
 }
 
-export function buildSubscriptionInquiryReply(): string {
+/**
+ * ④ 定期便（売り込み面 OFF・既定）の中立応答。
+ * @param siteOpen 公式 EC が開店しているか（既定 EC_SITE_OPEN）。閉店中は C-11 を返す。
+ */
+export function buildSubscriptionInquiryReply(siteOpen: boolean = EC_SITE_OPEN): string {
+  if (!siteOpen) return SUBSCRIPTION_INQUIRY_REPLY_CLOSED;
   return (
     "定期便の内容とお申し込みは、elxea のサイトでご覧いただけます。\n" +
     `${SUBSCRIPTION_URL}\n\n` +
@@ -191,8 +240,11 @@ export async function handleMenuActionFlow(
   userMessage: string,
   env: Env,
   responder: LineResponder,
+  deps?: LinkageSiteDeps,
 ): Promise<boolean> {
   const t = userMessage.trim();
+  // 公式 EC の開店状態（既定 EC_SITE_OPEN）。テストは deps で開店時 / 閉店中の両方を固定する。
+  const siteOpen = deps?.siteOpen ?? EC_SITE_OPEN;
 
   // ③ 相談 — 初手 quick reply（以降は AI 会話）
   if (t === CONSULTATION_TRIGGER) {
@@ -203,7 +255,7 @@ export async function handleMenuActionFlow(
 
   // elxea について（発話専用・メニュー枠なし）— ブランド紹介 1 通
   if (t === ABOUT_TRIGGER) {
-    await responder.text(buildAboutMessage());
+    await responder.text(buildAboutMessage(siteOpen));
     return true;
   }
 
@@ -212,22 +264,25 @@ export async function handleMenuActionFlow(
   //   - 連携済み非定期便       → generic 紹介（従来どおり・すでに連携済みなので連携ボタンは出さない）
   //   - 未連携                → generic 紹介 + 便益 1 行 + 連携ボタン（LIFF 設定時）/ generic のみ（未設定・fail-safe）
   if (t === SUBSCRIPTION_TRIGGER) {
-    const resolution = await resolveLinkedSubscriber(lineUserId, env);
+    const resolution = await (deps?.resolveLinkage ?? resolveLinkedSubscriber)(lineUserId, env);
+    // 閉店中は generic_with_linkage（連携ボタンのファネル）にならない（decideSubscriptionResponse）。
     const kind = decideSubscriptionResponse({
       salesEnabled: isSalesSurfaceEnabled(env),
       linked: resolution.linked,
       isSubscriber: resolution.isSubscriber,
+      siteOpen,
     });
     if (kind === "subscriber") {
       // 利用中の方への手続き案内は「購入後のサポート」であり売り込みではないため、フラグに関わらず維持する。
-      await responder.text(buildSubscriptionMessage("subscriber"));
+      await responder.text(buildSubscriptionMessage("subscriber", siteOpen));
     } else if (kind === "inquiry") {
       // 売り込み面 OFF（既定）: 未利用の方への定期便の常設案内（便益 + 連携ボタンのファネル）を出さない。
       //   受け皿は EC サイト側に寄せ、ここでは中立な案内先 1 通で着地させる。
-      await responder.text(buildSubscriptionInquiryReply());
+      await responder.text(buildSubscriptionInquiryReply(siteOpen));
     } else if (kind === "generic") {
       // 連携済み非定期便: 従来どおり generic 紹介のみ（連携済みなので連携導線は不要）。
-      await responder.text(buildSubscriptionMessage("generic"));
+      //   閉店中は未連携もここに来る（C-10 の 1 通・連携ボタンなし）。
+      await responder.text(buildSubscriptionMessage("generic", siteOpen));
     } else {
       // 未連携: 従来の generic 紹介（テキスト・URL は LINE が自動リンク）を送り、
       //   LIFF 設定時のみ続けて便益 + 連携ボタン（Flex）を出す（surface=menu4・invite_shown 記録）。
@@ -235,7 +290,7 @@ export async function handleMenuActionFlow(
       //   generic 紹介の送信失敗が「連携ボタン提示（ファネルの本命）」を巻き込まないよう best-effort で保護する
       //   （invite_shown は emitLinkageButton が送信前に記録するため、ボタン提示は send 成否に依存しない）。
       try {
-        await responder.text(buildSubscriptionMessage("generic"));
+        await responder.text(buildSubscriptionMessage("generic", siteOpen));
       } catch (err) {
         console.warn(
           "[menu] ④ generic intro send failed (continuing to linkage button):",
@@ -244,7 +299,7 @@ export async function handleMenuActionFlow(
       }
       // マルシェ流入のお客さまには連携ボタンを出さない（空振り連携の抑止・CX S1/S2）。
       //   マルシェ客は generic 紹介のみで着地（連携の袋小路に誘導しない）。設計要件をコードのゲートに格上げ。
-      if (!(await isMarcheSourceUser(lineUserId, env))) {
+      if (!(await (deps?.isMarcheSource ?? isMarcheSourceUser)(lineUserId, env))) {
         await emitLinkageButton(lineUserId, env, responder, "menu4");
       }
     }

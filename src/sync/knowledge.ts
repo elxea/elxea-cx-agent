@@ -25,6 +25,7 @@ import {
   SUPPORT_EMAIL,
 } from "../lib/brand-copy";
 import { guardBrandFacts } from "../lib/brand-guard";
+import { byStore, EC_SITE_OPEN, purchaseUrlFor } from "../lib/storefront";
 
 // -------------------------------------------------------------------
 // Types
@@ -450,6 +451,29 @@ const ABOUT_ELXEA_PAGE_ID = "154f0d9d-e112-457c-83c6-2fb5b56b1788";
 const BRAND_SOURCE_TYPE = "brand";
 
 /**
+ * brand-copy.ts 正本から「公開してよい会社事実」だけを組み立てる（純粋・テスト可能）。
+ *
+ * C-17（文言 v2）: 公式 EC が閉じている間は「公式サイト」の行を入れず、購入先（Amazon の elxea ストア）の行に
+ * 置き換える（サイトの住所の文字を知識に入れない。AI が写しうるため）。開店時は master の行のまま。
+ * @param siteOpen 公式 EC が開店しているか（既定 EC_SITE_OPEN。テストは両方を渡して固定する）
+ */
+export function buildBrandCanonicalFacts(siteOpen: boolean = EC_SITE_OPEN): string {
+  return [
+    `ブランド名: ${BRAND_NAME}（${BRAND_NAME_READING}）`,
+    `運営会社: ${COMPANY_NAME}`,
+    `ブランドステートメント: ${BRAND_STATEMENT_SHORT}`,
+    `タグライン: ${BRAND_TAGLINE}`,
+    `取扱カテゴリ: ${TEA_CATEGORIES}`,
+    byStore(
+      `公式サイト: ${SITE_URL_JA}`,
+      `購入先（公式サイトの開店まで）: Amazon の elxea ストア ${purchaseUrlFor(siteOpen)}`,
+      siteOpen,
+    ),
+    `お問い合わせ: ${SUPPORT_EMAIL}`,
+  ].join("\n");
+}
+
+/**
  * ブランド正本（About elxea + 公開してよい会社事実）を knowledge_chunks に同期する。
  *
  * 公開情報のみ（社名・ブランドステートメント・タグライン・取扱カテゴリ・サイト・問い合わせ）を、
@@ -463,15 +487,7 @@ async function syncBrandKnowledge(
   result: SyncResult,
 ): Promise<void> {
   // (1) brand-copy.ts 正本から「公開してよい会社事実」だけを構築する。
-  const canonicalFacts = [
-    `ブランド名: ${BRAND_NAME}（${BRAND_NAME_READING}）`,
-    `運営会社: ${COMPANY_NAME}`,
-    `ブランドステートメント: ${BRAND_STATEMENT_SHORT}`,
-    `タグライン: ${BRAND_TAGLINE}`,
-    `取扱カテゴリ: ${TEA_CATEGORIES}`,
-    `公式サイト: ${SITE_URL_JA}`,
-    `お問い合わせ: ${SUPPORT_EMAIL}`,
-  ].join("\n");
+  const canonicalFacts = buildBrandCanonicalFacts();
 
   // (2) About elxea ページ本文（公開マーケ本文）。取得失敗は正本ファクトのみで続行。
   let aboutBody = "";
