@@ -32,6 +32,7 @@ import { handleAccountLinkEvent } from "../lib/account-link";
 import { handlePreferenceDiagnosis } from "../lib/preference-diagnosis";
 import { handleMyKarteFlow } from "../lib/my-karte";
 import { handleJournalFlow } from "../lib/journal";
+import { EC_SITE_OPEN } from "../lib/storefront";
 import { handleRojiSurvey } from "../lib/roji-survey-handler";
 import {
   buildResponseQuickReplies,
@@ -1163,8 +1164,11 @@ async function handleTextMessage(
   const allQuickReplies = buildResponseQuickReplies(agentQuickReplies, { assistantTurnCount });
 
   // テイスティングノート CTA: 5ターン以上 & 未表示の場合、応答末尾に追加
+  // C-15: 行き先 (elxea.com/ja/tasting-note) は公式 EC の上にあるので、閉店中は付けない (表示済みにも数えない)。
+  //   文の選び方は持たず、開店フラグだけを見る最小の分岐 (設計 rev2 第3章 C-15)。
   let responseText = result.response;
   if (
+    EC_SITE_OPEN &&
     !tastingNoteCTAShown.has(lineUserId) &&
     assistantTurnCount >= TASTING_NOTE_TURN_THRESHOLD
   ) {

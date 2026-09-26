@@ -105,16 +105,26 @@ const URL_IN_TEXT_RE =
 /** スキームつきの一致か (大文字小文字を区別しない)。 */
 const STARTS_WITH_HTTP_SCHEME_RE = /^https?:\/\//i;
 
+/** スキーム無しの一致の先頭にあるドメイン部 (ポートを含む)。 */
+const LEADING_DOMAIN_RE = /^(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?/;
+
 /** 文中の URL らしい部分を位置つきで取り出す (メールアドレスのドメイン部は除く)。 */
 function findLinksInText(text: string): Array<{ link: string; start: number; end: number }> {
   const found: Array<{ link: string; start: number; end: number }> = [];
-  for (const m of text.matchAll(URL_IN_TEXT_RE)) {
-    const start = m.index ?? 0;
+  const re = new RegExp(URL_IN_TEXT_RE.source, URL_IN_TEXT_RE.flags);
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    const start = m.index;
     const raw = m[0];
     // スキーム無しの一致だけ: 直前が `@` や英数字なら、メールアドレスのドメイン部か単語の途中なので飛ばす。
     // スキームつき (`LINEhttps://…`) は直前の文字に関係なくリンクとして扱う。
+    // 飛ばすのはドメイン部だけ。その後ろ (パス・クエリ) は検査し直す
+    // (`mailto:info@elxea.com?body=https://elxea.com/ja` の body に埋まった URL を拾う。D1 QA n1)。
     const prev = start > 0 ? text[start - 1] : "";
-    if (!STARTS_WITH_HTTP_SCHEME_RE.test(raw) && prev !== "" && /[A-Za-z0-9@._%+-]/.test(prev)) continue;
+    if (!STARTS_WITH_HTTP_SCHEME_RE.test(raw) && prev !== "" && /[A-Za-z0-9@._%+-]/.test(prev)) {
+      const domain = LEADING_DOMAIN_RE.exec(raw);
+      re.lastIndex = start + Math.max(1, domain ? domain[0].length : 1);
+      continue;
+    }
     // 文末の句読点 (ASCII) は URL に含めない。
     const link = raw.replace(/[.,;:!?]+$/, "");
     if (link === "") continue;
@@ -213,6 +223,11 @@ export function collectLinks(message: unknown): string[] {
       if (key !== null && MEDIA_KEYS.has(key)) return;
       if (key !== null && LINK_KEYS.has(key)) {
         links.push(value);
+        // `mailto:` などサイトではないスキームの値も、その中 (body・subject など) に埋まった URL は検査する
+        // (`mailto:info@elxea.com?body=https://elxea.com/ja`。D1 QA n1)。
+        if (NON_SITE_SCHEME_RE.test(value.trim())) {
+          for (const f of findLinksInText(value)) links.push(f.link);
+        }
         return;
       }
       for (const f of findLinksInText(value)) links.push(f.link);

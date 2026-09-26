@@ -35,6 +35,8 @@ import {
   type LineMessage,
 } from "./line-messages";
 import { computeContentHash, hashesMatch } from "./content-hash";
+import { EC_SITE_OPEN } from "./storefront";
+import { hasClosedLink, logClosedLinkGate } from "./closed-link-gate";
 import { buildAggregationUnit, isValidAggregationUnit } from "./aggregation-unit";
 import {
   computeRemaining,
@@ -85,6 +87,7 @@ export type SendOneCode =
   | "message_invalid"
   | "fingerprint_missing"
   | "fingerprint_mismatch"
+  | "closed_site_link"
   | "audience_unresolved"
   | "audience_count_grew"
   | "consumption_unavailable"
@@ -204,6 +207,11 @@ export interface SendOneDeps {
   approvalTask: ApprovalTaskPort;
   /** 照合に使う唯一のメール（env DELIVERY_OWNER_EMAIL。既定なし＝未設定は送信不可）。 */
   ownerEmail?: string;
+  /**
+   * 公式 EC が開店しているか（未指定は storefront.ts の EC_SITE_OPEN）。
+   * 閉店中は閉じたリンク入りの配信を送らずに止める。テストで開店時の分岐を固定するための注入口。
+   */
+  siteOpen?: boolean;
   /**
    * 承認と見なす「判定」select の実オプション名（完全一致 allowlist）。
    * 未指定は `DEFAULT_APPROVAL_JUDGMENTS`（= ["承認"]）。差し替えは env
@@ -423,6 +431,17 @@ export async function sendOneDelivery(
     return reject("message_invalid", reason, reservationId);
   }
   const messages: LineMessage[] = built.messages;
+
+  // (c-1b) 配信の送信前検査: 閉店中は、閉じたサイト (elxea.com 等) へのリンク入りの配信を送らずに止める。
+  //   運営が書いた本文なので書き換えない (設計 rev2 第5章)。本文・altText・uri を collectLinks で調べる
+  //   (画像の URL は押せるリンクではないので対象外)。開店中は何もしない。
+  if (hasClosedLink(messages, deps.siteOpen ?? EC_SITE_OPEN)) {
+    const reason =
+      "閉店中の公式EC（elxea.com 等）へのリンクが含まれている（書き換えずに送信中止）";
+    logClosedLinkGate({ gate: "delivery", caller: "sendOneDelivery", dropped: 1 });
+    await deps.repo.writeError(req.pageId, reason).catch(() => {});
+    return reject("closed_site_link", reason, reservationId);
+  }
 
   // (c-2) 指紋照合（本文・画像・配信対象）。旧形式（配信対象を含まない pin）は
   //   一致しないため受け付けられない = fail-closed（旧 pin は全件送信経路の遺物）。

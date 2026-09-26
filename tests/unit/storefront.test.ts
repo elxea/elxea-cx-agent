@@ -488,6 +488,39 @@ it("開店時のプロンプトは master と同じく公式 EC を案内し、A
 });
 
 // ---------------------------------------------------------------------------
+// D1 QA n1: メールアドレスのドメイン部の後ろ (パス・クエリ) に埋まった URL も検査する (D2b)
+// ---------------------------------------------------------------------------
+
+it("n1: mailto の body に埋まった閉じたリンクは消え、メールアドレスは残る", () => {
+  const text = "ご連絡は mailto:info@elxea.com?body=https://elxea.com/ja から";
+  const r = stripClosedLinks(text, false);
+  assertEqual(r.removed, 1, "消した数");
+  assert(!r.text.includes("https://elxea.com/ja"), `埋まった URL が残っている: ${r.text}`);
+  assert(r.text.includes("info@elxea.com"), "メールアドレスが消えた");
+  assertEqual(stripClosedLinks(text, true).text, text, "開店中は何も変えない");
+});
+
+it("n1: メールアドレスの後ろのクエリに埋まったスキーム無しの URL も拾う", () => {
+  const links = collectLinks("info@elxea.com?next=https://shop.elxea.com/cart と elxea.com/ja");
+  assert(links.includes("https://shop.elxea.com/cart"), `クエリ内の URL を拾っていない: ${links.join(",")}`);
+  assert(links.includes("elxea.com/ja"), "後ろの URL を拾っていない");
+  assert(!links.some((l) => l.startsWith("elxea.com?") || l === "elxea.com"), "ドメイン部を URL として拾った");
+});
+
+it("n1: Flex の uri が mailto でも、その中に埋まった閉じたリンクは collectLinks で拾う", () => {
+  const flex = { type: "button", action: { type: "uri", uri: "mailto:info@elxea.com?body=https://elxea.com/ja" } };
+  const closed = collectLinks(flex).filter((l) => isClosedSiteLink(l, false));
+  assertEqual(closed.join(" "), "https://elxea.com/ja", "埋まった閉じたリンク");
+  assertEqual(collectLinks({ uri: "mailto:info@elxea.com" }).filter((l) => isClosedSiteLink(l, false)).length, 0, "ただの mailto は対象外");
+});
+
+it("n1: ただのメールアドレス・サブドメインのメールアドレスは今までどおり対象外", () => {
+  for (const t of ["info@elxea.com", "info@mail.elxea.com まで", "（info@elxea.com）"]) {
+    assertEqual(stripClosedLinks(t, false).removed, 0, t);
+  }
+});
+
+// ---------------------------------------------------------------------------
 console.log("\n============================================================");
 console.log("storefront.test Results");
 console.log(`Total: ${total}, Passed: ${passed}, Failed: ${failed}`);
