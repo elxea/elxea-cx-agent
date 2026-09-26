@@ -16,7 +16,7 @@ LINE リッチメニューの背景画像。枠・言葉・行き先の正本は
 ## 以前のメニュー: 6 枠 Option A（2500×1686）
 
 LINE 上では名前の違う別メニュー（`elxea メインメニュー（6 枠 Option A）`）として残っていて、
-`pnpm setup-rich-menu -- --channel prod --set-default <旧ID> --stateless` で既定に戻せる。
+`DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧ID> --stateless` で既定に戻せる（手順の正本は `docs/deploy-runbook.md`「本番に出す手順」）。
 以下は当時の背景のレンダリング元（画像ファイルはリポジトリに入っていない）。
 
 - `richmenu-optionA-6slot-bigger.html` / `render.mjs` — 6 枠の背景のレンダリング元（`node assets/rich-menu/render.mjs`、playwright が要る）

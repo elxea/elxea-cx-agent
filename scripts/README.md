@@ -45,10 +45,15 @@ bash scripts/setup-vercel-env.sh
 ### 5. LINE リッチメニューの設定
 
 ```bash
-pnpm setup-rich-menu -- --channel test --list --stateless               # どの OA か・今の既定 ID・一覧（読み取りのみ）
-pnpm setup-rich-menu -- --channel test --stateless                      # 3 枠メニューを作って既定にする
-pnpm setup-rich-menu -- --channel test --set-default <ID> --stateless   # 既定を指定 ID に戻す
+# テスト OA: --stateless なし。本体 .dev.vars の LINE_CHANNEL_ACCESS_TOKEN_TEST を環境変数で渡す（LINE_CHANNEL_ID_TEST が無いため）
+pnpm setup-rich-menu -- --channel test --list                 # どの OA か・今の既定 ID・一覧（読み取りのみ）
+pnpm setup-rich-menu -- --channel test                        # 3 枠メニューを作って既定にする
+pnpm setup-rich-menu -- --channel test --set-default <ID>     # 既定を指定 ID に戻す
+# 本番 OA: --stateless と DEV_VARS_PATH（本体 .dev.vars）を必ず付ける
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
 ```
+
+手順とコマンド列の正本は `docs/deploy-runbook.md`（「Staging Bring-Up」手順 4 と「本番に出す手順（正本・仮メニュー 3 枠・Amazon）」）。
 
 仮メニュー 3 枠（① お茶の淹れ方 / ② 好み診断 / ③ Amazon ストア・2500x843）を設定します。形の正本は
 `scripts/lib/rich-menu-definition.ts`。画像は `assets/rich-menu/richmenu-temp-3slot-amazon.png` を自動でアップロードします

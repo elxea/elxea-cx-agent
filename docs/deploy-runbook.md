@@ -62,18 +62,29 @@ https://elxea-agent-staging.setaka-on.workers.dev/webhook/line
 
 ### 4. リッチメニューをテストチャネルへ登録
 
-テスト OA（@426vlcyb）に載せる。`--channel test` は必須。トークンは、.dev.vars のテスト用チャネル ID /
-シークレット（`LINE_CHANNEL_ID_TEST` / `LINE_CHANNEL_SECRET_TEST`）から 15 分で切れるステートレストークンを
-スクリプトの中で発行して使う。発行の直後にbasicIdを照合し、`@426vlcyb` でなければ何も書き込まずに止まる。
-`LINE_CHANNEL_ID_TEST` はLINE Developers Consoleの当該チャネル（テストOA）の「基本設定」にあるチャネルIDを `.dev.vars` に転記する（秘密情報ではない）。
+テストOA（@426vlcyb）に載せる。`--channel test` は必須。**`--stateless` は付けない**。本体の `.dev.vars` に
+`LINE_CHANNEL_ID_TEST` が無い（2026-09-26時点）ため、`--stateless` だと必要な値が足りずに止まる。代わりに、本体 `.dev.vars` の
+既存のテスト用トークン `LINE_CHANNEL_ACCESS_TOKEN_TEST` を環境変数で渡す（`--stateless` なしのときスクリプトは `.dev.vars` を
+読まないので、`DEV_VARS_PATH` では渡らない）。値は表示しない。トークンを得た直後にbasicIdを照合し、`@426vlcyb` でなければ
+何も書き込まずに止まる。2026-09-26に実際にこの手順で通した（下の記録）。
 
 ```bash
-pnpm setup-rich-menu -- --channel test --list --stateless   # 照合結果・今の既定 ID・一覧（読み取りのみ）
-pnpm setup-rich-menu -- --channel test --stateless          # 3 枠メニューを作って既定にする（画像も自動で上げる）
+# 本体 .dev.vars のテスト用トークンを、値を表示せずに環境変数へ載せる
+export LINE_CHANNEL_ACCESS_TOKEN_TEST="$(grep -E '^LINE_CHANNEL_ACCESS_TOKEN_TEST=' \
+  /Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
+
+pnpm setup-rich-menu -- --channel test --list   # 照合結果・今の既定 ID・一覧（読み取りのみ）。既定 ID を控える
+pnpm setup-rich-menu -- --channel test          # 3 枠メニューを作って既定にする（画像も自動で上げる）
+pnpm setup-rich-menu -- --channel test --list   # 既定が新 ID になり、旧メニューも残っていることを読み返す
+# 戻すとき: pnpm setup-rich-menu -- --channel test --set-default <控えた旧ID>
 ```
 
+> 記録（2026-09-26・staging version `24632976-6aeb-44d1-9e14-5d87994d7898` / commit `63e3e20`）: テストOAの既定を
+> `richmenu-56c4ed49df58f999c31d01ad5b803f9c`（旧6枠）→ `richmenu-f307e277fa1f49c0e012b702dff8badd`（仮3枠）に差し替えた。
+> 旧6枠は消えずに残っている。③ の行き先は `https://elxea-agent-staging.setaka-on.workers.dev/go/store?openExternalBrowser=1`。
+
 画像は `assets/rich-menu/richmenu-temp-3slot-amazon.png`（2500x843）が既定で使われる（`RICH_MENU_IMAGE_PATH` で上書き可）。
-OA Manager での手作業のアップロードは要らない。詳しくは「リッチメニューの差し替えと戻し方」節。
+OA Managerでの手作業のアップロードは要らない。詳しくは「リッチメニューの差し替えと戻し方」節。
 
 ### 5. スタッフがテスト OA を友だち追加して確認
 
@@ -103,9 +114,13 @@ CXエージェントとの会話を実機確認する。この段階では配信
 
 | やりたいこと | コマンド | LINE への書き込み |
 |---|---|---|
-| どの OA か・今の既定 ID・一覧を見る | `pnpm setup-rich-menu -- --channel prod --list --stateless` | なし |
-| 3 枠を既定にする | `pnpm setup-rich-menu -- --channel prod --stateless` | 作成 → 画像 → 既定化 → 同名の旧メニュー削除 |
-| 元（旧 6 枠）に戻す | `pnpm setup-rich-menu -- --channel prod --set-default <控えた旧ID> --stateless` | 既定化 1 回（読み返して確認） |
+| どのOAか・今の既定ID・一覧を見る | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless` | なし |
+| 3枠を既定にする | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --stateless` | 作成 → 画像 → 既定化 → 同名の旧メニュー削除 |
+| 元（旧6枠）に戻す | `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <控えた旧ID> --stateless` | 既定化1回（読み返して確認） |
+
+本番OAの値（`LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`）は本体 `/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars` にだけある。
+worktreeには `.dev.vars` が無いので、本番のメニュー操作には必ず `DEV_VARS_PATH=` を付ける（付け忘れると値が無くて止まる）。
+テストOAの手順は「Staging Bring-Up」の手順4（`--stateless` なし・テスト用トークンを環境変数で渡す）。
 
 - `--stateless`: `.dev.vars`（実行したディレクトリのもの。`DEV_VARS_PATH` で変えられる）の `LINE_CHANNEL_ID` / `LINE_CHANNEL_SECRET`
   （test は `*_TEST`）から 15 分で切れるステートレストークンを発行し、メモリ上だけで使う。本数の上限が無く、本番 Worker が
@@ -120,12 +135,80 @@ CXエージェントとの会話を実機確認する。この段階では配信
   今の既定 ID を控え、戻すときはその ID を `--set-default` に渡す（2026-08-10 の記録では
   `richmenu-4383dd8074a470e13a19bf2463ef8ee3`。必ず `--list` の実測を使う）。差し替えの実行時にも、画面に
   「元に戻すとき」のコマンドが今の既定 ID つきで出る。
-- お客さんの画面への反映は、トークを開き直したとき（最大 1 分）。
-- 本番の順番: Worker のデプロイ（`/go/store` と閉店中の文）→ `--list` で旧 ID を控える → 差し替え → `--list` で既定が新 ID か確認。
-  本番デプロイと本番メニューの差し替えはSetakaの実施GOが要る（Tier 2）。
-- コードも戻すときは、先にメニューを旧IDに戻し（`--set-default <旧ID> --stateless`）、そのあとコードをgit revertして再デプロイする
-  （逆順だと、③ の /go/store が無い状態が生じる）。
+- お客さんの画面への反映は、トークを開き直したとき（最大1分）。
 - 開店時（`src/lib/storefront.ts` の `EC_SITE_OPEN = true`）は、メニュー画像（③ の文字）の作り直しと再登録も要る。
+
+### 本番に出す手順（正本・仮メニュー3枠・Amazon）
+
+本番のコマンド列の正本はこの節。本番デプロイと本番メニューの差し替えはSetakaの実施GOが要る（Tier 2）。順番を崩さない
+（Workerが先・メニューが後。`/go/store` が無いまま ③ を出すと開けない）。
+
+**前提（すべて満たしてから始める）**
+
+1. 統合ブランチ `feat/line-temp-menu-amazon-20260926` をoriginにpushし、master宛てのPRを開いてCIを通す。
+2. masterへのマージは **SetakaのGO後にだけ**行う。
+3. 本番には **masterから**載せる。origin/masterから新しいworktreeを作り、install / typecheck / test:unitを通してから
+   `pnpm deploy` する（`pnpm deploy` は `scripts/deploy-preflight.sh` で「作業ツリーがきれい」「HEAD == origin/master」を確かめる）。
+4. ⚠ **禁止**: `DEPLOY_ALLOW_NON_DEFAULT=1` を付けて統合ブランチを直接本番に載せること。masterと本番がずれ、次にmasterを
+   本番に出したときに、閉店中の文と `/go/store` が消える（③ が開けなくなり、閉じたリンクも戻る）。
+
+```bash
+# 0. マージ後の origin/master から新しい worktree を作り、検査を通す
+cd /Users/setaka/github/elxea/products/elxea-cx-agent
+git fetch origin
+git worktree add -b deploy/line-temp-menu-YYYYMMDD ../_wt/cx-prod-line-temp-menu origin/master
+cd ../_wt/cx-prod-line-temp-menu
+grep -n 'EC_SITE_OPEN *=' src/lib/storefront.ts   # false であること
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test:unit
+
+# 1. 今の本番メニューの既定 ID を控える（読み取りのみ）→ 以下「旧ID」
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+
+# 2. デプロイ直前に、今の本番 Worker の版 ID を控える（wrangler rollback 用）→ 以下「旧版ID」
+pnpm exec wrangler deployments status
+
+# 3. Worker のデプロイ（preflight を通る）
+pnpm deploy
+
+# 4. /go/store を HEAD で確かめる（GET だと押下の記録が 1 件残るので、本番では GET を使わない）
+curl -s -I https://elxea-agent.setaka-on.workers.dev/go/store | grep -i -E '^HTTP|^location'
+#    期待: 302 / location: https://www.amazon.co.jp/stores/page/0C75602F-4851-4957-8D54-9A17590AF63C
+
+# 5. 3 枠メニューを作って既定にする（実行時に「元に戻すとき」のコマンドも旧 ID つきで出る）
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --stateless
+
+# 6. 読み返す: 既定が新 ID になり、旧 6 枠も残っている
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --list --stateless
+```
+
+**事後確認（読み取りのみ）**
+
+- 本番Workerのログを数分見る（`pnpm exec wrangler tail --format pretty`。`--env` を付けない＝本番）。ダッシュボードのWorkers Logsで
+  同じ語を検索してもよい。確かめること:
+  - LINE APIの **401**（トークン無効）が **0件**。
+  - `[closed-link-gate]` の行（閉店中の関所がリンクを消した記録）が **0件**。決まった文の経路では消す数は0のはずなので、出たら
+    どこかに閉じたリンクが残っている。
+- LINE E2E SpecのChangelogへの追記は **Boss側の作業**（この手順の実行者は行わない）。
+
+**戻し方（メニューが先・コードが後）**
+
+```bash
+# メニューを旧 6 枠に戻す（1 で控えた旧ID）
+DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧ID> --stateless
+
+# コードも戻すときは、メニューを戻した後に、2 で控えた版へ戻す
+pnpm exec wrangler rollback <旧版ID>
+curl -s https://elxea-agent.setaka-on.workers.dev/   # {"status":"ok",...} を確認
+```
+
+- 逆順（コードを先に戻す）だと、③ の `/go/store` が無い状態が生じる。
+- `wrangler rollback` は本番を一時的に戻すだけ。masterには新しいコードが残るので、恒久的に戻すならmasterでgit revertする
+  PRを出し、同じ手順（新しいworktree → 検査 → `pnpm deploy`）で出し直す。
+- ⚠ デプロイの後にSecret Change（`wrangler secret put` 等）が入り、そのあとで古い版へ `wrangler rollback` した場合に、secretも
+  一緒に戻るかは**未確認**。rollbackの前に `pnpm exec wrangler deployments list` で、控えた版より後にSecret Changeが
+  入っていないかを見る。入っていたら、rollbackの後に `pnpm exec wrangler secret list` でsecretの名前がそろっているかを確かめる。
 
 ## Staging Deploy
 
@@ -876,7 +959,7 @@ Cloudflareのsecretは**本番の値を読み出せない**（`wrangler secret l
 | 止めたいもの | 手順 | 効果 | デプロイ |
 |---|---|---|---|
 | **アンケートそのもの**（推奨・最速） | `pnpm exec wrangler secret delete ROJI_SURVEY_ENABLED`<br>（または `printf 'false' \| pnpm exec wrangler secret put ROJI_SURVEY_ENABLED`） | 合言葉もボタンも無反応。器にも1行も書かない。**masterと同じ挙動に戻る** | **不要**（次のリクエストから即時） |
-| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。2026-09-26〜 スクリプトは仮メニュー 3 枠を作るため、旧 6 枠へは `pnpm setup-rich-menu -- --channel prod --set-default <旧6枠のID> --stateless` で既定を向け直す（旧 6 枠は名前が違うので残っている。ID は `--list` で確かめる。「リッチメニューの差し替えと戻し方」節） | 元の6枠に戻る。既定を向け直すだけなので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
+| **メニューの入口** | 差し替え後に元へ戻す場合のみ必要。2026-09-26〜 スクリプトは仮メニュー 3 枠を作るため、旧 6 枠へは `DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm setup-rich-menu -- --channel prod --set-default <旧6枠のID> --stateless` で既定を向け直す（旧 6 枠は名前が違うので残っている。ID は `--list` で確かめる。「リッチメニューの差し替えと戻し方」節） | 元の6枠に戻る。既定を向け直すだけなので**空白の窓は生じない** | 不要（LINE側の操作のみ） |
 
 - **削除と `"false"` 投入は等価**（ON判定は `"true"` の完全一致のみ）。
   ただし**削除の方が外から検証できる**（`wrangler secret list` の名前一覧から消えるため）。
