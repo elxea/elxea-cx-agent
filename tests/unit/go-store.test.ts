@@ -32,7 +32,7 @@ import {
   handleGoStore,
   recordStoreTap,
 } from "../../src/routes/go-store";
-import { PURCHASE_URL, AMAZON_STORE_URL, EC_SITE_OPEN, isClosedSiteLink } from "../../src/lib/storefront";
+import { PURCHASE_URL, AMAZON_STORE_URL, EC_SITE_OPEN, EC_STORE_URL, isClosedSiteLink } from "../../src/lib/storefront";
 
 // ---------------------------------------------------------------------------
 // テストハーネス（外部依存なし・既存 tests/unit/*.test.ts と同じ流儀）
@@ -49,6 +49,11 @@ function describe(suiteName: string, fn: () => void) {
 }
 function it(testName: string, fn: () => void | Promise<void>) {
   queue.push({ name: testName, fn });
+}
+/** 開店フラグ (storefront.ts の EC_SITE_OPEN) で片方だけ走るケース。走らない側は [SKIP] と出す。 */
+function itWhen(siteOpen: boolean, testName: string, fn: () => void | Promise<void>) {
+  if (EC_SITE_OPEN === siteOpen) it(testName, fn);
+  else console.log(`  [SKIP] ${testName} (EC_SITE_OPEN=${EC_SITE_OPEN})`);
 }
 function assertEqual<T>(actual: T, expected: T, label = "") {
   if (actual !== expected) {
@@ -113,9 +118,13 @@ async function callWorker(request: Request, env: Partial<Env>): Promise<Response
 // ---------------------------------------------------------------------------
 
 describe("行き先（PURCHASE_URL に固定・閉じたリンクではない）", () => {
-  it("閉店中の行き先は Amazon の elxea ストア（PURCHASE_URL）", () => {
-    assertEqual(EC_SITE_OPEN, false, "EC_SITE_OPEN（閉店中）");
+  itWhen(false, "閉店中の行き先は Amazon の elxea ストア（PURCHASE_URL）", () => {
     assertEqual(PURCHASE_URL, AMAZON_STORE_URL, "PURCHASE_URL");
+    assertEqual(isClosedSiteLink(PURCHASE_URL), false, "行き先は閉じたリンクではない");
+  });
+
+  itWhen(true, "開店時の行き先は公式 EC（PURCHASE_URL = EC_STORE_URL）", () => {
+    assertEqual(PURCHASE_URL, EC_STORE_URL, "PURCHASE_URL");
     assertEqual(isClosedSiteLink(PURCHASE_URL), false, "行き先は閉じたリンクではない");
   });
 

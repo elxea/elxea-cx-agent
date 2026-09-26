@@ -14,6 +14,11 @@
  *   - `pushTextMessage` でも消える
  *   - 消した結果が空になった本文は送らず、warn を必ず出す (本文はログに出さない: 設計 QA 3 回目 m4)
  *   - 開店中は何も変えない
+ *
+ * 開店フラグ (storefront.ts の EC_SITE_OPEN) の扱い:
+ *   - LINE の送信・push・保存は、モジュールの開店フラグを直接読む経路を通る。閉店中だけのケースは itClosed で
+ *     登録し、開店フラグが true のときは飛ばす。開店時の期待 (何も変えない) は itOpen で登録する
+ *   - 公式 EC 開店時に storefront.ts の 1 行を true にするだけで、本ファイルは緑のまま走る
  *   - 決まった文 (閉じたリンクを含まない文) では消す数 = 0・入力と同じ文字列
  *
  * 実 I/O は global fetch をスタブして遮断する (LINE には一切送らない)。
@@ -31,7 +36,7 @@ import {
   hasClosedLink,
   type GateableStreamCallbacks,
 } from "../../src/lib/closed-link-gate";
-import { AMAZON_STORE_URL, collectLinks, isClosedSiteLink, stripClosedLinks } from "../../src/lib/storefront";
+import { AMAZON_STORE_URL, EC_SITE_OPEN, EC_STORE_URL, collectLinks, isClosedSiteLink, stripClosedLinks } from "../../src/lib/storefront";
 import { createResponder, pushFlexMessage, pushTextMessage } from "../../src/lib/line";
 import { saveMessage } from "../../src/lib/supabase";
 import { buildHistoryMessages, type Message } from "../../src/agent/core";
@@ -45,6 +50,17 @@ const queue: Array<{ name: string; fn: () => Promise<void> | void }> = [];
 
 function it(name: string, fn: () => Promise<void> | void) {
   queue.push({ name, fn });
+}
+const skippedNames: string[] = [];
+/** 閉店中だけのケース (モジュールの開店フラグを直接読む経路)。開店フラグが true のときは飛ばす。 */
+function itClosed(name: string, fn: () => Promise<void> | void) {
+  if (EC_SITE_OPEN) skippedNames.push(name);
+  else it(name, fn);
+}
+/** 開店時だけのケース (公式 EC 開店で storefront.ts の 1 行を true にしたときに走る)。 */
+function itOpen(name: string, fn: () => Promise<void> | void) {
+  if (!EC_SITE_OPEN) skippedNames.push(name);
+  else it(name, fn);
 }
 function assert(cond: boolean, label: string) {
   if (!cond) throw new Error(label);
@@ -153,7 +169,7 @@ it("開店中は何も変えない (本文・LINE メッセージ・AI の結果
 // 関所 1: LINE の送信
 // ---------------------------------------------------------------------------
 
-it("LINE の送信: responder.text の本文から閉じたリンクが消える", async () => {
+itClosed("LINE の送信: responder.text の本文から閉じたリンクが消える", async () => {
   const s = stubFetch();
   const w = captureWarn();
   try {
@@ -182,7 +198,7 @@ it("LINE の送信: 決まった文は 1 文字も変えずに送る (消した�
   assertEqual(w.lines.filter((l) => l.includes("closed-link-gate")).length, 0, "関所のログ");
 });
 
-it("LINE の送信: AI が出す Flex に閉じたリンクがあれば送らない (altText・入れ子の uri)", async () => {
+itClosed("LINE の送信: AI が出す Flex に閉じたリンクがあれば送らない (altText・入れ子の uri)", async () => {
   const s = stubFetch();
   const w = captureWarn();
   try {
@@ -199,7 +215,7 @@ it("LINE の送信: AI が出す Flex に閉じたリンクがあれば送らな
   assertEqual(w.lines.filter((l) => l.includes('"dropped":1')).length, 2, "送らなかった 2 通のログ");
 });
 
-it("LINE の送信: 消した結果が空の本文は送らず、reply token も使わず、emptied の warn を出す (m4)", async () => {
+itClosed("LINE の送信: 消した結果が空の本文は送らず、reply token も使わず、emptied の warn を出す (m4)", async () => {
   const s = stubFetch();
   const w = captureWarn();
   try {
@@ -216,7 +232,7 @@ it("LINE の送信: 消した結果が空の本文は送らず、reply token も
   assert(!w.lines.some((l) => l.includes("subscription")), "ログに本文が出ている");
 });
 
-it("LINE の送信: pushTextMessage でも消え、pushFlexMessage は閉じたリンク入りを送らない", async () => {
+itClosed("LINE の送信: pushTextMessage でも消え、pushFlexMessage は閉じたリンク入りを送らない", async () => {
   const s = stubFetch();
   const w = captureWarn();
   try {
@@ -259,7 +275,7 @@ it("LINE の送信: quickReply の閉じたリンク入りの item だけを外�
 // 関所 2: 保存
 // ---------------------------------------------------------------------------
 
-it("保存: AI の発言は閉じたリンクを消して保存し、お客さんの発言は変えない", async () => {
+itClosed("保存: AI の発言は閉じたリンクを消して保存し、お客さんの発言は変えない", async () => {
   const { client, inserted } = fakeSupabase();
   const w = captureWarn();
   await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: AI_REPLY });
@@ -271,7 +287,7 @@ it("保存: AI の発言は閉じたリンクを消して保存し、お客さ�
   assertEqual(inserted[1].content, "elxea.com/ja は開いていますか", "お客さんの発言は変えない");
 });
 
-it("保存: 消した結果が空の AI の発言は保存せず、emptied の warn を出す", async () => {
+itClosed("保存: 消した結果が空の AI の発言は保存せず、emptied の warn を出す", async () => {
   const { client, inserted } = fakeSupabase();
   const w = captureWarn();
   await saveMessage(client, { userId: "u", channel: "web", role: "assistant", content: " https://elxea.com/ja " });
@@ -451,10 +467,6 @@ it("F1 後段の守り: 閉店中は空の本文を送らず・保存せず・�
   assertEqual(gateLineMessages(openMsgs, "test", true), openMsgs, "LINE: 開店中は今のまま");
   assertEqual(gateAssistantText("", "save", "test", false).drop, true, "保存: 空は保存しない");
   assertEqual(gateAssistantText("", "save", "test", true).drop, false, "保存: 開店中は今のまま");
-  const { client, inserted } = fakeSupabase();
-  await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: "" });
-  await saveMessage(client, { userId: "u", channel: "line", role: "user", content: "" });
-  assertEqual(inserted.length, 1, "保存: 空の AI の発言だけ保存しない (お客さんの発言は変えない)");
   const history: Message[] = [
     { role: "user", content: "こんにちは", channel: "line" },
     { role: "assistant", content: " ", channel: "line" },
@@ -463,6 +475,48 @@ it("F1 後段の守り: 閉店中は空の本文を送らず・保存せず・�
   assertEqual(buildHistoryMessages(history, true).length, 2, "履歴: 開店中は今のまま");
   w.restore();
   assert(w.lines.filter((l) => l.includes('"emptied":true')).length >= 3, `emptied の warn: ${w.lines.join(" | ")}`);
+});
+
+itClosed("F1 後段の守り (保存の実関数): 閉店中は空の AI の発言だけ保存しない (お客さんの発言は変えない)", async () => {
+  const { client, inserted } = fakeSupabase();
+  const w = captureWarn();
+  await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: "" });
+  await saveMessage(client, { userId: "u", channel: "line", role: "user", content: "" });
+  w.restore();
+  assertEqual(inserted.length, 1, "保存: 空の AI の発言だけ保存しない (お客さんの発言は変えない)");
+  assert(w.lines.some((l) => l.includes('"gate":"save"') && l.includes('"emptied":true')), "emptied の warn");
+});
+
+// ---------------------------------------------------------------------------
+// 開店時 (storefront.ts の EC_SITE_OPEN = true) の期待: 関所は何も変えない。行き先は公式 EC のまま届く
+// ---------------------------------------------------------------------------
+
+itOpen("開店時: LINE の送信・push は AI の返事をそのまま送り、公式 EC への Flex も送る (関所のログなし)", async () => {
+  const s = stubFetch();
+  const w = captureWarn();
+  try {
+    const r = createResponder("Uuser", "rt", env);
+    await r.text(AI_REPLY);
+    await r.flex("商品のご案内", { type: "bubble", footer: { contents: [{ action: { type: "uri", uri: `${EC_STORE_URL}/products/x` } }] } });
+    await pushTextMessage("Uuser", AI_REPLY, env);
+    await pushFlexMessage("Uuser", "記事", { action: { type: "uri", uri: "https://www.elxea.com/ja/journal/1" } }, env);
+  } finally {
+    s.restore();
+    w.restore();
+  }
+  assertEqual(s.bodies.length, 4, "4 通とも送る");
+  assertEqual((s.bodies[0].messages as Array<{ text: string }>)[0].text, AI_REPLY, "本文をそのまま送る");
+  assertEqual((s.bodies[2].messages as Array<{ text: string }>)[0].text, AI_REPLY, "push の本文をそのまま送る");
+  assert(collectLinks(s.bodies).some((l) => l.startsWith(EC_STORE_URL)), "公式 EC の URL が届く");
+  assertEqual(w.lines.filter((l) => l.includes("closed-link-gate")).length, 0, "関所のログ");
+});
+
+itOpen("開店時: 保存は AI の発言をそのまま保存し、空の AI の発言も今のまま保存する", async () => {
+  const { client, inserted } = fakeSupabase();
+  await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: AI_REPLY });
+  await saveMessage(client, { userId: "u", channel: "line", role: "assistant", content: "" });
+  assertEqual(inserted.length, 2, "保存件数");
+  assertEqual(inserted[0].content, AI_REPLY, "AI の発言をそのまま保存");
 });
 
 /** LINE の文字・画像の返事の配線 (routes/line.ts: runAgent → responder.text と saveMessage → 次の履歴)。 */
@@ -620,7 +674,8 @@ it("n1 逐次送信: 断片が「（」や空白の直後で切れても「（�
   }
   console.log("\n============================================================");
   console.log("closed-link-gate.test Results");
-  console.log(`Total: ${total}, Passed: ${passed}, Failed: ${failed}`);
+  console.log(`Total: ${total}, Passed: ${passed}, Failed: ${failed}, Skipped: ${skippedNames.length} (EC_SITE_OPEN=${EC_SITE_OPEN})`);
+  for (const n of skippedNames) console.log(`  [SKIP] ${n}`);
   if (failed > 0) {
     console.log("\nFailures:");
     for (const f of failures) console.log(`  - ${f.name}: ${f.error}`);

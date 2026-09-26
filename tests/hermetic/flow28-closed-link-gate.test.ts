@@ -11,6 +11,9 @@
  *   - AI に渡った過去の会話 (履歴) の AI の発言に閉じたリンクが無い
  *
  * 実ネットワーク非接触・実送信ゼロ。Anthropic は本ファイル内だけで差し替える。
+ *
+ * 開店フラグ (storefront.ts の EC_SITE_OPEN): 実 webhook 経路はモジュールの開店フラグを読む。閉店中だけの
+ * describe は開店フラグが true のとき飛ばし、開店時の期待 (そのまま届き・保存される) を 1 本持つ。
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,7 +21,7 @@ import { env } from "cloudflare:test";
 import { getHermetic, type Hermetic } from "../lib/hermetic";
 import { dispatchLineWebhook, settle } from "../lib/webhook";
 import { messageEvent, synthLineUserId } from "../lib/synthetic";
-import { AMAZON_STORE_URL, collectLinks, isClosedSiteLink } from "../../src/lib/storefront";
+import { AMAZON_STORE_URL, EC_SITE_OPEN, EC_STORE_URL, collectLinks, isClosedSiteLink } from "../../src/lib/storefront";
 import { AGENT_FALLBACK_REPLY } from "../../src/agent/fallback-reply";
 
 const AI_REPLY =
@@ -126,7 +129,7 @@ function expectNoClosedLinks(userId: string): void {
   expect(closedIn(history), "AI に渡った履歴の AI の発言に閉じたリンクがある").toEqual([]);
 }
 
-describe("送る関所: 閉店中、AI の返事の閉じたリンクはお客さんにも記録にも届かない", () => {
+describe.skipIf(EC_SITE_OPEN)("送る関所: 閉店中、AI の返事の閉じたリンクはお客さんにも記録にも届かない", () => {
   it("LINE の文字の返事", async () => {
     const userId = synthLineUserId("flow28-text");
     seedOldConversation(userId);
@@ -150,7 +153,7 @@ describe("送る関所: 閉店中、AI の返事の閉じたリンクはお客�
  * D2b QA F1: AI の返事が閉じたリンクだけのとき、実配線 (AI の出口 → LINE の送信・保存 → 次の履歴) を通しても
  * 空の本文を送らず・空の発言を保存せず・次の履歴に空を入れない。無言にせず既存の fallback 文を 1 通だけ返す。
  */
-describe("送る関所: AI の返事が閉じたリンクだけのとき (実 webhook 経路)", () => {
+describe.skipIf(EC_SITE_OPEN)("送る関所: AI の返事が閉じたリンクだけのとき (実 webhook 経路)", () => {
   function expectFallbackOnce(userId: string): void {
     const texts = h.line.texts();
     expect(texts.filter((t) => t.trim() === ""), "空の本文を送った").toEqual([]);
@@ -196,5 +199,22 @@ describe("送る関所: AI の返事が閉じたリンクだけのとき (実 we
     });
     expectFallbackOnce(userId);
     await expectNextHistoryClean(userId);
+  });
+});
+
+describe.runIf(EC_SITE_OPEN)("送る関所: 開店時は AI の返事をそのまま届け・保存し、履歴も変えない (実 webhook 経路)", () => {
+  it("LINE の文字の返事", async () => {
+    const userId = synthLineUserId("flow28-open-text");
+    seedOldConversation(userId);
+    await dispatch(messageEvent(userId, "ほうじ茶の香りについて教えてください"));
+    const texts = h.line.texts().join("\n");
+    expect(texts, "公式 EC の URL が届いていない").toContain(EC_STORE_URL);
+    expect(texts, "定期便の URL が届いていない").toContain("elxea.com/ja/subscription");
+    const saved = (h.supabase.all("conversations") as unknown as Array<Record<string, unknown>>).filter(
+      (r) => r.user_id === userId && r.role === "assistant" && r.content !== OLD_ASSISTANT,
+    );
+    expect(saved.map((r) => String(r.content)).join("\n"), "保存した AI の発言").toContain(EC_STORE_URL);
+    const history = JSON.stringify(llmMessages[0].filter((m) => m.role === "assistant"));
+    expect(history, "過去の AI の発言が変わった").toContain("https://elxea.com/ja/subscription");
   });
 });
