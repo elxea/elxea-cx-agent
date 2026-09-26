@@ -328,6 +328,8 @@ describe("teaRecommendCard (UX③)", () => {
       name: "11301｜玉露",
       description: "説明",
       productUrl: "https://elxea.com/ja/x",
+      // 開店時のボタン名（master の「見る」）を固定する。閉店中のボタン名（C-8）は storefront.test.ts で固定。
+      siteOpen: true,
     }) as Record<string, Record<string, unknown>>;
     const body = r.body as Record<string, unknown>;
     const contents = body.contents as Record<string, unknown>[];

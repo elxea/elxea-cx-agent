@@ -29,6 +29,43 @@ import {
   SUPPORT_EMAIL,
 } from "../lib/brand-copy";
 import { isSalesSurfaceEnabled, type SalesSurfaceEnv } from "../lib/sales-surface";
+import { byStore, EC_SITE_OPEN, PURCHASE_URL } from "../lib/storefront";
+
+// ---------------------------------------------------------------------------
+// 購入先まわりの指示の対（開店時 = master の文のまま / 閉店中 = 文言 v2・copy-as-data）
+//   文言 v2: https://app.notion.com/p/3e770c9d064c818eb5eee425b35dba90
+//   行頭の「- 」はプロンプト側に残し、ここには後ろの文だけを持つ。
+// ---------------------------------------------------------------------------
+
+/** C-3（エスカレーションしない場合: 価格が不明なとき）。 */
+export const PROMPT_PRICE_UNKNOWN_OPEN =
+  "価格が不明だが商品の特徴は説明できる場合 → 特徴を伝え、価格は「サイトでご確認いただけます」と案内する";
+export const PROMPT_PRICE_UNKNOWN_CLOSED =
+  "価格が不明だが商品の特徴は説明できる場合 → 特徴を伝え、価格は「Amazon の elxea ストアで、いまのお取り扱いをご覧いただけます」と案内する。そのお茶がストアにあるとは言い切らない";
+
+/** C-4（買う導線を置かない: 購入の案内）。 */
+export const PROMPT_PURCHASE_GUIDE_OPEN =
+  "価格・在庫・購入手続きを尋ねられたときだけ、elxea のサイト（https://elxea.com/ja）でご覧いただける旨を**控えめに一度だけ**案内する。繰り返さない。";
+export const PROMPT_PURCHASE_GUIDE_CLOSED = `価格・在庫・購入手続きを尋ねられたときだけ、Amazon の elxea ストア（${PURCHASE_URL}）で、いまのお取り扱いをご覧いただける旨を**控えめに一度だけ**案内する。繰り返さない。尋ねられたお茶がストアにあるとは言い切らず、ストアそのものを案内する。公式サイトは開店準備中のため、購入先として案内しない。`;
+
+/** C-5（買う導線を置かない: 定期便）。 */
+export const PROMPT_SUBSCRIPTION_GUIDE_OPEN =
+  "定期便をこちらから案内しない。尋ねられたときにサイトの案内先を伝えるだけにとどめる。";
+export const PROMPT_SUBSCRIPTION_GUIDE_CLOSED =
+  "定期便をこちらから案内しない。尋ねられたときは、定期便はいま準備を進めていることだけを伝える。案内先のページはまだ開いていないのでURLを出さない。Amazon の elxea ストアを定期便の代わりとして案内しない。";
+
+/** C-6（基本情報: サイト）。閉店中は 2 行になる。 */
+export const PROMPT_SITE_INFO_OPEN = "**サイト**: https://elxea.com/ja";
+export const PROMPT_SITE_INFO_CLOSED = `**公式サイト**: 開店準備中（URLは案内しない）\n- **購入先（公式サイトの開店まで）**: Amazon の elxea ストア ${PURCHASE_URL}`;
+
+/** C-19（基本情報: 返品の行の直後に、閉店中だけ 1 行足す。開店時は足さない）。 */
+export const PROMPT_SHIPPING_TERMS_CLOSED =
+  "**配送・送料・決済・返品**: 上の配送・送料・決済・返品は、公式サイトの開店後の条件。いまのご購入先は Amazon の elxea ストアのため、送料・配送・決済・返品を尋ねられたら、上の条件をいまの条件として伝えず、Amazon の商品ページや Amazon の注文履歴でご確認いただけるよう案内する。";
+
+/** C-7（売り込み面の節: 商品 URL が不明なとき）。 */
+export const PROMPT_PRODUCT_URL_FALLBACK_OPEN =
+  "URLが不明な場合は https://elxea.com/ja/products （商品一覧ページ）を使用する";
+export const PROMPT_PRODUCT_URL_FALLBACK_CLOSED = `URLが不明な場合は Amazon の elxea ストア（${PURCHASE_URL}）を使用する（公式サイトの開店まで）`;
 
 // ---------------------------------------------------------------------------
 // Persona prompt fragments (MS5 5.3)
@@ -90,7 +127,12 @@ export function buildPersonaPromptFragment(persona: PersonaType | null): string 
   return PERSONA_PROMPT_FRAGMENTS[persona];
 }
 
-export const SYSTEM_PROMPT = `あなたは elxea（${BRAND_NAME_READING}）のカスタマーサポートスタッフです。
+/**
+ * 本体プロンプトを組み立てる（siteOpen 既定 EC_SITE_OPEN。テストで開店時 / 閉店中の両方を固定する）。
+ * 購入先まわりの行だけが siteOpen で変わり、それ以外は master の文のまま。
+ */
+export function buildSystemPrompt(siteOpen: boolean = EC_SITE_OPEN): string {
+  return `あなたは elxea（${BRAND_NAME_READING}）のカスタマーサポートスタッフです。
 LINE で顧客と 1:1 で会話し、商品の提案やサポートを行います。
 
 ## 言語ルール（最重要 — 必ず守ること）
@@ -152,7 +194,7 @@ elxea は、${BRAND_STATEMENT_SHORT}
 ### エスカレーションしない場合
 - 検索結果に部分的でも情報がある場合 → 分かる範囲で回答する
 - お茶の一般的な知識で答えられる場合（淹れ方、茶種の特徴、リラックス効果等）→ 一般知識で回答する
-- 価格が不明だが商品の特徴は説明できる場合 → 特徴を伝え、価格は「サイトでご確認いただけます」と案内する
+- ${byStore(PROMPT_PRICE_UNKNOWN_OPEN, PROMPT_PRICE_UNKNOWN_CLOSED, siteOpen)}
 
 ## 画像メッセージへの対応
 
@@ -191,9 +233,9 @@ elxea は、${BRAND_STATEMENT_SHORT}
 
 ### 買う導線を置かない（最重要・売り込みの禁止）
 - **こちらから購入をすすめない。** カート・購入ボタン・商品カードを出す道具は持っていないので、「カートに入れました」「こちらから購入できます」のような約束をしない。
-- 価格・在庫・購入手続きを尋ねられたときだけ、elxea のサイト（https://elxea.com/ja）でご覧いただける旨を**控えめに一度だけ**案内する。繰り返さない。
+- ${byStore(PROMPT_PURCHASE_GUIDE_OPEN, PROMPT_PURCHASE_GUIDE_CLOSED, siteOpen)}
 - 「今だけ」「残りわずか」「お得」のような煽り・評価の言葉を使わない。
-- 定期便をこちらから案内しない。尋ねられたときにサイトの案内先を伝えるだけにとどめる。
+- ${byStore(PROMPT_SUBSCRIPTION_GUIDE_OPEN, PROMPT_SUBSCRIPTION_GUIDE_CLOSED, siteOpen)}
 - 注文状況・配送の照会（lookup_my_orders / get_order_detail）は購入後のサポートなので、従来どおり応じてよい。
 
 ### ナレッジにないメニュー・情報を聞かれたとき（正直ガード）
@@ -237,14 +279,18 @@ LINE のお知らせ配信（月1〜2回・季節の節目）を「止めたい�
 
 - **ブランド名**: elxea（${BRAND_NAME_READING}）
 - **運営会社**: ${COMPANY_NAME}
-- **サイト**: https://elxea.com/ja
+- ${byStore(PROMPT_SITE_INFO_OPEN, PROMPT_SITE_INFO_CLOSED, siteOpen)}
 - **お問い合わせ**: ${SUPPORT_EMAIL}
 - **対応時間**: 平日 10:00〜17:00（土日祝休み）
 - **配送**: ヤマト運輸、注文から 3〜5 営業日でお届け
 - **送料**: 全国一律 500 円（税込）、5,000 円以上で送料無料
 - **決済方法**: クレジットカード（VISA / Mastercard / AMEX / JCB）、Apple Pay、Google Pay、Shop Pay
-- **返品**: 商品到着後 7 日以内、未開封・未使用に限る（不良品は送料当社負担）
+- **返品**: 商品到着後 7 日以内、未開封・未使用に限る（不良品は送料当社負担）${byStore("", `\n- ${PROMPT_SHIPPING_TERMS_CLOSED}`, siteOpen)}
 `;
+}
+
+/** いまの本体プロンプト（不変の文字列。プロンプトキャッシュの第1ブロック）。 */
+export const SYSTEM_PROMPT = buildSystemPrompt();
 
 // ---------------------------------------------------------------------------
 // 売り込み面（既定 OFF）— roji「物販の匂いを出さない」への適合
@@ -257,7 +303,8 @@ LINE のお知らせ配信（月1〜2回・季節の節目）を「止めたい�
  * 「買う導線を置かない」節を常設した（機能定義 v1.5 3-5・Phase 0 タスク4）。
  * 将来 EC 側へ導線を寄せたうえで再開する場合に備え、旧指示は削除せずここに温存する。
  */
-export const SALES_PROMPT_SECTION = `
+export function buildSalesPromptSection(siteOpen: boolean = EC_SITE_OPEN): string {
+  return `
 ## 商品カードと購入導線（SALES_SURFACE_ENABLED=true のときのみ有効）
 
 上の「買う導線を置かない」節は、この節が有効な間だけ読み替える。
@@ -266,12 +313,16 @@ export const SALES_PROMPT_SECTION = `
 - 商品を提案するときは、テキスト回答に加えて recommend_product ツールで視覚的なカードを送る
 - ナレッジに商品名・価格・URLがある場合に使用する（ない情報は補完しない）
 - 1回に最大3商品まで。お客様の質問に最も関連する商品を選ぶ
-- URLが不明な場合は https://elxea.com/ja/products （商品一覧ページ）を使用する
+- ${byStore(PROMPT_PRODUCT_URL_FALLBACK_OPEN, PROMPT_PRODUCT_URL_FALLBACK_CLOSED, siteOpen)}
 
 ### カートリンク（create_cart_link ツール）
 - 「買いたい」「カートに入れたい」と**お客様から**明確な意思表示があったときだけ使う
 - こちらから購入を促さない
 `;
+}
+
+/** いまの売り込み面の節（売り込み面が有効なときだけ足す）。 */
+export const SALES_PROMPT_SECTION = buildSalesPromptSection();
 
 /**
  * この env で使う System Prompt。

@@ -16,6 +16,8 @@
  *   等の非正本文言がユーザー向けに混入していたため是正し、本ファイルに集約した。
  */
 
+import { byStore, PURCHASE_URL } from "./storefront";
+
 // --- ブランド識別（brand-context skill）---
 
 /** ブランド名（英字表記）。 */
@@ -375,6 +377,17 @@ export function formatTeaQuickReplyLabel(
 /**
  * お茶カード末尾・次の一杯に添える静かな送客リンク 1 行（Sales S-1）。
  * 「よろしければ」添えで断りやすく、緊急性・お得さの演出はしない。
+ * 開店時の文（_OPEN）は master の文のまま残す。閉店中は _CLOSED（文言 v2 C-1）。
  */
-export const TEA_SHOP_REFERRAL_LINE =
+export const TEA_SHOP_REFERRAL_LINE_OPEN =
   `よろしければ、こちらからもご覧いただけます。\n${SITE_URL_JA}`;
+
+/**
+ * 閉店中（公式 EC の開店まで）の送客リンク 1 行。文言 v2 C-1 をそのまま使う（copy-as-data・言い換え禁止）。
+ * 行き先は storefront.ts の PURCHASE_URL（Amazon の elxea ストア）。
+ */
+export const TEA_SHOP_REFERRAL_LINE_CLOSED =
+  `よろしければ、Amazon の elxea ストアで、いまお取り扱いしているお茶もご覧いただけます。\n${PURCHASE_URL}`;
+
+/** いまの送客リンク 1 行（storefront.ts の EC_SITE_OPEN で開店時 / 閉店中を選ぶ）。 */
+export const TEA_SHOP_REFERRAL_LINE = byStore(TEA_SHOP_REFERRAL_LINE_OPEN, TEA_SHOP_REFERRAL_LINE_CLOSED);

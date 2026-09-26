@@ -18,8 +18,8 @@ import {
   isSalesTool,
   SALES_TOOL_NAMES,
   SALES_TOOL_DISABLED_RESULT,
-  EC_SITE_URL,
 } from "../../src/lib/sales-surface";
+import { PURCHASE_URL } from "../../src/lib/storefront";
 import { AGENT_TOOLS, SALES_TOOLS, agentTools } from "../../src/agent/tools";
 import {
   SYSTEM_PROMPT,
@@ -120,8 +120,8 @@ it("isSalesTool が売り込みツールだけを true と判定する", () => {
   assertEqual(isSalesTool("get_order_detail"), false, "get_order_detail");
 });
 
-it("実行拒否時の文言は購入導線を EC サイトへ寄せ、偽の約束をしない", () => {
-  assert(SALES_TOOL_DISABLED_RESULT.includes(EC_SITE_URL), "EC サイトの受け皿が示されていない");
+it("実行拒否時の文言は購入導線を購入先（storefront.ts の PURCHASE_URL）へ寄せ、偽の約束をしない", () => {
+  assert(SALES_TOOL_DISABLED_RESULT.includes(PURCHASE_URL), "購入先の受け皿が示されていない");
   assert(!SALES_TOOL_DISABLED_RESULT.includes("カートに入れ"), "カート追加を示唆している");
 });
 
@@ -136,7 +136,7 @@ it("既定の System Prompt に売り込みツールの使用指示が無い", (
 it("既定の System Prompt に「買う導線を置かない」が常設されている", () => {
   const p = systemPrompt(OFF);
   assert(p.includes("買う導線を置かない"), "売り込み禁止の節が無い");
-  assert(p.includes(EC_SITE_URL), "購入の受け皿（EC サイト）の案内が無い");
+  assert(p.includes(PURCHASE_URL), "購入の受け皿（購入先）の案内が無い");
 });
 
 it("既定は SYSTEM_PROMPT と完全一致（プロンプトキャッシュを壊さない）", () => {

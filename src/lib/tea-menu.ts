@@ -43,10 +43,11 @@ import {
   nextCupSuggestionSentence,
   formatTeaLabel,
   formatTeaQuickReplyLabel,
-  SITE_URL_JA,
   TEA_SHOP_REFERRAL_LINE,
+  TEA_SHOP_REFERRAL_LINE_OPEN,
 } from "./brand-copy";
 import { teaRecommendCard, preferDirectR2 } from "./flex-templates";
+import { byStore, EC_SITE_OPEN, PURCHASE_URL } from "./storefront";
 
 // ---------------------------------------------------------------------------
 // データモデル
@@ -524,14 +525,16 @@ export function buildRateThanks(tea: TeaItem, origin?: Origin): OutMessage {
 export function buildRateThanksGood(
   tea: TeaItem,
   suggestion: TeaItem | null,
+  siteOpen: boolean = EC_SITE_OPEN,
 ): OutMessage {
   const head = `【${formatTeaLabel(tea)}】\n${NEXT_CUP_GOOD_THANKS}`;
   if (!suggestion) {
     return { text: head, quickReplies: [qr("🍃 別のお茶を見る", BACK_TO_LIST)] };
   }
   // 送客リンク 1 本（Sales S-1）: 「おいしかった」直後の高インテント地点に、次の一杯と併せて静かに添える。
+  // 閉店中は添え文を外す（文言 v2 C-20: 次の一杯のカードのボタンと行き先が二重に出るのを 1 回にする）。
   return {
-    text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}\n\n${TEA_SHOP_REFERRAL_LINE}`,
+    text: `${head}\n\n${nextCupSuggestionSentence(suggestion.name, suggestion.number)}${byStore(`\n\n${TEA_SHOP_REFERRAL_LINE_OPEN}`, "", siteOpen)}`,
     quickReplies: [
       // UX①: 次の一杯ボタンも `番号｜名前` に統一（番号保全 truncate・番号は切らない）。
       qr(formatTeaQuickReplyLabel(suggestion), `${TOK.card}${suggestion.number}`),
@@ -1171,7 +1174,7 @@ export async function handleTeaMenuFlow(
       name: formatTeaLabel(nextCupCard),
       description: nextCupCard.descShort,
       imageUrl: pickTeaImage(imageMap, nextCupCard),
-      productUrl: SITE_URL_JA,
+      productUrl: PURCHASE_URL,
     });
     await responder.flex(om.text, card, om.quickReplies);
     return true;

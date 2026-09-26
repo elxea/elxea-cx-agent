@@ -26,10 +26,15 @@ import {
   LINKAGE_INVITE_BODY,
   NON_SUBSCRIBER_DECLINE_BODY,
   TEA_SHOP_REFERRAL_LINE,
+  TEA_SHOP_REFERRAL_LINE_OPEN,
+  TEA_SHOP_REFERRAL_LINE_CLOSED,
   MARCHE_LINKAGE_SOFT_ACK,
   SITE_URL_JA,
 } from "../../src/lib/brand-copy";
 import { buildTeaCard, buildRateThanksGood, type TeaItem } from "../../src/lib/tea-menu";
+import { diagnosisRecommendCarousel } from "../../src/lib/preference-diagnosis";
+import { TEA_CARD_BUTTON_LABEL_OPEN, TEA_CARD_BUTTON_LABEL_CLOSED } from "../../src/lib/flex-templates";
+import { byStore, PURCHASE_URL } from "../../src/lib/storefront";
 import { upsertCustomerLinkage } from "../../src/lib/customer-linkage";
 import { isMarcheSourceUser } from "../../src/lib/subscriber-linkage";
 import type { Env } from "../../src/index";
@@ -163,18 +168,39 @@ async function run() {
   });
 
   console.log("\n=== ④ 購入導線（送客リンクをカード末尾 / 次の一杯に載せる）===");
-  await it("TEA_SHOP_REFERRAL_LINE: 静かなトーン + 既存 URL 再利用", () => {
+  await it("TEA_SHOP_REFERRAL_LINE: 静かなトーン + 行き先は購入先（開店時は既存 URL・閉店中は Amazon ストア）", () => {
     assert(TEA_SHOP_REFERRAL_LINE.includes("よろしければ"), "よろしければ添え");
-    assert(TEA_SHOP_REFERRAL_LINE.includes(SITE_URL_JA), "既存 URL 再利用");
+    assert(TEA_SHOP_REFERRAL_LINE.includes(PURCHASE_URL), "購入先 URL（storefront.ts）");
+    assert(
+      TEA_SHOP_REFERRAL_LINE === byStore(TEA_SHOP_REFERRAL_LINE_OPEN, TEA_SHOP_REFERRAL_LINE_CLOSED),
+      "開店時 / 閉店中の対から選ぶ",
+    );
+    assert(TEA_SHOP_REFERRAL_LINE_OPEN.includes(SITE_URL_JA), "開店時は既存 URL 再利用（master の文）");
   });
   await it("buildTeaCard: カード末尾に送客リンクが載る", () => {
     assert(buildTeaCard(tea("11301")).text.includes(TEA_SHOP_REFERRAL_LINE), "card 末尾に referral");
   });
-  await it("buildRateThanksGood: 提案ありは送客リンクを載せ、提案なしは載せない", () => {
-    const withSug = buildRateThanksGood(tea("11301"), tea("22202"));
+  await it("buildRateThanksGood: 開店時は提案ありで送客リンクを載せ、閉店中は外す（C-20）。提案なしは載せない", () => {
+    const openSug = buildRateThanksGood(tea("11301"), tea("22202"), true);
+    const closedSug = buildRateThanksGood(tea("11301"), tea("22202"), false);
     const noSug = buildRateThanksGood(tea("11301"), null);
-    assert(withSug.text.includes(TEA_SHOP_REFERRAL_LINE), "提案あり→referral");
+    assert(openSug.text.endsWith(`\n\n${TEA_SHOP_REFERRAL_LINE_OPEN}`), "開店時: 提案あり→referral（master の文）");
+    assert(openSug.text === `${closedSug.text}\n\n${TEA_SHOP_REFERRAL_LINE_OPEN}`, "閉店中は末尾の添え文だけを外す（C-20）");
+    assert(!closedSug.text.includes(TEA_SHOP_REFERRAL_LINE_CLOSED), "閉店中: 閉店中の添え文も付けない（カードのボタンと二重にしない）");
     assert(!noSug.text.includes(TEA_SHOP_REFERRAL_LINE), "提案なし→referral なし（静けさ維持）");
+  });
+  await it("diagnosisRecommendCarousel: ボタンの行き先は購入先、ボタン名は対から選ぶ（C-8）", () => {
+    const c = diagnosisRecommendCarousel([tea("11301"), tea("22202")], new Map()) as {
+      contents: Array<{ footer: { contents: Array<{ action: { uri: string; label: string } }> } }>;
+    };
+    assert(c.contents.length === 2, "2 枚");
+    for (const b of c.contents) {
+      assert(b.footer.contents[0].action.uri === PURCHASE_URL, "行き先 = PURCHASE_URL");
+      assert(
+        b.footer.contents[0].action.label === byStore(TEA_CARD_BUTTON_LABEL_OPEN, TEA_CARD_BUTTON_LABEL_CLOSED),
+        "ボタン名 = 対から選んだもの",
+      );
+    }
   });
 
   console.log("\n============================================================");
