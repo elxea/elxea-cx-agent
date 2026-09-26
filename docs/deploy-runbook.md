@@ -216,7 +216,11 @@ DEV_VARS_PATH=/Users/setaka/github/elxea/products/elxea-cx-agent/.dev.vars pnpm 
 2. master で、戻したいコミットを `git revert` する PR を作り、CI を通す。
 3. Setaka の GO 後に master へマージする。
 4. origin/master から新しい worktree を作り、install / typecheck / test:unit を通してから `pnpm run deploy` する
-   （この節の手順 0・3 と同じ。`DEPLOY_ALLOW_NON_DEFAULT=1` は使わない）。
+   （この節の手順0・3と同じ。`DEPLOY_ALLOW_NON_DEFAULT=1` は使わない）。ただし手順0とは次の2点を変える:
+   - worktreeの場所とブランチ名は、最初のdeployで作ったもの（`../_wt/cx-prod-line-temp-menu` / `deploy/line-temp-menu-YYYYMMDD`）と
+     別の名前にする（例: `../_wt/cx-prod-revert-YYYYMMDD` / `deploy/revert-YYYYMMDD`）。同じ名前が残っていると `git worktree add` が拒否する。
+   - `grep -n 'EC_SITE_OPEN *=' src/lib/storefront.ts` の確認は飛ばす。storefront.tsは今回の変更で足したファイルなので、全部を
+     revertすると無くなり、grepが「No such file」で失敗する。一部だけrevertしてstorefront.tsが残る場合は、今までどおりfalseを確かめる。
 5. `curl -s https://elxea-agent.setaka-on.workers.dev/` で `{"status":"ok",...}` を確かめ、事後確認（LINE API の 401 が 0 件）を行う。
 
 - **通常の deploy は、今の secret をそのまま引き継いだ新しい版を作る**（wrangler 4.71.0 の `wrangler-dist/cli.js` で確認）:
@@ -494,13 +498,9 @@ npx wrangler versions deploy <version-id>@<percent> <current-version-id>@<percen
 
 ### Rollback
 
-```bash
-# Rollback to previous version
-wrangler rollback
-
-# Verify rollback
-curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
-```
+本番Workerの戻し方の正本は「本番に出す手順（正本・仮メニュー3枠・Amazon）」の「戻し方（第一手はメニュー。コードは原則戻さない）」（ここに手順は置かない）。
+- 第一手はメニューを旧6枠に戻すこと。コードを戻すときの標準は、git revertのPR → CI → マージ → origin/masterの新しいworktreeで `pnpm run deploy`。
+- `wrangler rollback` は緊急時だけ。次に通常のdeployをするまで `wrangler secret put` がエラー10215で拒否され、LINEトークンの自動更新も失敗する。wranglerがエラーで勧める方法には従わない。
 
 ## LINE配信の運用（送信条件 / env分離 / テスト配信）
 
