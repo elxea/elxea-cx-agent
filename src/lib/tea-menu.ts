@@ -47,6 +47,7 @@ import {
   TEA_SHOP_REFERRAL_LINE_OPEN,
 } from "./brand-copy";
 import { teaRecommendCard, preferDirectR2 } from "./flex-templates";
+import { fetchProductMainImages } from "./shopify";
 import { byStore, EC_SITE_OPEN, PURCHASE_URL } from "./storefront";
 
 // ---------------------------------------------------------------------------
@@ -766,6 +767,8 @@ interface NotionProp {
   url?: string | null;
   /** relation 型（UX③ Product Catalogue の Tea Menu 用・target = Tea Menu List page id）。 */
   relation?: Array<{ id: string }>;
+  /** number 型（Product Catalogue の Product ID_Shopify が number 型のとき用）。 */
+  number?: number | null;
 }
 interface NotionPage {
   id?: string;
@@ -872,8 +875,8 @@ export function _resetTeaCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Product Catalogue Info DB の fallback ID（UX③・plan で Notion API 実読検証済）。
- * 単品 SKU の商品画像（Image Main_LINE Gift → fallback Image Main_Shopify）を持つ。
+ * Product Catalogue Info DB（= Operations Hub）の fallback ID（UX③・plan で Notion API 実読検証済）。
+ * 単品 SKU ごとに、Shopify の商品 ID（`Product ID_Shopify`）と `Image Main_LINE Gift` を読む。
  */
 const PRODUCT_CATALOGUE_FALLBACK_DB_ID = "58934cb5-228d-448f-b7e6-f8f9f296a538";
 
@@ -884,22 +887,52 @@ const SINGLE_PACK_TAG = "Single Pack";
 let productImageCache: { at: number; map: Map<string, string> } | null = null;
 
 /**
- * Product Catalogue の 1 行（単品 SKU）を「join キー群 → 画像 URL」に写す（純粋）。
+ * 単品 SKU 1 行から読む「写真の材料」（純粋な中間形）。
+ *
+ * 写真の読み先（2026-09-30 Asset hub 段1・配信済みの写真だけを出す）:
+ *   1. Shopify の商品のメイン写真（配信した写真）。`shopifyProductId` で Shopify から引く。
+ *   2. 1 が無いときだけ、Operations Hub の `Image Main_LINE Gift`（`lineGiftUrl`）。
+ *   `Image Main_Shopify` 列は読まない。Asset hub の「入れる」がこの列に書くので、読むと
+ *   配信の合図の前の写真が LINE に出てしまう（入れると配信が分かれない）。
+ */
+export interface ProductPhotoSource {
+  /** join キー: Tea Menu relation の target id（= TeaItem.id）と、SKU の 5 桁番号。 */
+  keys: string[];
+  /** Shopify の商品 ID（数値文字列）。`Product ID_Shopify` が空・不正なら null。 */
+  shopifyProductId: string | null;
+  /** `Image Main_LINE Gift` を preferDirectR2 で正規化した URL。空・非 HTTPS は null。 */
+  lineGiftUrl: string | null;
+}
+
+/** `Product ID_Shopify`（rich_text / number / title / url のどれでも）を数値文字列に正規化する。 */
+function propShopifyProductId(p?: NotionProp): string | null {
+  if (!p) return null;
+  const raw =
+    p.type === "number"
+      ? p.number == null
+        ? ""
+        : String(p.number)
+      : p.type === "title"
+        ? propTitle(p)
+        : p.type === "url"
+          ? propUrl(p)
+          : propRich(p);
+  const id = raw.trim().replace(/^gid:\/\/shopify\/Product\//, "");
+  return /^\d+$/.test(id) ? id : null;
+}
+
+/**
+ * Product Catalogue の 1 行（単品 SKU）を写真の材料に写す（純粋）。
  *
  * - 単品（Tags_Shopify に "Single Pack"）以外は対象外（null）。
- * - 画像は Image Main_LINE Gift を優先、無ければ Image Main_Shopify。preferDirectR2 で正規化。
- *   どちらも無い / 非 HTTPS は null（＝Map に載せず、カード側は画像なし graceful）。
  * - join キー: (1) Tea Menu relation の target id（= Tea Menu List の page id = TeaItem.id）、
  *   (2) SKU タイトルの `TEA-STMS-(\d{5})-` から抽出した 5 桁番号（relation 解決不要の fallback）。
+ *   キーが 1 つも無い行は null。
+ * - 写真の URL が無くても行は返す（Shopify の商品 ID から写真を引くため）。
  */
-function mapProductImagePage(page: NotionPage): { imageUrl: string; keys: string[] } | null {
+export function mapProductPhotoSource(page: NotionPage): ProductPhotoSource | null {
   const pr = page.properties;
   if (!propMulti(pr["Tags_Shopify"]).includes(SINGLE_PACK_TAG)) return null;
-
-  const imageUrl = preferDirectR2(
-    propUrl(pr["Image Main_LINE Gift"]) || propUrl(pr["Image Main_Shopify"]),
-  );
-  if (!imageUrl) return null;
 
   const keys: string[] = [];
   for (const id of propRelation(pr["Tea Menu"])) if (id) keys.push(id);
@@ -910,13 +943,45 @@ function mapProductImagePage(page: NotionPage): { imageUrl: string; keys: string
     .join(" ");
   const m = skuTitle.match(/TEA-STMS-(\d{5})-/);
   if (m) keys.push(m[1]);
+  if (keys.length === 0) return null;
 
-  return keys.length > 0 ? { imageUrl, keys } : null;
+  return {
+    keys,
+    shopifyProductId: propShopifyProductId(pr["Product ID_Shopify"]),
+    lineGiftUrl: preferDirectR2(propUrl(pr["Image Main_LINE Gift"])),
+  };
 }
 
-async function notionQueryProductImages(env: Env): Promise<Map<string, string>> {
+/**
+ * 写真の材料と Shopify の写真から「join キー → 画像 URL」を組む（純粋）。
+ *
+ * キーごとに、どれかの行で Shopify の写真が引ければそれを使い（先に見つかった行が勝つ）、
+ * どの行にも無いときだけ `Image Main_LINE Gift` を使う（同じく先勝ち）。どちらも無いキーは
+ * Map に載せない（＝カード側は写真なし graceful）。
+ *
+ * @param shopifyImages Map<Shopify 商品 ID（数値文字列）, HTTPS 画像 URL>
+ */
+export function buildProductImageMap(
+  sources: ProductPhotoSource[],
+  shopifyImages: Map<string, string>,
+): Map<string, string> {
+  const fromShopify = new Map<string, string>();
+  const fromLineGift = new Map<string, string>();
+  for (const s of sources) {
+    const shop = s.shopifyProductId ? preferDirectR2(shopifyImages.get(s.shopifyProductId)) : null;
+    for (const k of s.keys) {
+      if (shop && !fromShopify.has(k)) fromShopify.set(k, shop);
+      if (s.lineGiftUrl && !fromLineGift.has(k)) fromLineGift.set(k, s.lineGiftUrl);
+    }
+  }
+  const map = new Map<string, string>(fromLineGift);
+  for (const [k, url] of fromShopify) map.set(k, url);
+  return map;
+}
+
+async function notionQueryProductPhotoSources(env: Env): Promise<ProductPhotoSource[]> {
   const dbId = env.NOTION_PRODUCT_CATALOGUE_DB_ID || PRODUCT_CATALOGUE_FALLBACK_DB_ID;
-  const map = new Map<string, string>();
+  const sources: ProductPhotoSource[] = [];
   let cursor: string | undefined;
 
   do {
@@ -943,30 +1008,66 @@ async function notionQueryProductImages(env: Env): Promise<Map<string, string>> 
       next_cursor?: string;
     };
     for (const pg of data.results) {
-      const mapped = mapProductImagePage(pg);
-      if (mapped) for (const k of mapped.keys) if (!map.has(k)) map.set(k, mapped.imageUrl);
+      const mapped = mapProductPhotoSource(pg);
+      if (mapped) sources.push(mapped);
     }
     cursor = data.has_more ? data.next_cursor : undefined;
   } while (cursor);
 
-  return map;
+  return sources;
+}
+
+/** fetchProductImages の依存注入（テストは fake を注入して Notion / Shopify 非接触で検証する）。 */
+export interface ProductImageDeps {
+  /** 単品 SKU の写真の材料を読む。既定は Product Catalogue を読む。 */
+  loadSources?: (env: Env) => Promise<ProductPhotoSource[]>;
+  /** Shopify の商品のメイン写真を読む。既定は fetchProductMainImages（読むだけ）。 */
+  loadShopifyImages?: (productIds: string[], env: Env) => Promise<Map<string, string>>;
 }
 
 /**
  * お茶写真マップ（page id / 5 桁番号 → 正規化 HTTPS 画像 URL）を取得（UX③・TTL キャッシュ）。
- * fetchSellingTeas のミラー。現況は単品 SKU の画像がほぼ null のため空 Map が主（＝画像なし graceful）。
- * Notion 充足に応じて additive に画像が載る（設計はこれ前提）。
+ *
+ * 読み先は ProductPhotoSource の説明のとおり（Shopify の商品のメイン写真 → 無ければ
+ * `Image Main_LINE Gift`。`Image Main_Shopify` は読まない）。
+ *
+ * - Notion の失敗は投げる（呼び出し側が写真なしに倒す・従来どおり）。
+ * - Shopify の失敗（認証未設定・API エラー）は投げずに `Image Main_LINE Gift` だけで組む。
+ *   このときはキャッシュしない（次の呼び出しで Shopify を読み直す）。
  */
 export async function fetchProductImages(
   env: Env,
   forceRefresh = false,
+  deps?: ProductImageDeps,
 ): Promise<Map<string, string>> {
   const now = Date.now();
   if (!forceRefresh && productImageCache && now - productImageCache.at < CACHE_TTL_MS) {
     return productImageCache.map;
   }
-  const map = await notionQueryProductImages(env);
-  productImageCache = { at: now, map };
+  const loadSources = deps?.loadSources ?? notionQueryProductPhotoSources;
+  const loadShopifyImages = deps?.loadShopifyImages ?? fetchProductMainImages;
+
+  const sources = await loadSources(env);
+  const productIds = sources
+    .map((s) => s.shopifyProductId)
+    .filter((id): id is string => !!id);
+
+  let shopifyImages = new Map<string, string>();
+  let shopifyOk = true;
+  if (productIds.length > 0) {
+    try {
+      shopifyImages = await loadShopifyImages(productIds, env);
+    } catch (e) {
+      shopifyOk = false;
+      console.warn(
+        "[tea-menu] Shopify product images fetch failed (fallback to Image Main_LINE Gift):",
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
+  const map = buildProductImageMap(sources, shopifyImages);
+  if (shopifyOk) productImageCache = { at: now, map };
   return map;
 }
 
@@ -995,7 +1096,8 @@ export interface TeaMenuFlowDeps {
   loadKarte?: (lineUserId: string) => Promise<NextCupKarte>;
   /**
    * UX③: お茶写真マップ（page id / 5 桁番号 → 正規化 HTTPS 画像 URL）のローダ。
-   * 既定は Product Catalogue を読む fetchProductImages。ハーメティックテストは fake Map を注入して
+   * 既定は fetchProductImages（Shopify の商品のメイン写真 → 無ければ Image Main_LINE Gift）。
+   * ハーメティックテストは fake Map を注入して
    * Notion 非接触で「写真あり→hero / なし→graceful」を検証する。
    */
   loadProductImages?: () => Promise<Map<string, string>>;
@@ -1096,7 +1198,7 @@ export async function handleTeaMenuFlow(
   //   deps.loadKarte はハーメティックテストの注入シーム（Firestore 非接触）。既定は fail-safe な loadCustomerKarte。
   const supabase = createSupabaseClient(env);
   const loadKarte = deps?.loadKarte ?? ((id: string) => loadCustomerKarte(id, env, supabase));
-  // UX③: 次の一杯カード用の写真ローダ（既定 = Product Catalogue・テストは fake Map 注入）。
+  // UX③: 次の一杯カード用の写真ローダ（既定 = 配信済みの写真・テストは fake Map 注入）。
   const loadProductImages = deps?.loadProductImages ?? (() => fetchProductImages(env));
 
   // 監査 #②-2 出し分け: お茶一覧（entry）だけカルテを読み、好みに近い順へ並べ替える。

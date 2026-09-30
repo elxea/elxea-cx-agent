@@ -815,7 +815,7 @@ export function feedbackCard(params: {
 /**
  * お茶画像 URL を「直 r2.dev」優先に正規化する（UX③・純粋）。
  *
- * Product Catalogue（商品カタログ）の画像 URL は 2 形態が混在する:
+ * お茶写真の URL（Shopify の CDN か、Operations Hub の `Image Main_LINE Gift`）は次の形がありうる:
  *   - wsrv.nl ラップ: `https://wsrv.nl/?url=<r2.dev を urlencode>&w=2000&…`
  *   - 直 r2.dev:      `https://pub-xxxx.r2.dev/cdn/…jpg`
  * LINE Flex の hero は公開到達な HTTPS 画像を要求する。安定性のため wsrv.nl ラップは
@@ -950,7 +950,8 @@ export function teaRecommendCard(params: {
 /**
  * 実写真か（UX②・all-or-nothing 判定の SoT）。
  *
- * 「実写真」= Product Catalogue join（`Image Main_LINE Gift` → fallback `Image Main_Shopify`）を
+ * 「実写真」= 配信済みの写真（Shopify の商品のメイン写真 → 無ければ Operations Hub の
+ * `Image Main_LINE Gift`。`Image Main_Shopify` 列は読まない。tea-menu.ts の fetchProductImages）を
  * preferDirectR2 で解決した HTTPS URL。null / 空 / 非 https は写真なし扱い。
  * placeholder（穴埋め画像）は静か・丁寧のブランド方針で使わないため、判定はあくまで
  * 「実写真 URL が解決できたか」だけを見る。

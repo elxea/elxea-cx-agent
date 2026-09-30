@@ -25,7 +25,15 @@ import {
   teaFlowEvents,
   TEA_LIST_PAGE_SIZE,
   type TeaItem,
+  mapProductPhotoSource,
+  buildProductImageMap,
+  fetchProductImages,
+  _resetProductImageCache,
+  pickTeaImage,
+  type ProductPhotoSource,
 } from "../../src/lib/tea-menu";
+import { fetchProductMainImages } from "../../src/lib/shopify";
+import type { Env } from "../../src/index";
 
 let total = 0,
   passed = 0,
@@ -451,6 +459,228 @@ it("次の一杯ボタン: buildRateThanksGood の提案 label が `番号｜名
   // 本文にも `番号｜名前` の提案文が入る（従来どおり）。
   assert(m.text.includes("40101｜"), "提案文にも番号｜名前");
 });
+
+// ---------------------------------------------------------------------------
+// お茶写真の読み先（2026-09-30 Asset hub 段1: 配信済みの写真だけを出す）
+//   Shopify の商品のメイン写真 → 無ければ Image Main_LINE Gift。Image Main_Shopify は読まない。
+// ---------------------------------------------------------------------------
+
+console.log("\n--- お茶写真の読み先（配信済みの写真だけ: Shopify → LINE ギフト。Image Main_Shopify は読まない） ---");
+const asyncTests: Array<{ name: string; fn: () => Promise<void> }> = [];
+function itAsync(name: string, fn: () => Promise<void>) {
+  asyncTests.push({ name, fn });
+}
+
+/** Product Catalogue の単品 1 行（Notion API の形）。 */
+function catalogueRow(o: {
+  sku: string;
+  single?: boolean;
+  teaMenuId?: string;
+  productId?: string | number | null;
+  productIdType?: "rich_text" | "number";
+  lineGift?: string | null;
+  shopifyCol?: string | null;
+}) {
+  const pid =
+    o.productIdType === "number"
+      ? { type: "number", number: o.productId == null ? null : Number(o.productId) }
+      : {
+          type: "rich_text",
+          rich_text: o.productId == null ? [] : [{ plain_text: String(o.productId) }],
+        };
+  return {
+    id: `row-${o.sku}`,
+    properties: {
+      SKU: { type: "title", title: [{ plain_text: o.sku }] },
+      Tags_Shopify: {
+        type: "multi_select",
+        multi_select: o.single === false ? [{ name: "Set" }] : [{ name: "Single Pack" }],
+      },
+      "Tea Menu": { type: "relation", relation: o.teaMenuId ? [{ id: o.teaMenuId }] : [] },
+      "Product ID_Shopify": pid,
+      "Image Main_LINE Gift": { type: "url", url: o.lineGift ?? null },
+      "Image Main_Shopify": { type: "url", url: o.shopifyCol ?? null },
+    },
+  };
+}
+
+const R2_A = "https://pub-test.r2.dev/cdn/a.jpg";
+const R2_B = "https://pub-test.r2.dev/cdn/b.jpg";
+const R2_ENTERED = "https://pub-test.r2.dev/cdn/entered-not-delivered.jpg";
+const SHOP_1 = "https://cdn.shopify.com/s/files/1/x/files/p1_1200x.jpg?v=1";
+const SHOP_2 = "https://cdn.shopify.com/s/files/1/x/files/p2_1200x.jpg?v=1";
+
+it("写真の材料: 単品行から Product ID_Shopify と LINE ギフトの写真と join キーを読む", () => {
+  const s = mapProductPhotoSource(
+    catalogueRow({
+      sku: "TEA-STMS-10101-FL-01",
+      teaMenuId: "tea-page-10101",
+      productId: "7718802030750",
+      lineGift: `https://wsrv.nl/?url=${encodeURIComponent(R2_A)}&w=2000`,
+      shopifyCol: R2_ENTERED,
+    }) as never,
+  );
+  assert(!!s, "単品行は材料になる");
+  assert(s!.shopifyProductId === "7718802030750", `product id (${s!.shopifyProductId})`);
+  assert(s!.lineGiftUrl === R2_A, `LINE ギフトは wsrv を剥がした直リンク (${s!.lineGiftUrl})`);
+  assert(s!.keys.includes("tea-page-10101") && s!.keys.includes("10101"), "relation id と 5 桁番号");
+  assert(!JSON.stringify(s).includes(R2_ENTERED), "Image Main_Shopify の値は材料に入らない");
+});
+
+it("写真の材料: 単品でない行は対象外 / Product ID が number 型・gid 形式でも読める / 不正は null", () => {
+  assert(mapProductPhotoSource(catalogueRow({ sku: "TEA-STMS-10101-FL-01", single: false }) as never) === null, "単品でない");
+  const n = mapProductPhotoSource(
+    catalogueRow({ sku: "TEA-STMS-10201-FL-01", productId: 7756120424606, productIdType: "number" }) as never,
+  );
+  assert(n?.shopifyProductId === "7756120424606", `number 型 (${n?.shopifyProductId})`);
+  const g = mapProductPhotoSource(
+    catalogueRow({ sku: "TEA-STMS-10301-FL-01", productId: "gid://shopify/Product/7718815105182" }) as never,
+  );
+  assert(g?.shopifyProductId === "7718815105182", `gid 形式 (${g?.shopifyProductId})`);
+  const bad = mapProductPhotoSource(catalogueRow({ sku: "TEA-STMS-10401-FL-01", productId: "abc" }) as never);
+  assert(bad !== null && bad.shopifyProductId === null, "不正な ID は null（行は残す）");
+  assert(mapProductPhotoSource(catalogueRow({ sku: "TEA-STMS-N01-01" }) as never) === null, "join キーが無い行は対象外");
+});
+
+it("読み先: Shopify の写真があればそれを使う（LINE ギフトより優先）", () => {
+  const sources: ProductPhotoSource[] = [
+    { keys: ["tea-a", "10101"], shopifyProductId: "1", lineGiftUrl: R2_A },
+  ];
+  const map = buildProductImageMap(sources, new Map([["1", SHOP_1]]));
+  assert(map.get("tea-a") === SHOP_1 && map.get("10101") === SHOP_1, "Shopify の写真");
+});
+
+it("読み先: Shopify に写真が無いときだけ LINE ギフトの写真 / どちらも無ければ載せない", () => {
+  const sources: ProductPhotoSource[] = [
+    { keys: ["tea-a", "10101"], shopifyProductId: "1", lineGiftUrl: R2_A },
+    { keys: ["tea-b", "10201"], shopifyProductId: "2", lineGiftUrl: null },
+    { keys: ["tea-c", "10301"], shopifyProductId: null, lineGiftUrl: R2_B },
+  ];
+  const map = buildProductImageMap(sources, new Map());
+  assert(map.get("tea-a") === R2_A, "Shopify 無し → LINE ギフト");
+  assert(!map.has("tea-b") && !map.has("10201"), "どちらも無し → 載せない（写真なし）");
+  assert(map.get("10301") === R2_B, "Product ID 無し → LINE ギフト");
+});
+
+it("読み先: 同じお茶の 2 行（FL / TB）は、どちらかの Shopify の写真が LINE ギフトより勝つ", () => {
+  const sources: ProductPhotoSource[] = [
+    { keys: ["tea-a", "10101"], shopifyProductId: null, lineGiftUrl: R2_A },
+    { keys: ["tea-a", "10101"], shopifyProductId: "1", lineGiftUrl: null },
+  ];
+  const map = buildProductImageMap(sources, new Map([["1", SHOP_1]]));
+  assert(map.get("tea-a") === SHOP_1, `2 行目の Shopify が勝つ (${map.get("tea-a")})`);
+});
+
+it("読み先: Image Main_Shopify（入れたが配信していない写真）はカードに出ない", () => {
+  const row = catalogueRow({ sku: "TEA-STMS-50101-FL-01", teaMenuId: "tea-z", productId: "9", shopifyCol: R2_ENTERED });
+  const s = mapProductPhotoSource(row as never)!;
+  const map = buildProductImageMap([s], new Map());
+  const tea = { id: "tea-z", number: "50101" } as TeaItem;
+  assert(pickTeaImage(map, tea) === undefined, "Shopify の列だけに写真がある → 写真なし");
+});
+
+it("読み先（ソース固定）: tea-menu.ts は Image Main_Shopify 列を読まない", () => {
+  const src = readFileSync(new URL("../../src/lib/tea-menu.ts", import.meta.url), "utf8");
+  assert(!/pr\[\s*"Image Main_Shopify"\s*\]/.test(src), "pr[\"Image Main_Shopify\"] を読むコードが無い");
+  assert(/pr\[\s*"Image Main_LINE Gift"\s*\]/.test(src), "LINE ギフトの列は読む");
+});
+
+const FAKE_ENV = {} as unknown as Env;
+
+itAsync("Shopify の写真を読む: 読むだけ（query のみ）・gid を数値に戻す・写真でない先頭は載せない・100 件ごとに分ける", async () => {
+  const queries: string[] = [];
+  const idsSeen: string[][] = [];
+  const ids = Array.from({ length: 150 }, (_, i) => String(1000 + i));
+  const map = await fetchProductMainImages([...ids, "gid://shopify/Product/1000", "x"], FAKE_ENV, {
+    adminQuery: async (q, v) => {
+      queries.push(q);
+      const gids = v.ids as string[];
+      idsSeen.push(gids);
+      return {
+        nodes: gids.map((gid) =>
+          gid.endsWith("/1000")
+            ? { id: gid, featuredMedia: { image: { url: SHOP_1 } } }
+            : gid.endsWith("/1001")
+              ? { id: gid, featuredMedia: {} } // 動画など（MediaImage でない）
+              : gid.endsWith("/1002")
+                ? { id: gid, featuredMedia: null } // 写真なし
+                : null, // 見つからない
+        ),
+      };
+    },
+  });
+  assert(queries.every((q) => /^\s*query\b/.test(q) && !/mutation/i.test(q)), "query だけ");
+  assert(idsSeen.length === 2 && idsSeen[0].length === 100 && idsSeen[1].length === 50, `分割 ${idsSeen.map((x) => x.length)}`);
+  assert(map.size === 1 && map.get("1000") === SHOP_1, `写真は 1000 だけ (${[...map.keys()]})`);
+});
+
+itAsync("Shopify の写真を読む: ID が 0 件なら Shopify を呼ばない", async () => {
+  let called = 0;
+  const map = await fetchProductMainImages(["", "abc"], FAKE_ENV, {
+    adminQuery: async () => {
+      called++;
+      return {};
+    },
+  });
+  assert(called === 0 && map.size === 0, "呼ばない");
+});
+
+itAsync("fetchProductImages: Shopify → LINE ギフトの順で組み、成功時はキャッシュする", async () => {
+  _resetProductImageCache();
+  let shopCalls = 0;
+  const deps = {
+    loadSources: async () => [
+      { keys: ["tea-a"], shopifyProductId: "1", lineGiftUrl: R2_A },
+      { keys: ["tea-b"], shopifyProductId: "2", lineGiftUrl: R2_B },
+    ],
+    loadShopifyImages: async (ids: string[]) => {
+      shopCalls++;
+      assert(ids.join(",") === "1,2", `ID を渡す (${ids})`);
+      return new Map([["1", SHOP_1]]);
+    },
+  };
+  const m1 = await fetchProductImages(FAKE_ENV, false, deps);
+  assert(m1.get("tea-a") === SHOP_1 && m1.get("tea-b") === R2_B, "組み方");
+  await fetchProductImages(FAKE_ENV, false, deps);
+  assert(shopCalls === 1, `2 回目はキャッシュ (${shopCalls})`);
+  _resetProductImageCache();
+});
+
+itAsync("fetchProductImages: Shopify が失敗したら LINE ギフトだけで組み、キャッシュしない", async () => {
+  _resetProductImageCache();
+  let shopCalls = 0;
+  const deps = {
+    loadSources: async () => [
+      { keys: ["tea-a"], shopifyProductId: "1", lineGiftUrl: R2_A },
+      { keys: ["tea-b"], shopifyProductId: "2", lineGiftUrl: null },
+    ],
+    loadShopifyImages: async (): Promise<Map<string, string>> => {
+      shopCalls++;
+      if (shopCalls === 1) throw new Error("Shopify Admin API credentials not configured");
+      return new Map([["2", SHOP_2]]);
+    },
+  };
+  const m1 = await fetchProductImages(FAKE_ENV, false, deps);
+  assert(m1.get("tea-a") === R2_A && !m1.has("tea-b"), "失敗時は LINE ギフトだけ");
+  const m2 = await fetchProductImages(FAKE_ENV, false, deps);
+  assert(shopCalls === 2, `失敗はキャッシュしない (${shopCalls})`);
+  assert(m2.get("tea-b") === SHOP_2, "2 回目は Shopify の写真");
+  _resetProductImageCache();
+});
+
+for (const t of asyncTests) {
+  total++;
+  try {
+    await t.fn();
+    passed++;
+    console.log(`  [PASS] ${t.name}`);
+  } catch (err) {
+    failed++;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`  [FAIL] ${t.name}: ${msg}`);
+    failures.push({ name: t.name, error: msg });
+  }
+}
 
 console.log("\n" + "=".repeat(60));
 console.log("Tea Menu Unit Test Results");

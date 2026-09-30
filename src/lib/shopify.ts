@@ -159,6 +159,91 @@ export async function fetchProductTagsByIds(
 }
 
 // -------------------------------------------------------------------
+// 商品のメイン写真（LINE のお茶メニューのカード用・読むだけ）
+// -------------------------------------------------------------------
+
+/** 1 回の nodes() 問い合わせで引く商品数（Shopify の nodes は最大 250。余裕を持たせる）。 */
+const PRODUCT_IMAGE_CHUNK = 100;
+
+/**
+ * Shopify の商品のメイン写真（featuredMedia = 並び 1 番目の写真）の URL を、商品 ID ごとに引く。
+ *
+ * なぜ（2026-09-30 Asset hub 段1）: LINE のお茶メニューのカードは、配信した写真（Shopify の商品に
+ * 載っている写真）だけを出す。Operations Hub の `Image Main_Shopify` 列は Asset hub の「入れる」が
+ * 書く置き場で、配信の合図の前の写真が入るため読まない。Shopify の商品の写真は配信
+ * （deliver-shopify.mjs / broadcaster の /api/deliver）でしか変わらない。
+ *
+ * - 読むだけ（query のみ。mutation は呼ばない）。商品の公開状態（DRAFT / ACTIVE）では絞らない
+ *   （写真は配信済みかどうかで決まり、公式 EC の開店状態とは別の話のため）。
+ * - URL は Shopify の画像変換で JPEG・最大幅 1200px にしたもの（LINE Flex の hero は JPEG/PNG の
+ *   HTTPS 画像が要るため。元が PNG / WebP でも JPEG で返る）。
+ * - 写真が無い商品・写真でないメディア（動画など）が先頭の商品・見つからない ID は Map に載せない。
+ * - 失敗（認証未設定・API エラー）は投げる。呼び出し側が代わりの読み先に倒す。
+ *
+ * @param productIds 数値 ID か `gid://shopify/Product/<数値>`。重複・不正な値は無視する。
+ * @returns Map<数値商品ID文字列, HTTPS 画像 URL>
+ */
+export async function fetchProductMainImages(
+  productIds: string[],
+  env: Env,
+  deps?: {
+    adminQuery?: (
+      query: string,
+      variables: Record<string, unknown>,
+      env: Env,
+    ) => Promise<Record<string, unknown>>;
+  },
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const adminQuery = deps?.adminQuery ?? shopifyAdminQuery;
+
+  const numericIds = Array.from(
+    new Set(
+      productIds
+        .map((id) => String(id).trim().replace(/^gid:\/\/shopify\/Product\//, ""))
+        .filter((id) => /^\d+$/.test(id)),
+    ),
+  );
+  if (numericIds.length === 0) return result;
+
+  const query = `
+    query productMainImages($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Product {
+          id
+          featuredMedia {
+            ... on MediaImage {
+              image {
+                url(transform: { maxWidth: 1200, preferredContentType: JPG })
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  for (let i = 0; i < numericIds.length; i += PRODUCT_IMAGE_CHUNK) {
+    const gids = numericIds
+      .slice(i, i + PRODUCT_IMAGE_CHUNK)
+      .map((id) => `gid://shopify/Product/${id}`);
+    const data = await adminQuery(query, { ids: gids }, env);
+    const nodes = (data.nodes ?? []) as Array<{
+      id?: string;
+      featuredMedia?: { image?: { url?: string | null } | null } | null;
+    } | null>;
+    for (const node of nodes) {
+      if (!node?.id) continue;
+      const url = (node.featuredMedia?.image?.url ?? "").trim();
+      if (!url.startsWith("https://")) continue;
+      result.set(node.id.replace(/^gid:\/\/shopify\/Product\//, ""), url);
+    }
+  }
+
+  return result;
+}
+
+// -------------------------------------------------------------------
 // 顧客注文照会（lookup_my_orders）
 // -------------------------------------------------------------------
 
