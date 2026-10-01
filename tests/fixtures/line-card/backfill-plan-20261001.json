@@ -1,0 +1,340 @@
+{
+  "schema": "line-card-backfill/v1",
+  "org": "ELX",
+  "column": "Image Main_LINE Card",
+  "created_at": "2026-10-01T09:54:15.495Z",
+  "mode": "dry-run",
+  "records": [
+    {
+      "pageId": "TEA-STMS-10101-FL-01",
+      "sku": "TEA-STMS-10101-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10101-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10101-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10101-TB-01",
+      "sku": "TEA-STMS-10101-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10101-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10101-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10201-FL-01",
+      "sku": "TEA-STMS-10201-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10201-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10201-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10201-TB-01",
+      "sku": "TEA-STMS-10201-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10201-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10201-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10301-FL-01",
+      "sku": "TEA-STMS-10301-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10301-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10301-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10301-TB-01",
+      "sku": "TEA-STMS-10301-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10301-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10301-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10401-FL-01",
+      "sku": "TEA-STMS-10401-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10401-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10401-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10401-TB-01",
+      "sku": "TEA-STMS-10401-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10401-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10401-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10501-FL-01",
+      "sku": "TEA-STMS-10501-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10501-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10501-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10501-TB-01",
+      "sku": "TEA-STMS-10501-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10501-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10501-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10601-FL-01",
+      "sku": "TEA-STMS-10601-FL-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10601-FL-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10601-FL-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    },
+    {
+      "pageId": "TEA-STMS-10601-TB-01",
+      "sku": "TEA-STMS-10601-TB-01",
+      "before": {
+        "lineCardMain": null
+      },
+      "source": {
+        "url": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+        "sha256": "0f54f63cafd4f6daba30ce80d4acbdc1d8b40c0ebb22fcdb6aef6e3bf8c53289",
+        "contentType": "image/jpeg",
+        "size": 107557
+      },
+      "shopifyMainAtCopy": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_10101.jpg?v=1767896515",
+      "copy": {
+        "key": "cdn/products/TEA-STMS-10601-TB-01/main_linecard.v-0f54f63cafd4.jpg",
+        "url": "https://pub-90a0485599904fee8228ef56bb51c2e6.r2.dev/cdn/products/TEA-STMS-10601-TB-01/main_linecard.v-0f54f63cafd4.jpg"
+      }
+    }
+  ],
+  "keep": [],
+  "failed": [
+    {
+      "pageId": "TEA-STMS-40101-FL-01",
+      "sku": "TEA-STMS-40101-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-40101-TB-01",
+      "sku": "TEA-STMS-40101-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-40201-FL-01",
+      "sku": "TEA-STMS-40201-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-40201-TB-01",
+      "sku": "TEA-STMS-40201-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-40301-FL-01",
+      "sku": "TEA-STMS-40301-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-40301-TB-01",
+      "sku": "TEA-STMS-40301-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_40101.jpg?v=1767896515"
+    },
+    {
+      "pageId": "TEA-STMS-50101-FL-01",
+      "sku": "TEA-STMS-50101-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50101.jpg?v=1767896482"
+    },
+    {
+      "pageId": "TEA-STMS-50101-TB-01",
+      "sku": "TEA-STMS-50101-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50101.jpg?v=1767896482"
+    },
+    {
+      "pageId": "TEA-STMS-50201-FL-01",
+      "sku": "TEA-STMS-50201-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50101.jpg?v=1767896482"
+    },
+    {
+      "pageId": "TEA-STMS-50201-TB-01",
+      "sku": "TEA-STMS-50201-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50101.jpg?v=1767896482"
+    },
+    {
+      "pageId": "TEA-STMS-50301-FL-01",
+      "sku": "TEA-STMS-50301-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50301.jpg?v=1767895591"
+    },
+    {
+      "pageId": "TEA-STMS-50301-TB-01",
+      "sku": "TEA-STMS-50301-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/files/tea-leaves_top_50301.jpg?v=1767895591"
+    },
+    {
+      "pageId": "TEA-STMS-N01-FL-01",
+      "sku": "TEA-STMS-N01-FL-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/products/product-images_tea-01_pack_01_9e7c1dbf-3aec-4b68-bdec-a60e969b297b.jpg?v=1642050591"
+    },
+    {
+      "pageId": "TEA-STMS-N01-TB-01",
+      "sku": "TEA-STMS-N01-TB-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/products/product-images_tea-01_pack_01_9e7c1dbf-3aec-4b68-bdec-a60e969b297b.jpg?v=1642050591"
+    },
+    {
+      "pageId": "TEA-STMS-N02-01",
+      "sku": "TEA-STMS-N02-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/products/product-images_tea-02_pack_01.jpg?v=1641845270"
+    },
+    {
+      "pageId": "TEA-STMS-N03-01",
+      "sku": "TEA-STMS-N03-01",
+      "kind": "source_missing",
+      "error": "元の写真が 404",
+      "sourceUrl": "https://cdn.shopify.com/s/files/1/0532/4226/5758/products/product-images_tea-03_pack_01.jpg?v=1641845309"
+    }
+  ]
+}

@@ -950,7 +950,7 @@ export function teaRecommendCard(params: {
 /**
  * 実写真か（UX②・all-or-nothing 判定の SoT）。
  *
- * 「実写真」= Product Catalogue join（`Image Main_LINE Gift` → fallback `Image Main_Shopify`）を
+ * 「実写真」= Product Catalogue join（`Image Main_LINE Card` だけ。予備の列は読まない）を
  * preferDirectR2 で解決した HTTPS URL。null / 空 / 非 https は写真なし扱い。
  * placeholder（穴埋め画像）は静か・丁寧のブランド方針で使わないため、判定はあくまで
  * 「実写真 URL が解決できたか」だけを見る。

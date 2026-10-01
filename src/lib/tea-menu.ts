@@ -873,12 +873,15 @@ export function _resetTeaCache(): void {
 
 /**
  * Product Catalogue Info DB の fallback ID（UX③・plan で Notion API 実読検証済）。
- * 単品 SKU の商品画像（Image Main_LINE Gift → fallback Image Main_Shopify）を持つ。
+ * 単品 SKU の LINE のカードの写真（`Image Main_LINE Card`。Asset hub の配信先 linecard だけが書く）を持つ。
  */
 const PRODUCT_CATALOGUE_FALLBACK_DB_ID = "58934cb5-228d-448f-b7e6-f8f9f296a538";
 
 /** Product Catalogue の単品判定タグ（Tags_Shopify に含まれる）。 */
 const SINGLE_PACK_TAG = "Single Pack";
+
+/** LINE のカードの写真の列 (Operations Hub)。Asset hub の配信先 linecard が書く。 */
+export const LINE_CARD_IMAGE_FIELD = "Image Main_LINE Card";
 
 /** お茶 page id / 5 桁番号 → 正規化済み画像 URL のキャッシュ（fetchSellingTeas と同型・TTL 10 分）。 */
 let productImageCache: { at: number; map: Map<string, string> } | null = null;
@@ -887,18 +890,17 @@ let productImageCache: { at: number; map: Map<string, string> } | null = null;
  * Product Catalogue の 1 行（単品 SKU）を「join キー群 → 画像 URL」に写す（純粋）。
  *
  * - 単品（Tags_Shopify に "Single Pack"）以外は対象外（null）。
- * - 画像は Image Main_LINE Gift を優先、無ければ Image Main_Shopify。preferDirectR2 で正規化。
- *   どちらも無い / 非 HTTPS は null（＝Map に載せず、カード側は画像なし graceful）。
+ * - 画像は `Image Main_LINE Card` だけを読む（Shopify・LINE ギフトの列は予備に読まない。
+ *   「Shopify だけ」に配信しても LINE のカードが変わらないように）。preferDirectR2 で正規化。
+ *   空 / 非 HTTPS は null（＝Map に載せず、カード側は画像なし graceful）。
  * - join キー: (1) Tea Menu relation の target id（= Tea Menu List の page id = TeaItem.id）、
  *   (2) SKU タイトルの `TEA-STMS-(\d{5})-` から抽出した 5 桁番号（relation 解決不要の fallback）。
  */
-function mapProductImagePage(page: NotionPage): { imageUrl: string; keys: string[] } | null {
+export function mapProductImagePage(page: NotionPage): { imageUrl: string; keys: string[] } | null {
   const pr = page.properties;
   if (!propMulti(pr["Tags_Shopify"]).includes(SINGLE_PACK_TAG)) return null;
 
-  const imageUrl = preferDirectR2(
-    propUrl(pr["Image Main_LINE Gift"]) || propUrl(pr["Image Main_Shopify"]),
-  );
+  const imageUrl = preferDirectR2(propUrl(pr[LINE_CARD_IMAGE_FIELD]));
   if (!imageUrl) return null;
 
   const keys: string[] = [];
