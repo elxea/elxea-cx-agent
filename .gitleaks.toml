@@ -63,6 +63,11 @@ paths = ["package-lock\\.json", ".*\\.lock"]
 # --- 除外設定 ---
 
 [allowlist]
+# 中身の指紋 (sha256 の16進64文字) を "sha256" の鍵で持つ JSON の行だけを除く。
+# together-api-key のルールが 64 文字の16進を鍵と誤検知するため (tests/fixtures/line-card の予行の出力)。
+# 行全体で照らすので、"sha256" 以外の鍵の値・ほかの形は今までどおり検知する。
+regexTarget = "line"
+regexes = ['''^\s*"sha256": "[0-9a-f]{64}",?\s*$''']
 paths = [
   "(^|/)\\.env$",
   "(^|/)\\.env\\..+$",
