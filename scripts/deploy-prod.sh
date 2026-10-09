@@ -90,7 +90,7 @@ readonly REQUIRED_SECRETS=(
   SHOPIFY_STORE_DOMAIN
   SHOPIFY_ADMIN_ACCESS_TOKEN
   SYNC_API_SECRET
-  SLACK_WEBHOOK_URL
+  # SLACK_WEBHOOK_URL は必須ではない (2026-10-09 に本番から外した。Slack の知らせは使わない。コードは無ければ飛ばす)
 )
 
 log()  { printf '\n\033[1m[deploy-prod] %s\033[0m\n' "$*"; }

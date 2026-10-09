@@ -45,7 +45,7 @@ pnpm typecheck        # TypeScript 型チェック
 LINE Webhook → Hono → Claude API (tool_use) → LINE Push
                          ↕
                    search_knowledge → pgvector (Notion 由来)
-                   escalate_to_human → Slack
+                   escalate_to_human → お客さまへの案内だけ (Slackの知らせは2026-10-09に外した)
 
 Mac側の見張り役 (5分ごと) → 送信パイプライン → POST /api/delivery/send-one (1件指定) → LINE broadcast/multicast
 ```
