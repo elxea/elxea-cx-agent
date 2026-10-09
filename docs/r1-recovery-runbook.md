@@ -188,7 +188,7 @@ SELECT source_type, count(*) FROM knowledge_chunks GROUP BY source_type ORDER BY
 ```
 
 - Notion 側の Ready/Published 記事数（Content Hub の Channel=Roji/LINE CRM かつ Status=Ready/Published）と `source_type='article'`/`'crm'` の対応を突合する。1 記事が複数チャンクに分割される（`splitIntoChunks`）ため、**件数は「記事数 ≤ チャンク数」で一致検証する**（記事 0 件の source_type が無いこと、凍結時の 357 件から更新されていることを確認）。
-- 失敗時（status != success）は Slack に「ナレッジ同期失敗」が届く。届いた内容の error_details を見て原因を特定する。
+- 失敗時（status != success）は `sync_logs` のその回の行のerror_details（または `wrangler tail` のログ）を見て原因を特定する。Slackへの「ナレッジ同期失敗」の知らせは2026-10-09にやめた（届かない）。
 
 ### 補足
 
