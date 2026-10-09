@@ -93,7 +93,7 @@ Notion からナレッジをエージェントに同期します。通常は lau
 | `SHOPIFY_ADMIN_ACCESS_TOKEN` | Workers Secrets | Yes | Shopify Admin API トークン |
 | `LIFF_ID` | Workers Secrets | Yes | LINE LIFF アプリ ID |
 | `SYNC_API_SECRET` | Workers Secrets | Yes | /api/sync 認証トークン |
-| `SLACK_WEBHOOK_URL` | Workers Secrets | No | Slack エスカレーション通知 |
+| `SLACK_WEBHOOK_URL` | (置かない) | No | 使っていない。2026-10-09に本番から外した (Slackの知らせは使わない)。コードは無ければ知らせを飛ばす |
 | `NOTION_TOKEN` | Workers Secrets | No | Notion API トークン（ナレッジ同期） |
 
 ### elxea-web-app (Vercel)

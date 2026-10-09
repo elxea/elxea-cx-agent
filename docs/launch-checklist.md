@@ -55,10 +55,10 @@ pnpm test:e2e:web:validation
 
 ### エスカレーション
 
-- [ ] エスカレーション -> Slack 通知が飛ぶ
+- [ ] エスカレーション -> お客さまへの案内が返る
   - テストメッセージ: 「人間のスタッフに繋いでください」
-  - 確認: Slack の指定チャンネルに通知が届く
-  - 確認: 通知にユーザーID、カテゴリ、理由、会話要約が含まれる
+  - 確認: エージェントが引き継ぎの案内を返す
+  - Slackへの知らせは無い (2026-10-09に本番の秘密 `SLACK_WEBHOOK_URL` を外した。コードは秘密が無ければ知らせを飛ばす)
 
 ### ナレッジベース
 
@@ -85,7 +85,6 @@ pnpm test:e2e:web:validation
   - SHOPIFY_STORE_DOMAIN
   - SHOPIFY_ADMIN_ACCESS_TOKEN
   - SYNC_API_SECRET
-  - SLACK_WEBHOOK_URL
 
 ## 判定
 

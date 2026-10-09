@@ -13,7 +13,8 @@
  *   npx tsx scripts/knowledge-regression.ts --dry-run   # No Slack notifications
  *
  * Environment (.dev.vars):
- *   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SLACK_WEBHOOK_URL
+ *   ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+ *   (SLACK_WEBHOOK_URL は置かない。2026-10-09 に Slack の知らせをやめた。無ければ知らせを飛ばす)
  */
 
 import dotenv from "dotenv";

@@ -124,8 +124,8 @@ WHERE schemaname = 'public'
 pnpm exec wrangler deploy --env staging
 
 # 2. staging で失敗系を実証（Spec FIX-2 完了条件）
-#    - preflight: staging DB で sync_logs を一時的に不在にして POST /api/sync → エラー終了 + Slack 通知を確認
-#    - 通知: SLACK_WEBHOOK_URL（staging 用）に「ナレッジ同期失敗」が届くことを確認
+#    - preflight: staging DBでsync_logsを一時的に不在にしてPOST /api/sync → エラー終了をログで確認
+#      (Slackへの知らせは2026-10-09にやめた。SLACK_WEBHOOK_URLは置かない)
 # 3. 既存 unit test green を確認
 pnpm test:unit
 # 4. Setaka 承認（Tier 2）後に本番へ

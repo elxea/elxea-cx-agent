@@ -470,7 +470,7 @@ curl -s https://elxea-agent.setaka-on.workers.dev/ | jq .
 # - Open https://www.elxea.com
 # - Send a message via ChatBar
 # - Verify SSE streaming response
-# - Check Slack for any error alerts
+# - Check `wrangler tail elxea-agent` for errors (Slackへの知らせは2026-10-09に外した)
 ```
 
 ### 段階昇格するとき（version を作ってから少しずつ載せる）
@@ -1285,7 +1285,7 @@ CONFIRM=DEPLOY-PROD MIGRATE_ONLY=NONE SUPABASE_DB_PASSWORD=*** ./scripts/deploy-
 
 ## Monitoring Post-Deploy
 
-- Check Slack #alerts channel for error notifications
+- Check `wrangler tail elxea-agent` for errors (Slackへの知らせは2026-10-09に外した)
 - Monitor Cloudflare Workers dashboard for error rate
 - Check `/api/alerts/status` endpoint (requires SYNC_API_SECRET)
 - Verify Notion Alerts DB for new entries

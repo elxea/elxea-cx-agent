@@ -149,7 +149,7 @@ DROP TABLE IF EXISTS unanswered_queries;
 
 ## 4. 緊急時のフロー
 
-1. **問題検知**: Slack アラート / ユーザー報告 / ヘルスチェック失敗
+1. **問題検知**: ユーザー報告 / ヘルスチェック失敗 / `wrangler tail` のエラー (Slackへの知らせは2026-10-09に外した)
 2. **影響範囲の特定**: どのコンポーネントに問題があるか
    - cx-agent（AI応答が壊れている） -> Worker をロールバック
    - web-app（UIが壊れている） -> Vercel をロールバック
