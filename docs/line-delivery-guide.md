@@ -340,7 +340,8 @@ LINE_RESERVATION_ID="<予約ID>" \
 
 - 承認1点化の決定記録: <https://app.notion.com/p/3e170c9d064c81fc8ff9f69e8c467a2d>
 - 承認方式の決定記録（判定タスクを直接「承認」にする）: <https://app.notion.com/p/3e370c9d064c812c9ac8e4b2679ea906>
-- 新運用のプラン（設計の正本）: <https://app.notion.com/p/3e370c9d064c81c9bea7d8db2e5ccb96>
+- 新運用を承認したときの記録（LINE配信の計画v6.5・Archived。今の動きの正本はコードと設定、Setakaの決定はDecision Log）: <https://app.notion.com/p/3e370c9d064c81c9bea7d8db2e5ccb96>
+- Setakaの決定（LINE配信の前提・2026-09-22〜23）: <https://app.notion.com/p/40470c9d064c81d8a57df103c8b6d4e6>
 - スタッフ向け運用ハンドブック（第6章）: <https://app.notion.com/p/39c70c9d064c8150b7aee298ce518709>
 
 _※このガイドは運用者向けです。仕組みの詳細（画像の保管先・安全のしくみなど）は開発ドキュメントを参照してください。_

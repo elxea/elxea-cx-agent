@@ -54,15 +54,16 @@ Cron (*/15) → delivery-orchestrator → Notion「配信コンテンツ」DB �
 
 ## LINE 配信サブシステム（触る前に必ずドキュメントを読む）
 
-対話とは別に、Notion の「配信コンテンツ」DB を運用者インターフェースとする**一斉配信**の仕組みを持つ。
-実装は `src/lib/delivery-*.ts`（orchestrator / repository / approval / audience / channel / runtime / time）、
-Cron トリガー `*/15 * * * *` が承認済み行を拾って送信する。
+対話とは別に、Notionの「配信コンテンツ」DBを運用者インターフェースとする**一斉配信**の配信本体を持つ。
+実装は `src/lib/delivery-*.ts`。送るのは1件だけ送る口（`POST /api/delivery/send-one`）だけで、それを起こすのはMacの配信の流れ（下の正本）。
+配信のCronは持たない（`tests/unit/cron-routing.test.ts` が `wrangler.toml` のcronsを見る）。
 
-**正本 2 点（この節には詳細も現在値も書かない・二重管理を避ける。エージェント側の入口は `line-delivery-ops` skill = `~/github/elxea/agents/_shared/skills/line-delivery-ops/SKILL.md`）**:
-- 運用者向け手順: `docs/line-delivery-guide.md`（運用者が読む正本は Notion 版 <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>。**配信コードを変えたら両方を同時に直す**）
-- エンジニア向けコマンドの正本: `docs/deploy-runbook.md`「**LINE 配信の運用ゲート**」節 — 送信スイッチ・自己承認フラグ・配信 DB の env 分離について、**現在の値と判定方法はこの節が唯一の正本**（他所に書き写さない）
+**正本と案内（この節には詳細も現在値も書かない・二重管理を避ける。分け方の正本はエージェント側の入口 `line-delivery-ops` skill = `~/github/elxea/agents/_shared/skills/line-delivery-ops/SKILL.md` の「正本と案内」）**:
+- 動き・止める条件の正本: コードと設定（このリポの `src/lib/delivery-*.ts` と、Macの配信の流れ `~/.config/admin-pipeline/pipelines.json` の `elxea-line-*-delivery-*`・`scripts/line_delivery_*.py`）
+- 使い方の案内: Notion版の運用者ガイド <https://app.notion.com/p/39970c9d064c81dabf04f65c073d667c>（リポジトリ側の写し `docs/line-delivery-guide.md` との関係は、ガイドの「参照元」が持つ。**配信コードを変えたら両方を同時に直す**）
+- Worker側の設定の説明: `docs/deploy-runbook.md`「LINE配信の運用（送信条件 / env分離 / テスト配信）」節（secret・配信DBのenv分離・検証環境の設定）。止める・再開するは、この節ではなく運用者ガイドと実物で引く
 
-**env 取り違え = 実顧客への誤配信。** 本番と検証は Worker / LINE OA / 配信 DB がすべて別。検証時のコマンドは **`--env staging` 必須**（付け忘れは本番操作）。**本番 Worker に `NOTION_DELIVERY_DB_ID` を設定してはならない**（テスト用 DB の行が実顧客へ飛ぶ経路が生まれる。env 分離は `resolveDeliveryDbId()` で fail-closed）。安全弁は勝手に弱めない。送信スイッチの ON/OFF・本番配信は **Tier 2（Setaka 承認）**。
+**env 取り違え = 実顧客への誤配信。** 本番と検証は Worker / LINE OA / 配信 DB がすべて別。検証時のコマンドは **`--env staging` 必須**（付け忘れは本番操作）。**本番 Worker に `NOTION_DELIVERY_DB_ID` を設定してはならない**（テスト用 DB の行が実顧客へ飛ぶ経路が生まれる。env 分離は `resolveDeliveryDbId()` で fail-closed）。安全弁は勝手に弱めない。LINE配信を止める・再開する（緊急停止のファイルを置く・外す。ファイルの場所は `~/.config/admin-pipeline/pipelines.json` のLINE送信の段の `kill_switch_path`、判定は `~/.config/admin-pipeline/scripts/line_delivery_lib.py` の `gate_status`）と本番配信の可否は **Tier 2（Setaka承認）**。
 
 ## 制約
 
