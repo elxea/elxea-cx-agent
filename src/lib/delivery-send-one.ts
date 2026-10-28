@@ -14,6 +14,7 @@
  *   b. All Tasks 判定行で承認を確認（判定=承認 / 最終編集者=owner。メール解決の一時失敗は保留）
  *   c. 指紋照合（本文・画像・配信対象。旧形式=配信対象を含まない pin は受け付けない）
  *   d. 対象人数（承認時比 +10% 超は停止・N-12）と台帳残枠（実効 190）を確認
+ *      （上限付きの全員配信 = narrowcast だけは、残枠を超える分を減らして送る。下の (d) の注記）
  *   e. claim-before-send（原子的に「送信中」を取る。二重は 409・同一予約は冪等・N-06 / N-07）
  *   f. 送信（X-Line-Retry-Key 必須。同一実行内で最大 2 回まで再試行・E-02 / N-08）
  *   g. 成功応答を確認してのみ Sent。失敗は Failed と理由（Sent と誤記録しない・N-15）
@@ -24,6 +25,8 @@
 
 import {
   parseAudience,
+  parseRecipientCap,
+  applyRecipientCap,
   audienceLabel,
   audienceFingerprintKey,
   type AudienceSpec,
@@ -68,6 +71,12 @@ export interface SendOneRequest {
   approvalRef: ApprovalRef;
   /** 予約 ID。冪等キー兼 X-Line-Retry-Key の種。 */
   reservationId: string;
+  /**
+   * 上限付きの全員配信の上限（2026-10-29）。Mac 側が承認の時に固めた値を予約記録から渡す。
+   * 未指定は従来どおり（上限なし）。指定時は配信対象が「全員」でなければ送らない。
+   * 指紋に上限が入るので、承認した上限と違う値で来たら fingerprint_mismatch で止まる。
+   */
+  recipientCap?: number;
 }
 
 /** 応答の種別。 */
@@ -84,6 +93,7 @@ export type SendOneCode =
   | "row_already_sent"
   | "row_sending"
   | "audience_unknown"
+  | "recipient_cap_invalid"
   | "message_invalid"
   | "fingerprint_missing"
   | "fingerprint_mismatch"
@@ -270,6 +280,8 @@ export function validateSendOneRequest(req: SendOneRequest): string | null {
   ) {
     return "approvalRef.approvedAudienceCount は 1 以上の数値が必須";
   }
+  const cap = parseRecipientCap(req?.recipientCap);
+  if (!cap.ok) return cap.reason;
   return null;
 }
 
@@ -407,12 +419,24 @@ export async function sendOneDelivery(
   }
 
   // (c) 配信対象の解釈（空・未知は fail-closed）。
-  const audience: AudienceSpec | null = parseAudience(page.audienceRaw);
-  if (!audience) {
+  const parsedAudience: AudienceSpec | null = parseAudience(page.audienceRaw);
+  if (!parsedAudience) {
     const reason = "配信対象が空/未知（fail-closed）";
     await deps.repo.writeError(req.pageId, reason).catch(() => {});
     return reject("audience_unknown", reason, reservationId);
   }
+  // (c-0) 上限付きの全員配信（2026-10-29）。上限は「全員」にだけ付けられる。区分・社内に上限が
+  //   付いて来たら送らない（区分を無作為に削らない）。上限なしの要求は配信対象をそのまま使う。
+  const recipientCapParsed = parseRecipientCap(req.recipientCap);
+  const capped = recipientCapParsed.ok
+    ? applyRecipientCap(parsedAudience, recipientCapParsed.cap)
+    : recipientCapParsed;
+  if (!capped.ok) {
+    const reason = `上限付きの配信として受け付けない: ${capped.reason}`;
+    await deps.repo.writeError(req.pageId, reason).catch(() => {});
+    return reject("recipient_cap_invalid", reason, reservationId);
+  }
+  const audience: AudienceSpec = capped.spec;
   if (page.format !== "text" && page.format !== "image") {
     const reason = "形式が未設定/未知";
     await deps.repo.writeError(req.pageId, reason).catch(() => {});
@@ -510,7 +534,24 @@ export async function sendOneDelivery(
     confirmed,
     snapshot.totalUsage,
   );
-  if (audienceCount < 1 || audienceCount > ledgerRemaining) {
+  // 送る数。上限なしの回は対象人数そのもので、残りを超えたら 1 通も送らない（全部か無しか・従来どおり）。
+  // 上限付き（narrowcast）の回だけ「承認した上限・送る時点の台帳の残り・友だち数」のいちばん小さい数に
+  //   減らして送る（増やす向きには動かない。上限は指紋で固定済み）。台帳の残りは安全の余り
+  //   (headroom) を引いた数なので、LINE に渡す limit.max もこの数にする（LINE 側の upToRemainingQuota
+  //   だけに任せると余りまで使い切る）。残りが 1 通も無ければ送らない。
+  let sendCount = audienceCount;
+  if (targets.kind === "narrowcast") {
+    sendCount = Math.min(targets.maxRecipients, ledgerRemaining);
+    if (!Number.isSafeInteger(sendCount) || sendCount < 1) {
+      const reason =
+        `無料枠の残りが無い（上限付き: 上限 ${targets.maxRecipients} 人 / 残枠 ${ledgerRemaining} 通・実効上限 ${cap - headroom}）`;
+      await deps.repo.writeError(req.pageId, reason).catch(() => {});
+      return reject("ledger_exhausted", reason, reservationId, {
+        audienceCount,
+        ledgerRemaining,
+      });
+    }
+  } else if (audienceCount < 1 || audienceCount > ledgerRemaining) {
     const reason =
       `無料枠の残りが足りない（対象 ${audienceCount} 通 / 残枠 ${ledgerRemaining} 通・実効上限 ${cap - headroom}）`;
     await deps.repo.writeError(req.pageId, reason).catch(() => {});
@@ -532,7 +573,8 @@ export async function sendOneDelivery(
       pageId: req.pageId,
       month,
       reservationId: req.reservationId,
-      recipients: audienceCount,
+      // 台帳に押さえる数 = 実際に LINE に頼む数（上限付きは減らした後の数）。
+      recipients: sendCount,
       aggregationUnit,
     });
   } catch (err) {
@@ -594,7 +636,7 @@ export async function sendOneDelivery(
   const maxAttempts = Math.max(1, deps.maxSendAttempts ?? DEFAULT_MAX_SEND_ATTEMPTS);
   const retryKey = await deterministicRetryKey(req.reservationId);
 
-  let outcome = await attemptSend(deps, targets, messages, audienceCount, aggregationUnit, retryKey);
+  let outcome = await attemptSend(deps, targets, messages, sendCount, aggregationUnit, retryKey);
   let attempts = 1;
   while (!outcome.ok && outcome.deliveredRecipients === 0 && attempts < maxAttempts) {
     attempts += 1;
@@ -602,7 +644,7 @@ export async function sendOneDelivery(
       deps,
       targets,
       messages,
-      audienceCount,
+      sendCount,
       aggregationUnit,
       retryKey,
     );
@@ -677,10 +719,16 @@ export async function sendOneDelivery(
     .catch(() => {});
 
   const status = outcome.partial ? "PartialFail" : "Sent";
+  // 上限付き（narrowcast）は「LINE に頼んだ上限」しか分からない（誰に・何人届いたかは LINE が
+  //   後で数える）。実送信と書かず、友だち数と上限を並べる。実数は後追いの補正で台帳を直す。
+  const summary =
+    targets.kind === "narrowcast"
+      ? `${status}（${audienceLabel(audience)}・LINE が友だち ${targets.friendCount} 人から無作為に最大 ${delivered} 人を選ぶ）`
+      : `${status}（${audienceLabel(audience)}・実送信 ${delivered}/${audienceCount}）`;
   await deps.repo.writeResult(req.pageId, {
     status,
     sentAtUtc,
-    summary: `${status}（${audienceLabel(audience)}・実送信 ${delivered}/${audienceCount}）`,
+    summary,
     consumed: delivered,
     errorDetail: outcome.partial ? outcome.error : undefined,
   });
@@ -738,6 +786,19 @@ async function attemptSend(
   }
   if (targets.kind === "multicast") {
     return deps.sender.multicast(targets.batches, messages, aggregationUnit, retryKey);
+  }
+  if (targets.kind === "narrowcast") {
+    // 上限付きの全員配信。audienceCount にはここでは「送る数」（上限・台帳の残り・友だち数の最小）
+    //   が渡る。narrowcast を持たない sender では送らない（fail-closed・黙って broadcast に落とさない）。
+    if (!deps.sender.narrowcast) {
+      return {
+        ok: false,
+        deliveredRecipients: 0,
+        partial: false,
+        error: "この送信ポートは narrowcast を持たない（上限付きの配信は送らない・fail-closed）",
+      };
+    }
+    return deps.sender.narrowcast(messages, audienceCount, retryKey);
   }
   return {
     ok: false,

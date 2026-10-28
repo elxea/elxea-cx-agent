@@ -122,6 +122,7 @@ import {
   audienceFingerprintKey,
   audienceLabel,
   parseAudience,
+  applyRecipientCap,
   type AudienceSpec,
 } from "./delivery-audience";
 
@@ -530,10 +531,12 @@ function deliveryDbPreflight(env: Env): DeliveryApproveResult | null {
 export async function pinDeliveryApproval(
   env: Env,
   pageId: string,
+  /** 上限付きの全員配信の上限（任意・2026-10-29）。検証は pinDeliveryContent が行う。 */
+  recipientCap?: number,
 ): Promise<DeliveryApproveResult> {
   const preflight = deliveryDbPreflight(env);
   if (preflight) return preflight;
-  const res = await pinDeliveryContent(buildApproveDeps(env), { pageId });
+  const res = await pinDeliveryContent(buildApproveDeps(env), { pageId, recipientCap });
   console.log(
     `[delivery] pin page=${pageId} ok=${res.ok} code=${res.code}` +
       (res.ok ? ` audience=${res.approvedAudienceCount}` : ""),
@@ -813,6 +816,13 @@ export interface DeliveryLedgerQueryResult {
   audience: string | null;
   /** 送信先 OA の env（どちらの残枠を見たかの確認点）。 */
   targetEnv: "prod" | "test";
+  /**
+   * 上限付きの全員配信（2026-10-29）で要求された上限。上限なしの照会では出さない。
+   * このとき audienceCount は min(上限, 友だち数)（台帳の残りでは減らさない。減らすのは送る時）。
+   */
+  recipientCap?: number;
+  /** 上限付きの照会で数えた友だち数（届かない人数を承認の画面に出すため）。 */
+  friendCount?: number;
   /** ok=false の理由（平易な日本語・PII 非記載）。 */
   reason?: string;
 }
@@ -834,6 +844,11 @@ export interface DeliveryLedgerQueryResult {
 export async function runDeliveryLedgerQuery(
   env: Env,
   pageId: string,
+  /**
+   * 上限付きの全員配信の上限（任意・2026-10-29）。指定すると audienceCount は送信経路と同じ
+   * resolver で数えた min(上限, 友だち数)。route が 1 以上の整数であることを確かめてから渡す。
+   */
+  recipientCap?: number,
 ): Promise<DeliveryLedgerQueryResult> {
   const monthKey = currentLineMonth();
   const targetEnv: "prod" | "test" = env.DELIVERY_TARGET_ENV === "prod" ? "prod" : "test";
@@ -908,13 +923,18 @@ export async function runDeliveryLedgerQuery(
   // (2) 指定行の配信対象人数（送信経路と同じ解決）。
   let audienceCount: number | null = null;
   let audienceName: string | null = null;
+  let friendCount: number | undefined;
   try {
     const request = createNotionRequest(env);
     const page = await fetchDeliveryPage(request, pageId);
-    const audience = parseAudience(page.audienceRaw);
-    if (!audience) {
+    const parsed = parseAudience(page.audienceRaw);
+    const capped = parsed ? applyRecipientCap(parsed, recipientCap) : null;
+    if (!parsed) {
       reasons.push("配信対象が空/未知（fail-closed）");
-    } else {
+    } else if (capped && !capped.ok) {
+      reasons.push(`上限付きの配信として数えられない: ${capped.reason}`);
+    } else if (capped && capped.ok) {
+      const audience = capped.spec;
       audienceName = audienceLabel(audience);
       const targetDeps = buildTargetDeps(
         env,
@@ -926,6 +946,7 @@ export async function runDeliveryLedgerQuery(
         reasons.push(`対象解決失敗: ${targets.reason}`);
       } else {
         audienceCount = targets.estimatedRecipients;
+        if (targets.kind === "narrowcast") friendCount = targets.friendCount;
       }
     }
   } catch (err) {
@@ -940,6 +961,8 @@ export async function runDeliveryLedgerQuery(
     ledgerRemaining,
     audienceCount,
     audience: audienceName,
+    ...(recipientCap !== undefined ? { recipientCap } : {}),
+    ...(friendCount !== undefined ? { friendCount } : {}),
     reason: reasons.length > 0 ? reasons.join(" / ") : undefined,
   };
 }
