@@ -70,6 +70,19 @@ export type ResolvedTargets =
       batches: string[][];
       estimatedRecipients: number;
     }
+  | {
+      /**
+       * 上限付きの全員配信（narrowcast・宛先指定なし）。受信者 ID は持たない（LINE が友だち全員から
+       * 無作為に選ぶ）。maxRecipients = min(承認した上限, 友だち数)。送る時点の台帳の残りでさらに
+       * 減らすのは send-one の残枠の門（ここでは台帳を読まない）。
+       */
+      kind: "narrowcast";
+      maxRecipients: number;
+      /** = maxRecipients（人数の門・承認スナップショットはこの数で見る）。 */
+      estimatedRecipients: number;
+      /** 数えた友だち数（記録・表示用。届かない人数 = friendCount − 送った数）。 */
+      friendCount: number;
+    }
   | { kind: "error"; reason: string };
 
 // ---------------------------------------------------------------------------
@@ -233,6 +246,7 @@ export function parseAllowlist(raw: string | null | undefined): string[] {
 /**
  * AudienceSpec を実対象へ解決する。
  * - all      → broadcast（見積のみ。null なら error＝ガードに載せられないため fail-closed）
+ * - all + 上限（maxRecipients）→ narrowcast（宛先指定なし・max = min(上限, 友だち数)・2026-10-29）
  * - persona  → multicast（除外・重複排除・500 バッチ分割・件数）
  */
 export async function resolveTargets(
@@ -257,6 +271,21 @@ export async function resolveTargets(
         kind: "error",
         reason:
           "broadcast の想定受信者数が未設定/不正（fail-closed。LINE_BROADCAST_ESTIMATED_RECIPIENTS_* を設定）",
+      };
+    }
+    if (audience.maxRecipients !== undefined) {
+      // 上限付き（2026-10-29）: narrowcast で友だち全員から LINE が無作為に選ぶ。
+      //   送る数 = min(上限, 友だち数)。上限が不正なら送り口を作らない（fail-closed）。
+      const cap = audience.maxRecipients;
+      if (!Number.isSafeInteger(cap) || cap < 1) {
+        return { kind: "error", reason: `上限が不正（1 以上の整数が必要）: ${cap}` };
+      }
+      const max = Math.min(cap, estimate);
+      return {
+        kind: "narrowcast",
+        maxRecipients: max,
+        estimatedRecipients: max,
+        friendCount: estimate,
       };
     }
     return { kind: "broadcast", estimatedRecipients: estimate };

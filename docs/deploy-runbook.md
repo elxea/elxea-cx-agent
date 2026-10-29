@@ -504,7 +504,25 @@ npx wrangler versions deploy <version-id>@<percent> <current-version-id>@<percen
 
 ## LINE配信の運用（送信条件 / env分離 / テスト配信）
 
-> **2026-09-22 変更（段1-A）: 「全件送る口」を撤去し、送信は 1 件指定だけになった。**
+> **2026-10-29追加（上限付きの全員配信 = narrowcast）**
+>
+> - 配信対象「全員」に上限（`recipientCap`）が付いたときだけ、送り口をbroadcastではなく
+>   narrowcast（宛先指定なし・`limit.max` + `upToRemainingQuota=true`）にする。
+>   LINEが友だち全員から**無作為に**選ぶ。誰に届くかは選べない。上限なしの回は今のまま（broadcast・全部か無しか）。
+> - 送る数 = 承認した上限・送る時点の台帳の残り・友だち数のいちばん小さい数（残り0は送らない）。
+>   上限は指紋に入る（`"all:max=<N>"`）。承認と違う上限・上限なしで来たら `fingerprint_mismatch` で送らない。
+>   区分・社内に上限が付いたら `recipient_cap_invalid`。壊れた上限は400。
+> - 上限はMac側の運用者が依頼を起動するときの `LINE_RECIPIENT_CAP` からだけ来る
+>   （載せる順番・戻し方・送信後の確かめの正本はMac側の設計メモ
+>   `~/.config/admin-pipeline/docs/line-recipient-cap-20261029/design.md` の §7）。
+> - **送信のあとの確かめ（運用者）**: narrowcastは受け付けた後に非同期で送られる。send_resultの `requestId` で
+>   14日以内にLINEの「narrowcastの進み具合」の口（GET・`progress/narrowcast?requestId=<requestId>`）を読み
+>   （読むだけ）、phase=failedなら配信DBの行（Sentのまま）と台帳を手で直す。実際に届いた数は今ある後追いの補正
+>   （insight/message/event）でも台帳に入る。
+> - **戻したとき**: 古い本体（c9deeb7）は上限を知らないので、上限付きの予約は指紋 `"all"` ≠ `"all:max=N"` で
+>   `fingerprint_mismatch` になり、送らない側に倒れる。
+
+> **2026-09-22変更（段1-A）: 「全件送る口」を撤去し、送信は1件指定だけになった。**
 >
 > - 送信口は **`POST /api/delivery/send-one` のみ**。旧 `POST /api/delivery/run`（Approved を
 >   全件走査して送る）と `runOnDemandDelivery` / `runDeliveryOnce` は **コードから削除**した

@@ -43,6 +43,7 @@ import {
   approveDeliveryRow,
 } from "./lib/delivery-runtime";
 import { httpStatusFor, type SendOneRequest } from "./lib/delivery-send-one";
+import { parseRecipientCap } from "./lib/delivery-audience";
 import {
   httpStatusForApprove,
   type ApproveRequest,
@@ -742,13 +743,18 @@ app.post("/api/delivery/pin", async (c) => {
   }
 
   const body = await c.req
-    .json<{ pageId?: string }>()
-    .catch(() => ({}) as { pageId?: string });
+    .json<{ pageId?: string; recipientCap?: unknown }>()
+    .catch(() => ({}) as { pageId?: string; recipientCap?: unknown });
   if (!body.pageId || typeof body.pageId !== "string") {
     return c.json({ error: "pageId is required" }, 400);
   }
+  // 上限付きの全員配信（任意・2026-10-29）。不正な値は黙って上限なしに倒さず 400。
+  const pinCap = parseRecipientCap(body.recipientCap);
+  if (!pinCap.ok) {
+    return c.json({ status: "rejected", code: "bad_request", reason: pinCap.reason }, 400);
+  }
 
-  const result = await pinDeliveryApproval(c.env, body.pageId).catch((err) => ({
+  const result = await pinDeliveryApproval(c.env, body.pageId, pinCap.cap).catch((err) => ({
     ok: false as const,
     retryable: true as const,
     code: "row_fetch_failed" as const,
@@ -940,7 +946,13 @@ app.get("/api/delivery/ledger", async (c) => {
     }
   }
 
-  const result = await runDeliveryLedgerQuery(c.env, pageId).catch((err) => ({
+  // 上限付きの全員配信（任意・2026-10-29）。不正な値は黙って上限なしに倒さず 400。
+  const ledgerCap = parseRecipientCap(c.req.query("recipientCap"));
+  if (!ledgerCap.ok) {
+    return c.json({ error: "recipientCap must be a positive integer", reason: ledgerCap.reason }, 400);
+  }
+
+  const result = await runDeliveryLedgerQuery(c.env, pageId, ledgerCap.cap).catch((err) => ({
     ok: false as const,
     monthKey: "",
     freeTierCap: 0,

@@ -225,6 +225,39 @@ export interface LineSender {
     /** 同上（`X-Line-Retry-Key`）。全試行で同一の鍵を使う。 */
     retryKey?: string,
   ): Promise<SendOutcome>;
+  /**
+   * 上限付きの全員配信（narrowcast・宛先指定なし・2026-10-29）。
+   * 送る中身は `buildNarrowcastBody` だけ（recipient / filter / forbidPartialDelivery を付けない）。
+   * LINE が友だち全員から無作為に maxRecipients 人まで選ぶ。customAggregationUnits は付けない
+   * （narrowcast の要求の欄に無い）。
+   *
+   * 任意のメソッドにしているのは、既存の fake（broadcast / multicast だけを持つ）を壊さないため。
+   * 無い sender で narrowcast が要る配信は、送信側が送らずに止める（fail-closed）。
+   */
+  narrowcast?(
+    messages: LineMessage[],
+    maxRecipients: number,
+    /** 同上（`X-Line-Retry-Key`）。全試行で同一の鍵を使う。 */
+    retryKey?: string,
+  ): Promise<SendOutcome>;
+}
+
+/** narrowcast の送信先 URL（LINE Messaging API）。 */
+export const LINE_NARROWCAST_URL = "https://api.line.me/v2/bot/message/narrowcast";
+
+/**
+ * narrowcast の要求の中身（純粋）。**宛先指定なし**（recipient を省くと友だち全員が対象）で、
+ * `limit.max` と `limit.upToRemainingQuota=true` の両方を付ける:
+ *   - max: こちらの台帳の残り（安全の余り 10 通を残した数）以下にするための上限。
+ *   - upToRemainingQuota: LINE 側が見積もる今月の残りも超えないための二重の守り。
+ * forbidPartialDelivery は付けない（付けると上限を超える対象で配信全体が取り消される）。
+ * 参照: https://developers.line.biz/en/reference/messaging-api/#send-narrowcast-message
+ */
+export function buildNarrowcastBody(
+  messages: LineMessage[],
+  maxRecipients: number,
+): { messages: LineMessage[]; limit: { max: number; upToRemainingQuota: true } } {
+  return { messages, limit: { max: maxRecipients, upToRemainingQuota: true } };
 }
 
 /**
@@ -441,6 +474,69 @@ export function createLineSender(channel: DeliveryChannel): LineSender {
         };
       }
     },
+
+    async narrowcast(messages, maxRecipients, retryKey) {
+      // 上限付きの全員配信（2026-10-29）。宛先指定なし + limit.max + upToRemainingQuota=true。
+      //   応答は 202 + 空の JSON（送信は LINE の裏で非同期に進む）。成功の根拠は
+      //   x-line-request-id（無ければ呼び出し側が「結果不明」に倒す・N-15）。
+      //   deliveredRecipients は「LINE に頼んだ上限」で、実際に届いた数ではない。実数は
+      //   送信後に insight/message/event（narrowcast 対応）で台帳を直す（broadcast-reconcile.ts）。
+      if (!Number.isSafeInteger(maxRecipients) || maxRecipients < 1) {
+        return {
+          ok: false,
+          deliveredRecipients: 0,
+          partial: false,
+          error: `narrowcast の上限が不正（1 以上の整数が必要）: ${maxRecipients}`,
+        };
+      }
+      try {
+        const res = await fetch(LINE_NARROWCAST_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeader,
+            ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
+          },
+          body: JSON.stringify(buildNarrowcastBody(messages, maxRecipients)),
+        });
+        if (res.ok) {
+          const requestId = requestIdFrom(res) ?? undefined;
+          return {
+            ok: true,
+            deliveredRecipients: maxRecipients,
+            partial: false,
+            requestId,
+            requestIds: requestId ? [requestId] : [],
+          };
+        }
+        // 409 + x-line-accepted-request-id = 同じ再試行キーの要求が既に受理済み（= 届いている）。
+        const accepted = acceptedRequestIdFrom(res);
+        if (accepted) {
+          return {
+            ok: true,
+            deliveredRecipients: maxRecipients,
+            partial: false,
+            requestId: accepted,
+            requestIds: [accepted],
+            alreadyAccepted: true,
+          };
+        }
+        const t = await res.text().catch(() => "unknown");
+        return {
+          ok: false,
+          deliveredRecipients: 0,
+          partial: false,
+          error: `narrowcast ${res.status}: ${t.slice(0, 120)}`,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          deliveredRecipients: 0,
+          partial: false,
+          error: `narrowcast exception: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    },
   };
 }
 
@@ -460,6 +556,10 @@ export const noopSender: LineSender = {
     );
     return { ok: true, deliveredRecipients: estimatedRecipients, partial: false };
   },
+  async narrowcast(_messages, maxRecipients) {
+    console.log(`[delivery:dry-run] narrowcast skipped (max ${maxRecipients} recipients)`);
+    return { ok: true, deliveredRecipients: maxRecipients, partial: false };
+  },
 };
 
 /** テスト用の記録 sender。呼び出しを記録し、ネットワークに触れない。 */
@@ -467,14 +567,14 @@ export function createRecordingSender(
   outcome?: Partial<SendOutcome>,
 ): LineSender & {
   calls: Array<{
-    kind: "multicast" | "broadcast";
+    kind: "multicast" | "broadcast" | "narrowcast";
     recipients: number;
     aggregationUnit?: string;
     retryKey?: string;
   }>;
 } {
   const calls: Array<{
-    kind: "multicast" | "broadcast";
+    kind: "multicast" | "broadcast" | "narrowcast";
     recipients: number;
     aggregationUnit?: string;
     retryKey?: string;
@@ -504,6 +604,18 @@ export function createRecordingSender(
       return {
         ok: outcome?.ok ?? true,
         deliveredRecipients: outcome?.deliveredRecipients ?? estimatedRecipients,
+        partial: outcome?.partial ?? false,
+        error: outcome?.error,
+        requestId: outcome?.requestId,
+        requestIds: outcome?.requestIds,
+        alreadyAccepted: outcome?.alreadyAccepted,
+      };
+    },
+    async narrowcast(_messages, maxRecipients, retryKey) {
+      calls.push({ kind: "narrowcast", recipients: maxRecipients, retryKey });
+      return {
+        ok: outcome?.ok ?? true,
+        deliveredRecipients: outcome?.deliveredRecipients ?? maxRecipients,
         partial: outcome?.partial ?? false,
         error: outcome?.error,
         requestId: outcome?.requestId,

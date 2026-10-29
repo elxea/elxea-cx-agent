@@ -28,7 +28,18 @@ import type { PersonaType } from "./firestore";
  *   したがって parseAudience が返す時点の userIds は空配列プレースホルダ。
  */
 export type AudienceSpec =
-  | { kind: "all" }
+  | {
+      kind: "all";
+      /**
+       * 上限付きの全員配信（2026-10-29）。指定すると送り口は broadcast ではなく
+       * narrowcast（宛先指定なし = 友だち全員から LINE が無作為に選ぶ）になり、送る人数は
+       * この値・送る時点の台帳の残り・友だち数のいちばん小さい数に収まる。
+       * Notion の「配信対象」select には持たせない（欄を変えない）。運用者が依頼を起動するときの
+       * 指定（Mac の LINE_RECIPIENT_CAP）が pin / approve / ledger / send-one の要求で渡り、
+       * `applyRecipientCap` でここに載る。未指定は従来どおりの全員 broadcast（挙動を変えない）。
+       */
+      maxRecipients?: number;
+    }
   | { kind: "persona"; persona: PersonaType }
   | { kind: "allowlist"; userIds: string[] };
 
@@ -81,9 +92,62 @@ export function parseAudience(
  * 未知・空の配信対象は `parseAudience` が null を返して手前で止まるので、ここには来ない。
  */
 export function audienceFingerprintKey(spec: AudienceSpec): string {
-  if (spec.kind === "all") return "all";
+  if (spec.kind === "all") {
+    // 上限付きは上限の値まで指紋に入れる（承認した上限が後で変わったら送らずに止まる）。
+    // 上限なしは従来どおり "all"（既存の pin の指紋を変えない）。
+    return spec.maxRecipients === undefined ? "all" : `all:max=${spec.maxRecipients}`;
+  }
   if (spec.kind === "allowlist") return "allowlist";
   return `persona:${spec.persona}`;
+}
+
+/** 上限の値の検証結果。 */
+export type RecipientCapParse =
+  | { ok: true; cap: number | undefined }
+  | { ok: false; reason: string };
+
+/**
+ * 要求に載ってきた上限（`recipientCap`）を読む（純粋・fail-closed）。
+ * 未指定（undefined / null）は「上限なし」。1 以上の整数（数か数字だけの文字列）だけを受け、
+ * それ以外（0・負・小数・文字・真偽値）は拒否する。黙って上限なしに倒さない。
+ */
+export function parseRecipientCap(raw: unknown): RecipientCapParse {
+  if (raw === undefined || raw === null) return { ok: true, cap: undefined };
+  let n: number;
+  if (typeof raw === "number") {
+    n = raw;
+  } else if (typeof raw === "string" && /^[0-9]+$/.test(raw.trim())) {
+    n = Number.parseInt(raw.trim(), 10);
+  } else {
+    return { ok: false, reason: `上限 (recipientCap) が数ではない: ${JSON.stringify(raw)}` };
+  }
+  if (!Number.isSafeInteger(n) || n < 1) {
+    return { ok: false, reason: `上限 (recipientCap) は 1 以上の整数: ${JSON.stringify(raw)}` };
+  }
+  return { ok: true, cap: n };
+}
+
+/**
+ * 配信対象に上限を載せる（純粋・fail-closed）。
+ * - 上限なし → そのまま返す（従来の挙動）
+ * - 上限あり × 全員 → `{ kind: "all", maxRecipients }`
+ * - 上限あり × 区分・社内 → 拒否（上限付きは全員の narrowcast だけ。区分を無作為に削らない）
+ */
+export function applyRecipientCap(
+  spec: AudienceSpec,
+  cap: number | undefined,
+): { ok: true; spec: AudienceSpec } | { ok: false; reason: string } {
+  if (cap === undefined) return { ok: true, spec };
+  if (spec.kind !== "all") {
+    return {
+      ok: false,
+      reason: `上限付きの配信は「全員」だけ（配信対象=${audienceLabel(spec)} に上限は付けられない）`,
+    };
+  }
+  if (!Number.isSafeInteger(cap) || cap < 1) {
+    return { ok: false, reason: `上限は 1 以上の整数: ${cap}` };
+  }
+  return { ok: true, spec: { kind: "all", maxRecipients: cap } };
 }
 
 /** ペルソナ enum を日本語ラベルに戻す（ログ・表示用）。 */
@@ -93,7 +157,11 @@ export function personaToJp(persona: PersonaType): string {
 
 /** AudienceSpec を人間可読ラベルに（結果書戻し・ログ用）。 */
 export function audienceLabel(spec: AudienceSpec): string {
-  if (spec.kind === "all") return AUDIENCE_LABEL_ALL;
+  if (spec.kind === "all") {
+    return spec.maxRecipients === undefined
+      ? AUDIENCE_LABEL_ALL
+      : `${AUDIENCE_LABEL_ALL}（上限${spec.maxRecipients}・無作為）`;
+  }
   if (spec.kind === "allowlist") return AUDIENCE_LABEL_INTERNAL;
   return personaToJp(spec.persona);
 }

@@ -33,6 +33,8 @@
 
 import {
   parseAudience,
+  parseRecipientCap,
+  applyRecipientCap,
   audienceFingerprintKey,
   type AudienceSpec,
 } from "./delivery-audience";
@@ -54,6 +56,11 @@ import {
 export interface PinRequest {
   /** 配信DB（配信コンテンツ）の行 id。 */
   pageId: string;
+  /**
+   * 上限付きの全員配信の上限（2026-10-29・任意）。指定すると指紋の配信対象が "all:max=<N>" になり、
+   * 人数は min(上限, 友だち数) で数える。配信対象が「全員」でなければ拒否する。
+   */
+  recipientCap?: number;
 }
 
 /**
@@ -70,6 +77,8 @@ export interface ApproveRequest {
     approvedEditorEmail: string;
     approvedEditedTime: string;
   };
+  /** pin と同じ上限（任意）。pin と違う値なら指紋が合わず承認しない。 */
+  recipientCap?: number;
 }
 
 /** pin / approve の機械可読な理由コード。 */
@@ -83,6 +92,7 @@ export type DeliveryApproveCode =
   | "row_already_approved"
   | "pin_not_allowed_in_status"
   | "audience_unknown"
+  | "recipient_cap_invalid"
   | "message_invalid"
   | "image_blocked"
   | "image_config_invalid"
@@ -174,15 +184,25 @@ type ContentCheck =
   | { ok: true; audience: AudienceSpec; format: "text" | "image" }
   | { ok: false; code: DeliveryApproveCode; reason: string };
 
-function validateContent(page: DeliveryPage, imageUrls: string[]): ContentCheck {
-  const audience = parseAudience(page.audienceRaw);
-  if (!audience) {
+function validateContent(
+  page: DeliveryPage,
+  imageUrls: string[],
+  recipientCap?: number,
+): ContentCheck {
+  const parsed = parseAudience(page.audienceRaw);
+  if (!parsed) {
     return {
       ok: false,
       code: "audience_unknown",
       reason: "配信対象が空/未知（fail-closed）",
     };
   }
+  // 上限付きの全員配信（2026-10-29）。上限は「全員」にだけ付く。区分・社内に付いたら拒否する。
+  const capped = applyRecipientCap(parsed, recipientCap);
+  if (!capped.ok) {
+    return { ok: false, code: "recipient_cap_invalid", reason: capped.reason };
+  }
+  const audience = capped.spec;
   if (page.format !== "text" && page.format !== "image") {
     return { ok: false, code: "message_invalid", reason: "形式が未設定/未知" };
   }
@@ -224,6 +244,8 @@ export async function pinDeliveryContent(
   if (typeof req?.pageId !== "string" || req.pageId.trim().length === 0) {
     return reject("bad_request", "pageId が必須");
   }
+  const capParsed = parseRecipientCap(req?.recipientCap);
+  if (!capParsed.ok) return reject("bad_request", capParsed.reason);
 
   let page: DeliveryPage;
   try {
@@ -263,7 +285,7 @@ export async function pinDeliveryContent(
     r2Urls = ingest.urls;
   }
 
-  const content = validateContent(page, r2Urls);
+  const content = validateContent(page, r2Urls, capParsed.cap);
   if (!content.ok) {
     await deps.repo.writeError(req.pageId, content.reason).catch(() => {});
     return reject(content.code, content.reason);
@@ -344,6 +366,8 @@ export async function approveDelivery(
     return reject("bad_request", "approvalRef.approvedEditorEmail が必須");
   if (!nonEmpty(ref.approvedEditedTime))
     return reject("bad_request", "approvalRef.approvedEditedTime が必須");
+  const capParsed = parseRecipientCap(req?.recipientCap);
+  if (!capParsed.ok) return reject("bad_request", capParsed.reason);
 
   // (a) 配信DB行。
   let page: DeliveryPage;
@@ -397,7 +421,7 @@ export async function approveDelivery(
 
   // (d) 指紋照合。pin 後に本文・画像・配信対象が変わっていたら承認しない。
   const imageUrls = deps.imageUrlsFor(page);
-  const content = validateContent(page, imageUrls);
+  const content = validateContent(page, imageUrls, capParsed.cap);
   if (!content.ok) {
     await deps.repo.writeError(req.pageId, content.reason).catch(() => {});
     return reject(content.code, content.reason);
