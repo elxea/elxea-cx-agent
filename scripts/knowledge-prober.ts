@@ -22,6 +22,9 @@
  *   (SLACK_WEBHOOK_URL は置かない。2026-10-09 に Slack の知らせをやめた。無ければ知らせを飛ばす)
  */
 
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import dotenv from "dotenv";
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -46,6 +49,7 @@ import {
 } from "../src/prober/types";
 import {
   analyzeAndCreateProposals,
+  companyIdFromMapping,
   type CreatedTask,
 } from "../src/prober/improvement-analyzer";
 
@@ -684,10 +688,24 @@ async function main(): Promise<void> {
   let phase4Tasks: CreatedTask[] = [];
   if (!isDryRun && NOTION_TOKEN) {
     try {
+      // 会社の行の id は ~/.claude/config/notion-mapping.json の companies.elxea.page_id (ID-10588)。
+      // 読めないときは Phase 4 (Review 行を作る段) だけを止め、行は作らない (符号は下の catch で出る)
+      const mappingFile =
+        process.env.NOTION_MAPPING_FILE ||
+        join(homedir(), ".claude/config/notion-mapping.json");
+      let mappingText: string;
+      try {
+        mappingText = readFileSync(mappingFile, "utf-8");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? "Error";
+        throw new Error(`mapping-unreadable:elxea:${code}`);
+      }
+      const companyId = companyIdFromMapping(mappingText, "elxea");
       phase4Tasks = await analyzeAndCreateProposals(
         supabase,
         NOTION_TOKEN,
         allResults,
+        companyId,
       );
       if (phase4Tasks.length > 0) {
         console.log(`\n[phase4] Review tasks created:`);
