@@ -93,8 +93,33 @@ const DEDUPE_WINDOW_DAYS = 7;
 /** Project ID: elxea CX Agent Development */
 const PROJECT_ID = "31370c9d-064c-80dc-8750-d9ac7c27a760";
 
-/** Company ID: elxea */
-const COMPANY_ID = "8a40a27223f249619f541e707f3ae851";
+/**
+ * Company (会社の行) の id は写さない。正本は ~/.claude/config/notion-mapping.json の
+ * companies.<org>.page_id (ID-10552 / ID-10588)。ファイルを開くのは呼ぶ側 (scripts/knowledge-prober.ts) で、
+ * ここは文字列を解くだけ (src/ に node:fs を入れない)。符号は mapping-unreadable:<org>:<型> /
+ * mapping-empty:<org> / mapping-bad-shape:<org> (~/.claude/scripts/task-hygiene/task-reconcile.py と同じ形)。
+ */
+const COMPANY_PAGE_ID_RE =
+  /^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/;
+
+export function companyIdFromMapping(mappingText: string, org: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(mappingText);
+  } catch (err) {
+    const type = err instanceof Error ? err.name : typeof err;
+    throw new Error(`mapping-unreadable:${org}:${type}`);
+  }
+  const pick = (o: unknown, k: string): unknown =>
+    o !== null && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined;
+  const v = pick(pick(pick(parsed, "companies"), org), "page_id");
+  if (v === undefined) throw new Error(`mapping-unreadable:${org}:KeyError`);
+  if (typeof v !== "string") throw new Error(`mapping-bad-shape:${org}`);
+  const id = v.trim();
+  if (!id) throw new Error(`mapping-empty:${org}`);
+  if (!COMPANY_PAGE_ID_RE.test(id)) throw new Error(`mapping-bad-shape:${org}`);
+  return id;
+}
 
 /** Assignee: Boss */
 const ASSIGNEE_BOSS_ID = "31b70c9d-064c-814b-a39f-f2dc9a88de24";
@@ -505,6 +530,7 @@ function getNextMondayNoonJST(): string {
 async function createReviewTask(
   notionToken: string,
   issue: DetectedIssue,
+  companyId: string,
 ): Promise<string | undefined> {
   const dueDate = getNextMondayNoonJST();
 
@@ -535,7 +561,7 @@ async function createReviewTask(
       relation: [{ id: PROJECT_ID }],
     },
     Company: {
-      relation: [{ id: COMPANY_ID }],
+      relation: [{ id: companyId }],
     },
     "Assignee for Task": {
       relation: [{ id: ASSIGNEE_BOSS_ID }],
@@ -596,6 +622,7 @@ export async function analyzeAndCreateProposals(
   supabase: SupabaseClient,
   notionToken: string,
   results: ProbeResultForAnalysis[],
+  companyId: string,
 ): Promise<CreatedTask[]> {
   console.log("\n=== Phase 4: Improvement Proposal Analysis ===");
 
@@ -655,7 +682,7 @@ export async function analyzeAndCreateProposals(
 
     // Create task
     console.log(`[phase4] Creating task: ${issue.summary}`);
-    const pageId = await createReviewTask(notionToken, issue);
+    const pageId = await createReviewTask(notionToken, issue, companyId);
 
     if (pageId) {
       console.log(`[phase4] Task created: ${pageId}`);
